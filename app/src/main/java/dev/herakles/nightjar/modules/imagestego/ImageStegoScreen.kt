@@ -1,0 +1,1477 @@
+package dev.herakles.nightjar.modules.imagestego
+
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.CovertCarrier
+import dev.herakles.nightjar.CovertDetector
+import dev.herakles.nightjar.DebugProbe
+import dev.herakles.nightjar.DecodeFailure
+import dev.herakles.nightjar.DecodeResult
+import dev.herakles.nightjar.DetectionResult
+import dev.herakles.nightjar.ImageSteganalysis
+import dev.herakles.nightjar.ImageStegoCarrier
+import dev.herakles.nightjar.ModuleId
+import dev.herakles.nightjar.R
+import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.ui.theme.AccentSignal
+import dev.herakles.nightjar.ui.theme.BgBase
+import dev.herakles.nightjar.ui.theme.BorderDefault
+import dev.herakles.nightjar.ui.theme.FireflyCreated
+import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarTextPrimary
+import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.TextPrimary
+import dev.herakles.nightjar.ui.theme.TextSecondary
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * Task #13 — Module 1 (image steganography) real UI, replacing `ModuleStubScreen` for
+ * [dev.herakles.nightjar.picker.Module.IMAGE_STEGANOGRAPHY].
+ *
+ * Written against the [CovertCarrier]/[CovertDetector] interfaces only, the same discipline
+ * tasks #7 and #10 used for the modem and detector screens: no reference to the concrete
+ * `ImageStegoCarrier` (task #11) or `ImageSteganalysis` (task #12) anywhere in
+ * [ImageStegoScreen]/[ImageStegoContent]/[ImageStegoController] below. [jarCatchFlow] (task
+ * #12 Firefly Jar) further down this file is the one deliberate exception to that rule — see
+ * its own KDoc for why.
+ *
+ * One deliberate adaptation of that pattern: [CovertCarrier]<Bitmap> is bound to a specific
+ * cover image at construction time (`ImageStegoCarrier(coverImage: Bitmap)`'s KDoc — unlike
+ * the acoustic modem's stateless carrier). Since this screen lets the operator switch between
+ * two bundled cover images, it can't take a single fixed `CovertCarrier<Bitmap>` instance the
+ * way `AcousticModemScreen` takes a single `CovertCarrier<PcmAudio>`. It instead takes a
+ * factory function `(Bitmap) -> CovertCarrier<Bitmap>` — still zero references to the concrete
+ * class, just rebuilding an interface-typed instance per selected cover.
+ *
+ * Wiring note for whoever lands next: `MainActivity.NightjarApp()`'s `Screen.ModuleStub`
+ * branch currently routes `Module.IMAGE_STEGANOGRAPHY` to `ModuleStubScreen`. Swap that one
+ * case to call `ImageStegoScreen(carrierFactory = { cover -> ImageStegoCarrier(cover) },
+ * detector = ImageSteganalysis(), onBack = ...)` — the same one-line change #7/#10 left
+ * behind for the modem/detector screens.
+ *
+ * Two bundled sample cover images (task #11's `stego_cover_gradient.png` /
+ * `stego_cover_mosaic.png`, both 100x100, `res/drawable`) remain as quick-select options, and
+ * task #33 adds a third source: the modern Android Photo Picker
+ * (`ActivityResultContracts.PickVisualMedia`), so the operator can pick any image already on
+ * the device as the cover instead of only the two bundled samples. Photo Picker needs no
+ * `READ_MEDIA_IMAGES`/`READ_EXTERNAL_STORAGE` permission — it runs as a separate, system-owned
+ * picker UI and hands this app a short-lived, read-only grant on just the one Uri the operator
+ * chose — so there's no manifest permission or runtime permission prompt to add here.
+ *
+ * CRITICAL correctness note carried forward for whoever builds task #34 (save): a picked file
+ * can be any format a `ContentResolver` will decode (JPEG, WEBP, HEIF, PNG...), but LSB
+ * steganography only survives lossless pixel data. [decodePickedCoverImage] below decodes the
+ * picked Uri into a fully in-memory ARGB_8888 [Bitmap] exactly once and nothing downstream of
+ * that point (this screen, [ImageStegoController], [dev.herakles.nightjar.ImageStegoCarrier])
+ * ever touches the original Uri or file format again — [CoverSource.Picked] holds the decoded
+ * [Bitmap] itself, not a Uri. Task #34's save step must keep it that way: write the *bitmap*
+ * back out losslessly (e.g. PNG), never reopen/re-derive from the original picked Uri, which
+ * would risk a lossy JPEG round-trip that silently destroys the embedded payload.
+ */
+
+/** The two bundled sample cover images task #11 shipped in `res/drawable`. */
+enum class SampleCover(val label: String, val resId: Int) {
+    GRADIENT("gradient", R.drawable.stego_cover_gradient),
+    MOSAIC("mosaic", R.drawable.stego_cover_mosaic),
+}
+
+/**
+ * Where the active cover image came from: one of the two bundled [SampleCover]s, or a
+ * [Picked] image the operator chose from their device via the Photo Picker (task #33).
+ *
+ * [Picked] carries the already-decoded [Bitmap], not the source `Uri` — see the CRITICAL
+ * correctness note in this file's top KDoc. `Bitmap` has no structural `equals`, so
+ * `CoverSource` equality (and therefore Compose's `remember(coverSource)` change detection)
+ * falls back to reference identity, which is exactly right here: a new pick always produces a
+ * new `Bitmap` instance.
+ */
+sealed interface CoverSource {
+    data class Sample(val cover: SampleCover) : CoverSource
+    data class Picked(val bitmap: Bitmap) : CoverSource
+}
+
+/** Label for the cover-image preview's `contentDescription` — [SampleCover.label], or a
+ * generic label for a device-picked image (Photo Picker hands back a bare Uri, not a
+ * human-friendly file name, and resolving one via `MediaStore`/`DocumentsContract` is more
+ * plumbing than this preview description needs). */
+private val CoverSource.previewLabel: String
+    get() = when (this) {
+        is CoverSource.Sample -> cover.label
+        is CoverSource.Picked -> "device photo"
+    }
+
+/** The 3 one-shot actions this screen runs (embed, extract, check for hidden data), plus outcomes. */
+sealed interface StegoStatus {
+    data object Idle : StegoStatus
+    data object Embedding : StegoStatus
+    data object Extracting : StegoStatus
+    data object Analyzing : StegoStatus
+    data class Embedded(val payloadBytes: Int) : StegoStatus
+    data class ExtractedSuccess(val text: String) : StegoStatus
+    data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : StegoStatus
+    data class Analyzed(val result: DetectionResult) : StegoStatus
+}
+
+/**
+ * Outcome of task #34's save-as-PNG / share-via-MediaStore action pair. Deliberately kept
+ * separate from [StegoStatus] rather than folded into it: save/share are a secondary action
+ * pair that runs *after* a successful [ImageStegoController.embed] without needing to replace
+ * whatever [StegoStatus] is currently showing (an operator should be able to see "embedded 18
+ * bytes" and "saved to your photo gallery" at the same time, not have one overwrite the
+ * other). Mirrors the `isCoverLoading`/`coverLoadError` pair task #33 already used for a
+ * secondary, `Context`-dependent async action kept out of [ImageStegoController] (which stays
+ * free of any Android `Context` reference).
+ */
+sealed interface SaveStatus {
+    data object Idle : SaveStatus
+    data object Saving : SaveStatus
+
+    /**
+     * Task #36: split out from [Saving] so the status word matches which action the operator
+     * actually tapped — before this, tapping "share" still rendered "saving" the whole time the
+     * write ran, since both actions shared one state. [ImageStegoScreen]'s `onShare` runs the
+     * identical persist-as-PNG write [Saving] already covers; sharing only additionally opens
+     * the share sheet once that write finishes.
+     */
+    data object Sharing : SaveStatus
+    data class Saved(val uri: Uri) : SaveStatus
+    data class Failed(val message: String) : SaveStatus
+}
+
+/**
+ * Stateful root: owns the [ImageStegoController], the sample-cover selection, the payload
+ * text field, and bitmap decoding from resources. [ImageStegoContent] below is the
+ * pure/previewable UI (no side effects, no `Context`, no resource decoding).
+ */
+@Composable
+fun ImageStegoScreen(
+    carrierFactory: (Bitmap) -> CovertCarrier<Bitmap>,
+    detector: CovertDetector<Bitmap>,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val controller = remember(carrierFactory, detector) { ImageStegoController(carrierFactory, detector) }
+    DisposableEffect(controller) {
+        onDispose { controller.dispose() }
+    }
+
+    var coverSource: CoverSource by remember { mutableStateOf(CoverSource.Sample(SampleCover.GRADIENT)) }
+    var payloadText by remember { mutableStateOf("") }
+    var isCoverLoading by remember { mutableStateOf(false) }
+    var coverLoadError by remember { mutableStateOf<String?>(null) }
+    var saveStatus: SaveStatus by remember { mutableStateOf<SaveStatus>(SaveStatus.Idle) }
+
+    val pickCoverScope = rememberCoroutineScope()
+    val pickCoverImage = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult // operator backed out of the picker; keep current cover
+        isCoverLoading = true
+        coverLoadError = null
+        pickCoverScope.launch {
+            val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
+            isCoverLoading = false
+            if (decoded == null) {
+                coverLoadError = "couldn't load that image. try a different one."
+            } else {
+                coverSource = CoverSource.Picked(decoded)
+            }
+        }
+    }
+
+    val coverBitmap = remember(coverSource) {
+        when (val source = coverSource) {
+            is CoverSource.Sample -> BitmapFactory.decodeResource(context.resources, source.cover.resId)
+            is CoverSource.Picked -> source.bitmap
+        }
+    }
+    val maxPayloadBytes = remember(coverBitmap) { controller.maxPayloadBytesFor(coverBitmap) }
+
+    // Switching the cover (sample or freshly picked) resets the working image (and any
+    // embed/extract/check result) back to a clean start — a per-cover workflow needs this
+    // even though the modem/detector screens (single fixed carrier) never had to reset
+    // anything on select.
+    LaunchedEffect(coverBitmap) {
+        controller.selectCover(coverBitmap)
+    }
+
+    // Task #34: reset save/share status whenever the working image changes (fresh cover
+    // selection, or a fresh embed) — a stale "saved"/"couldn't save" readout pointing at a
+    // working image that's since moved on would mislead the operator.
+    LaunchedEffect(controller.workingBitmap) {
+        saveStatus = SaveStatus.Idle
+    }
+
+    val saveScope = rememberCoroutineScope()
+
+    suspend fun persistWorkingImageAsPng(bitmap: Bitmap): Result<Uri> =
+        withContext(Dispatchers.IO) { runCatching { saveBitmapAsPngToMediaStore(context, bitmap) } }
+
+    val onSave: () -> Unit = save@{
+        val bitmap = controller.workingBitmap
+        if (!controller.hasEmbeddedPayload || bitmap == null) return@save
+        saveStatus = SaveStatus.Saving
+        saveScope.launch {
+            saveStatus = persistWorkingImageAsPng(bitmap).fold(
+                onSuccess = { uri -> SaveStatus.Saved(uri) },
+                onFailure = { failure -> SaveStatus.Failed(failure.message ?: "couldn't save the image") },
+            )
+        }
+    }
+
+    val onShare: () -> Unit = share@{
+        val bitmap = controller.workingBitmap
+        if (!controller.hasEmbeddedPayload || bitmap == null) return@share
+        // Reuse an already-saved Uri for this working image rather than writing a second copy.
+        val alreadySavedUri = (saveStatus as? SaveStatus.Saved)?.uri
+        if (alreadySavedUri != null) {
+            context.startActivity(Intent.createChooser(buildPngShareIntent(alreadySavedUri), null))
+            return@share
+        }
+        saveStatus = SaveStatus.Sharing
+        saveScope.launch {
+            saveStatus = persistWorkingImageAsPng(bitmap).fold(
+                onSuccess = { uri ->
+                    context.startActivity(Intent.createChooser(buildPngShareIntent(uri), null))
+                    SaveStatus.Saved(uri)
+                },
+                onFailure = { failure -> SaveStatus.Failed(failure.message ?: "couldn't save the image to share") },
+            )
+        }
+    }
+
+    ImageStegoContent(
+        status = controller.status,
+        workingBitmap = controller.workingBitmap ?: coverBitmap,
+        coverSource = coverSource,
+        isCoverLoading = isCoverLoading,
+        coverLoadError = coverLoadError,
+        onSelectSample = { coverSource = CoverSource.Sample(it) },
+        onPickFromDevice = {
+            pickCoverImage.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
+        payloadText = payloadText,
+        onPayloadTextChange = { payloadText = it },
+        maxPayloadBytes = maxPayloadBytes,
+        onEmbed = { controller.embed(coverBitmap, payloadText.encodeToByteArray()) },
+        onExtract = { controller.extract(controller.workingBitmap ?: coverBitmap) },
+        onCheck = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+        saveStatus = saveStatus,
+        hasEmbeddedPayload = controller.hasEmbeddedPayload,
+        onSave = onSave,
+        onShare = onShare,
+        onBack = onBack,
+    )
+}
+
+/**
+ * Task #12 — jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the framed jar",
+ * [dev.herakles.nightjar.picker.JarRole.CREATION]), hosted by `JarDetailScreen` as its
+ * `moduleFlow` slot (design/screen-flow.md § Screen 7). `JarDetailScreen` already renders the
+ * "back to the shelf" row, the jar name/caption, and the firefly swarm above whatever this
+ * composable returns (architecture.md § 6), so this function renders only the
+ * catch/look-for-fireflies/peek-inside controls plus their result.
+ *
+ * A themed skin over the exact same [ImageStegoController]/[StegoStatus] state machine
+ * [ImageStegoScreen] above already defines — screen-flow.md § Screen 7: "does not reimplement
+ * embed/extract... logic, it re-presents it." Builds its own [ImageStegoController] wrapping the
+ * concrete [ImageStegoCarrier]/[ImageSteganalysis] pair directly: unlike [ImageStegoScreen],
+ * this function's call site (`catchFlowFor` in `JarCatchFlows.kt`, task #9) has a fixed
+ * `(dao, onExit)` signature with no carrier/detector injection point the way `MainActivity`'s
+ * technical-screen route has, so there's nowhere else for that wiring to live. Zero changes to
+ * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
+ *
+ * Three actions, softened per spec.md gate-13 / screen-flow.md § Screen 7's copy-mapping table:
+ *  - "catch a firefly" expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
+ *    Picker, no save/share; those stay technical-screen-only, per screen-flow.md's "what this
+ *    addition deliberately does not build") + payload field inline; confirming calls the same
+ *    [ImageStegoController.embed]. On [StegoStatus.Embedded], writes a
+ *    `FireflyRecord(direction = "CREATED")` — this app hid something.
+ *  - "look for fireflies" calls [ImageStegoController.extract] directly, no extra fields (same
+ *    wireframe). On [StegoStatus.ExtractedSuccess], writes a
+ *    `FireflyRecord(direction = "RECEIVED")` — this app found something someone else hid.
+ *  - "peek inside" is the existing "check for hidden data" verb ([ImageStegoController.analyze]),
+ *    included per gate-13 but writes NO [FireflyRecord]: a peek can find zero or nonzero hidden
+ *    data in *someone else's* photo, so it's an analysis verb, not a creation/reception event
+ *    this app itself performed — the same CREATED/RECEIVED-only contract [FireflyDao]'s KDoc
+ *    already draws.
+ *
+ * [onExit] is accepted (the `catchFlowFor` dispatcher signature every module implements) but
+ * deliberately unused here: screen-flow.md's Screen 7 wireframe gives this flow no exit
+ * affordance of its own — catch/look are inline-expanding sections on the *same*
+ * `JarDetailScreen`, not a new screen navigation ("no separate screen per action"), and
+ * `JarDetailScreen` already owns the one "back to the shelf" row that leaves this screen. Left
+ * as a deliberate, documented decision rather than inventing a second, redundant back
+ * affordance — worth a second look if that reading turns out wrong.
+ */
+@Composable
+fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+    val context = LocalContext.current
+    val controller = remember {
+        ImageStegoController(
+            carrierFactory = { cover -> ImageStegoCarrier(cover) },
+            detector = ImageSteganalysis(),
+        )
+    }
+    DisposableEffect(controller) { onDispose { controller.dispose() } }
+
+    var coverChoice by remember { mutableStateOf(SampleCover.GRADIENT) }
+    var payloadText by remember { mutableStateOf("") }
+    var catchExpanded by remember { mutableStateOf(false) }
+    var pendingCatchPreview by remember { mutableStateOf("") }
+
+    // Task #19 fix, layer 2: live testing showed encode()/decode() for this codec's tiny
+    // sample images complete fast enough (sub-frame) that `status` can cycle all the way back
+    // to idle-equivalent before a second, distinct click delivery lands — which means a
+    // status-transition guard alone (above/below) can't distinguish "one slow double-click"
+    // from "two fast legitimate clicks" if a second click genuinely arrives moments later.
+    // This time-based debounce is mechanism-agnostic: it rejects any second catch/look
+    // dispatch within 500ms of the last one, regardless of whether the duplicate delivery
+    // originates from Compose recomposition churn, the touch-input transport, or anything
+    // else — closing the gap the state-based guards can't.
+    var lastCatchDispatchAtMillis by remember { mutableStateOf(0L) }
+    fun debounceCatchDispatch(action: () -> Unit) {
+        val now = System.currentTimeMillis()
+        if (now - lastCatchDispatchAtMillis < 500L) return
+        lastCatchDispatchAtMillis = now
+        action()
+    }
+
+    val coverBitmap = remember(coverChoice) {
+        BitmapFactory.decodeResource(context.resources, coverChoice.resId)
+    }
+    val maxPayloadBytes = remember(coverBitmap) { controller.maxPayloadBytesFor(coverBitmap) }
+
+    LaunchedEffect(coverBitmap) { controller.selectCover(coverBitmap) }
+
+    // Task #22 fix (root cause, after task #19's and #21's fixes both failed to resolve the
+    // live-reproduced duplicate insert): `embed()` writes `status` twice in quick succession
+    // (Embedding, then Embedded(N) ~10ms later from the background `Dispatchers.Default`
+    // coroutine) — close enough together that Compose sometimes launches two *separate*
+    // `LaunchedEffect(controller.status)` coroutine instances back-to-back (one keyed on the
+    // Embedding transition, one on the following Embedded(N) transition) without the first
+    // one's cancellation actually stopping its body in time. Because the old code re-read the
+    // live `controller.status` property *inside* the effect body instead of using the value
+    // that triggered that specific instance, both instances ended up reading the *same* final
+    // Embedded(N) value — and raced on the shared `previousStatus` remembered state, both
+    // reading it as not-yet-Embedded before either wrote back, so both independently passed
+    // the transition guard and both called `dao.insert(...)`. Live-reproduced and confirmed via
+    // temporary logging: two effect firings, identical status object identity, both reading
+    // `previousStatus=Idle`, 31ms apart — the same signature as every prior duplicate-insert
+    // report. AcousticModemScreen.kt's `jarCatchFlow` never exhibited this bug because it
+    // captures `status` into a stable local *once* per recomposition and both keys the effect
+    // on and reads the body from that local — never a live re-read of the mutable property.
+    // Mirroring that exact pattern here (capture, then key + read from the capture) closes the
+    // gap: an effect instance can now only ever observe the value it was actually launched for.
+    val status = controller.status
+    var previousStatus: StegoStatus by remember { mutableStateOf(StegoStatus.Idle) }
+    LaunchedEffect(status) {
+        when {
+            status is StegoStatus.Embedded && previousStatus !is StegoStatus.Embedded -> dao.insert(
+                FireflyRecord(
+                    moduleId = Module.IMAGE_STEGANOGRAPHY.name,
+                    direction = "CREATED",
+                    timestampMillis = System.currentTimeMillis(),
+                    payloadSizeBytes = status.payloadBytes,
+                    technique = null,
+                    payloadPreview = pendingCatchPreview.take(40),
+                ),
+            )
+            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> dao.insert(
+                FireflyRecord(
+                    moduleId = Module.IMAGE_STEGANOGRAPHY.name,
+                    direction = "RECEIVED",
+                    timestampMillis = System.currentTimeMillis(),
+                    payloadSizeBytes = status.text.encodeToByteArray().size,
+                    technique = null,
+                    payloadPreview = status.text.take(40),
+                ),
+            )
+            else -> Unit // Idle/Embedding/Extracting/Analyzing/ExtractedFailure/Analyzed/repeat: no catch/spot event
+        }
+        previousStatus = status
+    }
+
+    JarImageStegoContent(
+        status = controller.status,
+        catchExpanded = catchExpanded,
+        onToggleCatchExpanded = { catchExpanded = !catchExpanded },
+        coverChoice = coverChoice,
+        onSelectCover = { coverChoice = it },
+        payloadText = payloadText,
+        onPayloadTextChange = { payloadText = it },
+        maxPayloadBytes = maxPayloadBytes,
+        onCatch = {
+            debounceCatchDispatch {
+                pendingCatchPreview = payloadText
+                controller.embed(coverBitmap, payloadText.encodeToByteArray())
+            }
+        },
+        onLookForFireflies = {
+            debounceCatchDispatch { controller.extract(controller.workingBitmap ?: coverBitmap) }
+        },
+        onPeekInside = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+    )
+}
+
+/**
+ * Pure UI for [jarCatchFlow]: no [FireflyDao], no `Context`/bitmap decoding, same
+ * stateful-root/pure-content split every screen in this app uses. Jar palette only
+ * ([JarTextPrimary]/[JarTextSecondary]/[FireflyCreated]/[FireflyReceived]) — never
+ * [TextPrimary]/[TextSecondary]/[AccentSignal], which belong to the technical surface this jar
+ * disguises (design/firefly-jar-identity.md § Palette). No cards, no borders, matching
+ * screen-flow.md § Screen 7's plain wireframe.
+ */
+@Composable
+private fun JarImageStegoContent(
+    status: StegoStatus,
+    catchExpanded: Boolean,
+    onToggleCatchExpanded: () -> Unit,
+    coverChoice: SampleCover,
+    onSelectCover: (SampleCover) -> Unit,
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    maxPayloadBytes: Int,
+    onCatch: () -> Unit,
+    onLookForFireflies: () -> Unit,
+    onPeekInside: () -> Unit,
+) {
+    val idleEquivalent = status is StegoStatus.Idle ||
+        status is StegoStatus.Embedded ||
+        status is StegoStatus.ExtractedSuccess ||
+        status is StegoStatus.ExtractedFailure ||
+        status is StegoStatus.Analyzed
+    val payloadBytes = payloadText.encodeToByteArray().size
+    val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column {
+            JarActionRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatchExpanded)
+            if (catchExpanded) {
+                Column(
+                    modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SampleCover.entries.forEach { cover ->
+                        JarCoverRow(
+                            label = cover.label,
+                            selected = coverChoice == cover,
+                            enabled = idleEquivalent,
+                            onClick = { onSelectCover(cover) },
+                        )
+                    }
+                    BasicTextField(
+                        value = payloadText,
+                        onValueChange = onPayloadTextChange,
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
+                        cursorBrush = SolidColor(JarTextPrimary),
+                        enabled = idleEquivalent,
+                        modifier = Modifier.fillMaxWidth(),
+                        decorationBox = { innerTextField ->
+                            if (payloadText.isEmpty()) {
+                                Text(
+                                    text = "what to hide",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = JarTextSecondary,
+                                )
+                            }
+                            innerTextField()
+                        },
+                    )
+                    Text(
+                        text = "$payloadBytes / $maxPayloadBytes bytes",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = JarTextSecondary,
+                    )
+                    JarActionRow(label = "catch", enabled = canCatch, onClick = onCatch)
+                }
+            }
+        }
+        JarActionRow(label = "look for fireflies", enabled = idleEquivalent, onClick = onLookForFireflies)
+        JarActionRow(label = "peek inside", enabled = idleEquivalent, onClick = onPeekInside)
+
+        JarStatusBlock(status = status)
+    }
+}
+
+@Composable
+private fun JarActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (enabled) JarTextPrimary else JarTextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun JarCoverRow(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) JarTextPrimary else JarTextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun JarStatusBlock(status: StegoStatus) {
+    when (status) {
+        is StegoStatus.Idle -> Unit // nothing running, nothing to report
+        is StegoStatus.Embedding -> JarStatusWord("catching")
+        is StegoStatus.Extracting -> JarStatusWord("looking")
+        is StegoStatus.Analyzing -> JarStatusWord("peeking")
+        is StegoStatus.Embedded -> {
+            val plural = if (status.payloadBytes == 1) "" else "s"
+            Text(
+                text = "you caught one — ${status.payloadBytes} byte$plural",
+                style = MaterialTheme.typography.bodyLarge,
+                color = FireflyCreated,
+            )
+        }
+        is StegoStatus.ExtractedSuccess -> Text(
+            text = status.text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = FireflyReceived,
+        )
+        is StegoStatus.ExtractedFailure -> Text(
+            text = jarExtractFailureMessage(status.reason),
+            style = MaterialTheme.typography.bodyLarge,
+            color = JarTextSecondary,
+        )
+        is StegoStatus.Analyzed -> JarAnalyzedBlock(result = status.result)
+    }
+}
+
+@Composable
+private fun JarStatusWord(word: String) {
+    Text(text = word, style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+}
+
+/** "peek inside"'s readout — confidence number kept (same "real data, not smoothed" discipline
+ *  every other status readout in this app follows), flagged/clear reuses screen-flow.md § Screen
+ *  7's detector copy mapping verbatim (same underlying "is something hidden here" concept), and
+ *  the raw chi-square [DetectionResult.detail] string is dropped rather than surfaced —
+ *  window/p-value jargon doesn't fit this surface's softened voice the way a byte count does. */
+@Composable
+private fun JarAnalyzedBlock(result: DetectionResult) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "${(result.confidence * 100).roundToInt()}%",
+            style = MaterialTheme.typography.displayLarge,
+            color = JarTextPrimary,
+        )
+        Text(
+            text = if (result.flagged) "something's out there" else "all quiet",
+            style = MaterialTheme.typography.labelLarge,
+            color = JarTextPrimary,
+        )
+        result.estimatedPayloadBytes?.let { bytes ->
+            Text(
+                text = "about $bytes bytes, near as we can tell",
+                style = MaterialTheme.typography.labelSmall,
+                color = JarTextSecondary,
+            )
+        }
+    }
+}
+
+/** screen-flow.md § Screen 7's copy-mapping table applied to [DecodeFailure] for "look for
+ *  fireflies" — same categories [extractFailureMessage] maps for the technical screen, softened
+ *  wording only, no new behavior. */
+private fun jarExtractFailureMessage(reason: DecodeFailure): String = when (reason) {
+    DecodeFailure.NO_PAYLOAD_FOUND -> "nothing's glowing in here right now."
+    DecodeFailure.HEADER_INVALID -> "that light doesn't look right — probably not one of yours."
+    DecodeFailure.PAYLOAD_TOO_LARGE -> "too big to fit in the jar."
+    DecodeFailure.UNRECOVERABLE_FEC -> "the light faded before it got here."
+    DecodeFailure.INTEGRITY_MISMATCH -> "it flickered wrong on the way — the message got scrambled."
+}
+
+/**
+ * Pure UI: no side effects, no bitmap decoding, no permission logic (Photo Picker needs none
+ * — see this file's top KDoc). Launching the Photo Picker itself is a side effect ([onBack]'s
+ * sibling callbacks — [onPickFromDevice] here), so it stays owned by [ImageStegoScreen]
+ * exactly like [onEmbed]/[onExtract]/[onCheck]; this composable only renders whatever
+ * [coverSource]/[isCoverLoading]/[coverLoadError] it's handed. Dense single column, no cards,
+ * no icons. As of Task #17,
+ * [AccentSignal] appears in exactly one place on this screen — the `flagged` word in
+ * `check for hidden data`'s readout, same as [dev.herakles.nightjar.modules.detector
+ * .DetectorContent]'s treatment (both surfaces are reporting the same underlying
+ * [dev.herakles.nightjar.CovertDetector] concept). Everything else — embed/extract
+ * status, the cover picker, the payload field — stays TextPrimary/TextSecondary only.
+ *
+ * Task #28: a one-line caption sits above the three action rows explaining what each of
+ * `embed`/`extract`/`check for hidden data` actually does — real feedback said a
+ * first-time user had no way to guess what the three verb buttons meant before tapping
+ * one. Placed once, above all three, rather than repeated per-row: the three actions
+ * read as one related group (they all operate on the same working image), so one
+ * shared caption reads as a sentence, not three fragments.
+ *
+ * Task #36: the action rows below the caption are now 2 clusters (embed/extract/check, then
+ * save/share) separated by spacing alone, since Task #34 grew that list from 3 rows to 5.
+ * [SaveStatus.Saving]/[SaveStatus.Sharing] are likewise now distinct — the status word under
+ * the action rows names the action the operator actually tapped instead of always reading
+ * "saving".
+ */
+@Composable
+fun ImageStegoContent(
+    status: StegoStatus,
+    workingBitmap: Bitmap,
+    coverSource: CoverSource,
+    isCoverLoading: Boolean,
+    coverLoadError: String?,
+    onSelectSample: (SampleCover) -> Unit,
+    onPickFromDevice: () -> Unit,
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    maxPayloadBytes: Int,
+    onEmbed: () -> Unit,
+    onExtract: () -> Unit,
+    onCheck: () -> Unit,
+    saveStatus: SaveStatus,
+    hasEmbeddedPayload: Boolean,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val idleEquivalent = (
+        status is StegoStatus.Idle ||
+            status is StegoStatus.Embedded ||
+            status is StegoStatus.ExtractedSuccess ||
+            status is StegoStatus.ExtractedFailure ||
+            status is StegoStatus.Analyzed
+        ) && !isCoverLoading && saveStatus !is SaveStatus.Saving && saveStatus !is SaveStatus.Sharing
+    val payloadBytes = payloadText.encodeToByteArray().size
+    val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+    // Task #34: save/share only unlock once embed() has actually produced a stego image for
+    // the currently selected cover (this file's top KDoc CRITICAL note + ImageStegoController
+    // .hasEmbeddedPayload's own KDoc).
+    val canSaveOrShare = idleEquivalent && hasEmbeddedPayload
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .height(48.dp)
+                .clickable { onBack() }
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = "back",
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(top = 56.dp, start = 24.dp, end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            Text(
+                text = "image steganography",
+                style = MaterialTheme.typography.displayLarge,
+                color = TextPrimary,
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "cover image",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = TextSecondary,
+                )
+                SampleCover.entries.forEach { cover ->
+                    CoverRow(
+                        label = cover.label,
+                        selected = (coverSource as? CoverSource.Sample)?.cover == cover,
+                        enabled = idleEquivalent,
+                        onClick = { onSelectSample(cover) },
+                    )
+                }
+                CoverRow(
+                    label = if (isCoverLoading) "device photo (loading)" else "device photo",
+                    selected = coverSource is CoverSource.Picked,
+                    enabled = idleEquivalent,
+                    onClick = onPickFromDevice,
+                )
+                coverLoadError?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                    )
+                }
+                Image(
+                    bitmap = workingBitmap.asImageBitmap(),
+                    contentDescription = "${coverSource.previewLabel} cover image preview",
+                    modifier = Modifier
+                        .size(96.dp)
+                        .border(width = 1.dp, color = BorderDefault),
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "payload",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = TextSecondary,
+                )
+                BasicTextField(
+                    value = payloadText,
+                    onValueChange = onPayloadTextChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimary),
+                    cursorBrush = SolidColor(TextPrimary),
+                    enabled = idleEquivalent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(width = 1.dp, color = BorderDefault)
+                        .padding(12.dp),
+                    decorationBox = { innerTextField ->
+                        if (payloadText.isEmpty()) {
+                            Text(
+                                text = "text to hide",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = TextSecondary,
+                            )
+                        }
+                        innerTextField()
+                    },
+                )
+                Text(
+                    text = "$payloadBytes / $maxPayloadBytes bytes",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+
+            Column {
+                Text(
+                    text = "embed hides text in the image, extract reads it back, " +
+                        "check scans for hidden data without extracting it. save/share unlock " +
+                        "after a successful embed and always write PNG, so the hidden data survives",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+                // Task #36: embed/extract/check (act on the working image directly) grouped
+                // separately from save/share (export the working image elsewhere) via spacing
+                // alone — 12dp between the two clusters, 0dp within one, matching
+                // AcousticModemScreen's own action-row grouping. This list grew from 3 rows
+                // (Task #13) to 5 (Task #34) and read as one undifferentiated stack.
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Column {
+                        ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
+                        ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
+                        ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
+                    }
+                    Column {
+                        ActionRow(label = "save as PNG", enabled = canSaveOrShare, onClick = onSave)
+                        ActionRow(label = "share", enabled = canSaveOrShare, onClick = onShare)
+                    }
+                }
+            }
+
+            StatusBlock(status = status)
+            SaveStatusBlock(status = saveStatus)
+        }
+    }
+}
+
+/** One selectable row in the cover-image list: a bundled [SampleCover] or the "device photo"
+ * Photo Picker trigger (task #33) — both render identically, so this one composable serves
+ * both. */
+@Composable
+private fun CoverRow(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (selected) TextPrimary else TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (enabled) TextPrimary else TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun StatusBlock(status: StegoStatus) {
+    when (status) {
+        is StegoStatus.Idle -> Unit // nothing running, nothing to report
+        is StegoStatus.Embedding -> StatusWord("embedding")
+        is StegoStatus.Extracting -> StatusWord("extracting")
+        is StegoStatus.Analyzing -> StatusWord("analyzing")
+        is StegoStatus.Embedded -> {
+            val plural = if (status.payloadBytes == 1) "" else "s"
+            Text(
+                text = "embedded ${status.payloadBytes} byte$plural into the working image",
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextPrimary,
+            )
+        }
+        is StegoStatus.ExtractedSuccess -> Text(
+            text = status.text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextPrimary,
+        )
+        is StegoStatus.ExtractedFailure -> Text(
+            text = extractFailureMessage(status.reason),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+    }
+}
+
+@Composable
+private fun StatusWord(word: String) {
+    Text(
+        text = word,
+        style = MaterialTheme.typography.labelLarge,
+        color = TextSecondary,
+    )
+}
+
+/**
+ * Task #34's secondary readout, rendered independently of [StatusBlock] — see [SaveStatus]'s
+ * KDoc for why the two stay separate. `labelSmall`/[TextSecondary] throughout, same
+ * "informational, not destructive" voice [extractFailureMessage] uses for a failed extract.
+ */
+@Composable
+private fun SaveStatusBlock(status: SaveStatus) {
+    when (status) {
+        is SaveStatus.Idle -> Unit
+        is SaveStatus.Saving -> StatusWord("saving")
+        is SaveStatus.Sharing -> StatusWord("sharing")
+        is SaveStatus.Saved -> Text(
+            text = "saved to your photo gallery as PNG",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary,
+        )
+        is SaveStatus.Failed -> Text(
+            text = "couldn't save: ${status.message}",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary,
+        )
+    }
+}
+
+/**
+ * Live readout for `check for hidden data` — same shape as `DetectorScreen`'s `ReadoutBlock`:
+ * confidence percentage (always TextPrimary), flagged/clear word ([AccentSignal] when flagged,
+ * TextSecondary when clear — Task #17), and the detector's own [DetectionResult.detail]/
+ * [DetectionResult.estimatedPayloadBytes] surfaced verbatim when present. That verbatim detail
+ * line (real chi-square window/run output, e.g. "sustained PoV-equalization run: 5/32
+ * windows...") is the one deliberate rough edge on this screen, the same move task #7/#10 made
+ * with the modem's FEC count and the detector's tone-grid note.
+ */
+@Composable
+private fun AnalyzedBlock(result: DetectionResult) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "${(result.confidence * 100).roundToInt()}%",
+            style = MaterialTheme.typography.displayLarge,
+            color = TextPrimary,
+        )
+        Text(
+            text = if (result.flagged) "flagged" else "clear",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (result.flagged) AccentSignal else TextSecondary,
+        )
+        result.detail?.let { detail ->
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        result.estimatedPayloadBytes?.let { bytes ->
+            Text(
+                text = "~$bytes bytes estimated",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+    }
+}
+
+/**
+ * Maps [DecodeFailure] to on-voice copy for `extract`: what's wrong, what to do about it, two
+ * sentences max (voice contract), no exclamation, no red danger color — a failed extract is
+ * informational, not destructive. Phrased for the image carrier rather than reusing the
+ * modem's acoustic-specific copy ("move the phones closer" doesn't apply here).
+ */
+private fun extractFailureMessage(reason: DecodeFailure): String = when (reason) {
+    DecodeFailure.NO_PAYLOAD_FOUND -> "no hidden payload found in this image."
+    DecodeFailure.HEADER_INVALID -> "header didn't check out. this image may not hold a nightjar payload."
+    DecodeFailure.PAYLOAD_TOO_LARGE -> "declared payload is too large for this image. frame rejected."
+    DecodeFailure.UNRECOVERABLE_FEC -> "too much data loss to recover."
+    DecodeFailure.INTEGRITY_MISMATCH -> "checksum didn't match. the payload was altered or corrupted."
+}
+
+/**
+ * Owns the [CovertCarrier]/[CovertDetector] round-trip work for this screen. Constructor
+ * takes only the interfaces plus a factory for building a [CovertCarrier]<Bitmap> bound to
+ * whichever cover image is active — no `ImageStegoCarrier`/`ImageSteganalysis` reference
+ * anywhere in this file, the same discipline `AcousticModemController`/`DetectorController`
+ * established for their respective interfaces.
+ *
+ * Not an `androidx.lifecycle.ViewModel` — that dependency isn't in this module's gradle file,
+ * and a plain `mutableStateOf`-backed class disposed via `DisposableEffect` is the same
+ * "Simple is better" pattern `AcousticModemController`/`DetectorController` already use.
+ *
+ * Runs on [Dispatchers.Default], not [Dispatchers.IO] like the modem/detector controllers —
+ * embed/decode/analyze here are CPU-bound pixel-bit-twiddling and chi-square arithmetic over
+ * an in-memory `Bitmap`, not blocking I/O (no speaker, no mic, no filesystem call in this file).
+ */
+class ImageStegoController(
+    private val carrierFactory: (Bitmap) -> CovertCarrier<Bitmap>,
+    private val detector: CovertDetector<Bitmap>,
+) {
+    var status: StegoStatus by mutableStateOf(StegoStatus.Idle)
+        private set
+
+    /**
+     * The bitmap `extract`/`check for hidden data` operate on: the selected cover until a
+     * successful `embed` replaces it with the produced stego image. Null only before the
+     * screen's first [selectCover] call (the `LaunchedEffect(coverBitmap)` in
+     * [ImageStegoScreen] fires before first render, so callers always fall back to the raw
+     * cover bitmap regardless).
+     */
+    var workingBitmap: Bitmap? by mutableStateOf(null)
+        private set
+
+    /**
+     * True once [embed] has produced a stego image for the currently selected cover — the gate
+     * task #34's save/share actions use ("after a successful embed()"). Reset to false by
+     * [selectCover] (a freshly selected cover, sample or picked, has no embedded payload yet)
+     * and set true at the end of a successful [embed]. An explicit flag rather than comparing
+     * [workingBitmap] against the cover by reference, so this doesn't quietly depend on
+     * `ImageStegoCarrier.encode`'s current "always returns a fresh copy" implementation detail.
+     */
+    var hasEmbeddedPayload: Boolean by mutableStateOf(false)
+        private set
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private val idleEquivalent: Boolean
+        get() = status is StegoStatus.Idle ||
+            status is StegoStatus.Embedded ||
+            status is StegoStatus.ExtractedSuccess ||
+            status is StegoStatus.ExtractedFailure ||
+            status is StegoStatus.Analyzed
+
+    /** Reset to a freshly selected cover image, discarding any prior embed/extract/check result. */
+    fun selectCover(cover: Bitmap) {
+        workingBitmap = cover
+        hasEmbeddedPayload = false
+        status = StegoStatus.Idle
+    }
+
+    /** Capacity of [cover] for this codec, read synchronously — cheap dimension arithmetic only. */
+    fun maxPayloadBytesFor(cover: Bitmap): Int = carrierFactory(cover).maxPayloadBytes
+
+    /**
+     * Hide [payload] in [cover] and make the result the new working image. No-op while busy.
+     * Always encodes into the pristine sample [cover] (never into an already-embedded working
+     * image), so repeated taps stay predictable instead of stacking frames.
+     *
+     * Task #19 fix: the [idleEquivalent] gate check and the `status = StegoStatus.Embedding`
+     * write that leaves idle-equivalent must happen on the SAME synchronous call — `status`
+     * used to only flip inside `scope.launch { ... }`, which merely schedules the coroutine
+     * rather than running it immediately. That left a real window where two `embed()` calls
+     * arriving back-to-back (e.g. a double-fired tap) could both read `status` as still
+     * idle-equivalent and both pass the gate, each independently running to completion and
+     * each triggering jarCatchFlow's catch-logging effect — a duplicate [FireflyRecord] insert
+     * task #18 live-reproduced from what looked like a single tap. Writing `status` here,
+     * before `scope.launch`, closes that window: a second call arriving even a moment later
+     * sees `status == Embedding` and is rejected by the gate.
+     */
+    fun embed(cover: Bitmap, payload: ByteArray) {
+        if (!idleEquivalent) return
+        status = StegoStatus.Embedding
+        scope.launch {
+            val carrier = carrierFactory(cover)
+            val stego = try {
+                carrier.encode(payload)
+            } catch (oversized: IllegalArgumentException) {
+                status = StegoStatus.Idle
+                return@launch
+            }
+            workingBitmap = stego
+            hasEmbeddedPayload = true
+            status = StegoStatus.Embedded(payload.size)
+        }
+    }
+
+    /** Attempt to recover a payload from [sample]. No-op while busy. Same synchronous-gate
+     *  discipline as [embed] — see its KDoc. */
+    fun extract(sample: Bitmap) {
+        if (!idleEquivalent) return
+        status = StegoStatus.Extracting
+        scope.launch {
+            val carrier = carrierFactory(sample)
+            status = when (val result = carrier.decode(sample)) {
+                is DecodeResult.Success ->
+                    StegoStatus.ExtractedSuccess(result.payload.decodeToString())
+                is DecodeResult.Failure ->
+                    StegoStatus.ExtractedFailure(result.reason, result.detail)
+            }
+        }
+    }
+
+    /** Score [sample] for the likelihood it holds an embedded payload. No-op while busy. Same
+     *  synchronous-gate discipline as [embed] — see its KDoc. */
+    fun analyze(sample: Bitmap) {
+        if (!idleEquivalent) return
+        status = StegoStatus.Analyzing
+        scope.launch {
+            val result = detector.analyze(sample)
+            DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
+            status = StegoStatus.Analyzed(result)
+        }
+    }
+
+    /** Cancels any in-flight work. Call from `DisposableEffect.onDispose`. */
+    fun dispose() {
+        scope.cancel()
+    }
+}
+
+// --- Task #33: Photo Picker cover decoding. Plain (non-composable) functions so they can run
+// off the main thread via `withContext(Dispatchers.IO)` from ImageStegoScreen's launcher
+// callback — decoding an arbitrary device photo is real file I/O plus real CPU work, unlike
+// the sample covers' small bundled-resource decode. ---
+
+/**
+ * Longest edge, in pixels, a Photo-Picker-selected cover is downsampled to before it's fully
+ * decoded. 4096 comfortably covers this screen's LSB-capacity math (more pixels only ever
+ * means more payload capacity, never less correctness) while keeping the raw ARGB_8888
+ * buffer's memory footprint bounded — an undownsampled 4096x4096 decode is ~64MB, whereas an
+ * unbounded decode of, say, a 8000x6000 photo would be ~183MB for one `Bitmap`.
+ */
+private const val MAX_PICKED_COVER_DIMENSION = 4096
+
+/**
+ * Decodes [uri] (a content Uri handed back by [androidx.activity.result.contract
+ * .ActivityResultContracts.PickVisualMedia]) into a fully in-memory, uncompressed [Bitmap].
+ *
+ * This is the one place the "never assume/preserve the original format" correctness
+ * constraint (this file's top KDoc) actually gets enforced: regardless of whether the picked
+ * file is a JPEG, WEBP, HEIF, or PNG on disk, [BitmapFactory.decodeStream] always hands back
+ * plain decoded pixels, and this function returns only that [Bitmap] — never the [uri], never
+ * a format tag. From the caller's next line onward there is nothing left pointing at the
+ * original lossy file to accidentally round-trip through.
+ *
+ * Two-pass decode (bounds-only, then real decode with `inSampleSize`) because a
+ * `ContentResolver` `InputStream` generally isn't seekable/resettable, so the bounds pass and
+ * the real decode each need their own freshly opened stream — the standard pattern from
+ * Android's "Loading Large Bitmaps Efficiently" guide. `inPreferredConfig` is pinned to
+ * [Bitmap.Config.ARGB_8888] (never `HARDWARE`, which some decode paths default to on newer
+ * API levels) because [dev.herakles.nightjar.ImageStegoCarrier]'s LSB embedding reads/writes
+ * individual pixels via `getPixel`/`setPixel`, which a hardware bitmap does not support.
+ *
+ * Returns null if the Uri can't be opened, the bytes don't decode as an image (corrupt file,
+ * revoked grant, I/O failure), or decoding runs the process out of memory — the caller shows
+ * a short failure message and leaves the previously selected cover in place rather than
+ * crashing. `BitmapFactory.decodeStream` always returns null itself when
+ * `inJustDecodeBounds = true` (bounds land in `options.outWidth`/`outHeight` instead, never in
+ * the return value), so the bounds pass tracks "did the stream even open" via the `use` block's
+ * own return value rather than the decode call's.
+ */
+private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
+    val resolver = context.contentResolver
+
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    val boundsStreamOpened = resolver.openInputStream(uri)?.use { stream ->
+        BitmapFactory.decodeStream(stream, null, bounds)
+        true
+    }
+    if (boundsStreamOpened != true || bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        null
+    } else {
+        val decodeOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inSampleSize = downsampleFactor(bounds.outWidth, bounds.outHeight, MAX_PICKED_COVER_DIMENSION)
+        }
+        resolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, decodeOptions)
+        }
+    }
+} catch (failure: Exception) {
+    null
+} catch (oom: OutOfMemoryError) {
+    null
+}
+
+/**
+ * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings both [width] and
+ * [height] under [maxDimension], per `BitmapFactory.Options.inSampleSize`'s own contract
+ * (power-of-two values decode fastest/cleanest — non-power-of-two values get rounded down to
+ * the nearest power of two internally anyway).
+ */
+private fun downsampleFactor(width: Int, height: Int, maxDimension: Int): Int {
+    var sampleSize = 1
+    var w = width
+    var h = height
+    while (w / 2 >= maxDimension || h / 2 >= maxDimension) {
+        w /= 2
+        h /= 2
+        sampleSize *= 2
+    }
+    return sampleSize
+}
+
+// --- Task #34: save the working stego image as a PNG via MediaStore, and share it through
+// Android's share sheet. ALWAYS PNG regardless of whether the cover was a bundled sample or a
+// Photo-Picker-selected device photo (this file's top KDoc CRITICAL note) — PNG is lossless,
+// which the LSB-embedded payload requires to survive. MediaStore.Images (not a raw filesystem
+// path) is scoped storage: on minSdk 31 an app can insert its own new media without
+// WRITE_EXTERNAL_STORAGE/READ_MEDIA_IMAGES, so no manifest change accompanies this section,
+// same "no extra permission" posture task #33's Photo Picker cover source already established. ---
+
+/**
+ * Encodes [bitmap] as PNG bytes — the exact call [saveBitmapAsPngToMediaStore] writes to disk.
+ * Factored out (rather than inlined) so a unit test can exercise "does the exact byte sequence
+ * this app's save/share path produces, decoded back into a fresh [Bitmap], recover the original
+ * payload through [dev.herakles.nightjar.ImageStegoCarrier.decode]" without needing a real
+ * `ContentResolver`/`MediaStore` in the loop — task #34's correctness bar. `internal` (not
+ * `private`) purely for that test visibility, matching `ImageSteganalysis`'s
+ * `chiSquarePValueForWindow`/`chiSquareUpperTailP` and `AcousticCarrier`'s `ReedSolomon`/`GF256`
+ * precedent elsewhere in this codebase.
+ */
+internal fun encodePngBytes(bitmap: Bitmap): ByteArray {
+    val out = ByteArrayOutputStream()
+    check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+        "Bitmap.compress(..., PNG, ...) reported failure"
+    }
+    return out.toByteArray()
+}
+
+/**
+ * Writes [bitmap] as a PNG into the device's `MediaStore.Images` collection
+ * (`Pictures/Nightjar/`) and returns the resulting `content://` [Uri]. Two-phase write
+ * (`IS_PENDING = 1` while [encodePngBytes]'s bytes are streamed out, cleared to `0` only once
+ * that succeeds) so a half-written file is never visible to the gallery or a share target
+ * mid-write — the pattern Android's own scoped-storage docs recommend for API 29+ writers. On
+ * any failure the half-inserted row is deleted rather than left behind as a broken/empty entry.
+ *
+ * Throws [IOException] on failure (insert rejected, stream open failure, write failure) so the
+ * caller's `runCatching` in [ImageStegoScreen] surfaces a real reason instead of a silent no-op.
+ */
+private fun saveBitmapAsPngToMediaStore(context: Context, bitmap: Bitmap): Uri {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, "nightjar_${System.currentTimeMillis()}.png")
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Nightjar")
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val uri = resolver.insert(collection, values)
+        ?: throw IOException("MediaStore rejected the insert (collection unavailable)")
+
+    try {
+        val opened = resolver.openOutputStream(uri)?.use { stream -> stream.write(encodePngBytes(bitmap)) }
+        checkNotNull(opened) { "couldn't open an output stream for $uri" }
+    } catch (failure: Exception) {
+        resolver.delete(uri, null, null) // don't leave a pending/broken row behind
+        throw IOException("failed writing PNG bytes to MediaStore for $uri", failure)
+    }
+
+    values.clear()
+    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+    resolver.update(uri, values, null, null)
+    return uri
+}
+
+/**
+ * Builds the `ACTION_SEND` share-sheet intent for a just-saved stego PNG: `image/png` MIME,
+ * the MediaStore `content://` [uri] as `EXTRA_STREAM`, plus `FLAG_GRANT_READ_URI_PERMISSION` so
+ * whichever app the operator picks from the chooser can read a `content://` Uri it doesn't own
+ * — no `FileProvider` needed here since `MediaStore` is itself a system content provider,
+ * unlike a raw `file://` path this app happened to write.
+ */
+private fun buildPngShareIntent(uri: Uri): Intent =
+    Intent(Intent.ACTION_SEND).apply {
+        type = "image/png"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+// --- Previews: ImageStegoContent is pure, so these need no CovertCarrier/CovertDetector fake,
+// only a small synthetic Bitmap (no resource decode / Context needed). ---
+
+private fun previewBitmap(): Bitmap =
+    Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(0xFF30363D.toInt()) }
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewIdle() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.Idle,
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.GRADIENT),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "wet-snacks-design",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Idle,
+            hasEmbeddedPayload = false,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewEmbedded() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.Embedded(payloadBytes = 18),
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.MOSAIC),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "wet-snacks-design",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Idle,
+            hasEmbeddedPayload = true,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+/**
+ * Task #36: the transient "saving"/"sharing" split — before this task both actions rendered
+ * "saving" here, even when the operator tapped "share".
+ */
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewSaving() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.Embedded(payloadBytes = 18),
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.GRADIENT),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Saving,
+            hasEmbeddedPayload = true,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewSharing() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.Embedded(payloadBytes = 18),
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.GRADIENT),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Sharing,
+            hasEmbeddedPayload = true,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewExtractedSuccess() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.ExtractedSuccess(text = "the ravens have landed"),
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.GRADIENT),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Idle,
+            hasEmbeddedPayload = true,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewAnalyzedFlagged() {
+    PreviewSurface {
+        ImageStegoContent(
+            status = StegoStatus.Analyzed(
+                result = DetectionResult(
+                    confidence = 0.98f,
+                    flagged = true,
+                    estimatedPayloadBytes = 18,
+                    detail = "sustained PoV-equalization run: 5/32 windows (~1600 of 30000 channel samples), mean p=0.981",
+                ),
+            ),
+            workingBitmap = previewBitmap(),
+            coverSource = CoverSource.Sample(SampleCover.GRADIENT),
+            isCoverLoading = false,
+            coverLoadError = null,
+            onSelectSample = {},
+            onPickFromDevice = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 3739,
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            saveStatus = SaveStatus.Idle,
+            hasEmbeddedPayload = true,
+            onSave = {},
+            onShare = {},
+            onBack = {},
+        )
+    }
+}
+
+@Composable
+private fun PreviewSurface(content: @Composable () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().background(BgBase)) {
+        content()
+    }
+}
