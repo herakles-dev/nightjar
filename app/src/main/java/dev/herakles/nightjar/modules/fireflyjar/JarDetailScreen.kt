@@ -680,10 +680,12 @@ private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else
  * into an accent-colored [ImageBitmap] ([spectrogramImageBitmap]) so it's ready by the time the
  * waveform is. A "waveform" / "spectrogram" [FireflyAudioViewToggle] swaps which the carrier
  * shows. Unlike the IMAGE toggle, this one also honestly labels itself — [audioSpectrogramCaption]
- * brackets what a magnitude spectrogram genuinely can and can't reveal per
- * [FireflyRecord.technique], since two of the three [dev.herakles.nightjar.AudioStegoTechnique]
- * cases hide their payload in a domain (sub-perceptual log-magnitude QIM, stereo polarity) no
- * magnitude spectrogram can show — see that function's KDoc for the four cases.
+ * brackets what a magnitude spectrogram genuinely does and doesn't reveal per
+ * [FireflyRecord.technique] across all four AUDIO cases — MFSK, the acoustic modem, and (per
+ * [SpectrogramTest]'s measurements, corrected 2026-08-05 after rev-t2's adversarial-lite HIGH
+ * finding) PHASE_INVERSION are all genuinely visible once mono-mixed; only SPECTROGRAM_LSB's
+ * sub-perceptual QIM nudge stays below a coherent visibility threshold. See that function's
+ * KDoc for the measured basis of each case.
  */
 @Composable
 private fun FireflyCarrierBlock(
@@ -1058,13 +1060,24 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
  * - `null` — the acoustic modem (Module 3) also writes AUDIO media with no `technique`; its own
  *   FSK tone grid (architecture.md § Acoustic Protocol) is equally genuinely visible here.
  * - `"SPECTROGRAM_LSB"` — the payload is QIM on log-magnitude at `AudioStegoCarrier.kt`'s
- *   `QUANTIZATION_STEP`=0.12, sub-perceptual by design. The spectrogram still renders (this
- *   function never suppresses the view), but the caption says plainly that the eye can't catch
- *   it — a cover-vs-stego difference view is the honest follow-up, out of scope here (spec.md).
- * - `"PHASE_INVERSION"` — the payload lives in stereo polarity between L/R, a domain
- *   [spectrogram]'s own mono-mix collapses before this function ever sees a column. A magnitude
- *   spectrogram structurally cannot show it — an L/R-polarity view is the honest follow-up, also
- *   out of scope here.
+ *   `QUANTIZATION_STEP`=0.12. [SpectrogramTest]'s cover-vs-stego measurement (encoding a real
+ *   payload, comparing rendered normalized brightness cell-by-cell) found only a vanishingly
+ *   small, scattered fraction of pixels cross a meaningfully visible delta (4 of 205,200 cells,
+ *   0.002%) — not a coherent band the way MFSK's is, so the caption still says the eye can't
+ *   catch it as a pattern. A cover-vs-stego difference view is the honest follow-up, out of
+ *   scope here (spec.md).
+ * - `"PHASE_INVERSION"` — **corrected 2026-08-05 per rev-t2's adversarial-lite HIGH finding.**
+ *   The original caption here claimed a magnitude spectrogram can't show this technique's
+ *   payload; that was backwards. [spectrogram]'s mono-mix (`(L+R)/channels`) is EXACTLY
+ *   [AudioStegoCarrier]'s own decode step for this technique (its class KDoc: "sum it down to
+ *   mono ... the identical original content phase-cancels out, leaving only the secondary
+ *   signal audible") — summing cancels the cover and leaves only the small mixed-in payload
+ *   offset, and because nothing else survives in the mix to compete with it, per-clip brightness
+ *   normalization renders that offset near the clip's own ceiling. [SpectrogramTest] measured
+ *   this directly on a real encoded carrier: worst-case normalized brightness 0.880 across the
+ *   whole clip. So the mono view doesn't fail to show this payload — it's the one case here
+ *   where mono-mixing itself is the exposure mechanism, which is this technique's actual
+ *   weakness, not a spectrogram limitation.
  *
  * The `else` branch is unreachable today (every AUDIO firefly's `technique` is one of the four
  * cases above) and present anyway, same "unreachable-but-present" discipline
@@ -1087,8 +1100,8 @@ private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption
         genuinelyVisible = false,
     )
     "PHASE_INVERSION" -> AudioSpectrogramCaption(
-        text = "the payload is a stereo polarity trick between the two channels. a magnitude spectrogram can't show it.",
-        genuinelyVisible = false,
+        text = "mixing to mono is this technique's own decode step. it cancels the cover and leaves the hidden payload exposed, right here.",
+        genuinelyVisible = true,
     )
     else -> AudioSpectrogramCaption(text = "", genuinelyVisible = false)
 }
