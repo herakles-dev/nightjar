@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.LsbBitPlane
 import dev.herakles.nightjar.WavFile
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
@@ -662,6 +663,12 @@ private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else
  * [JarDetailScreen] threads down from `FireflyRepository.readMedia`; this composable never
  * touches a media store or a `Context` directly, matching every other pure/previewable
  * composable in this file.
+ *
+ * Stage D/2 (gate-19) adds the IMAGE case's "where it hid" layer: [LsbBitPlane.ofBitmap] runs
+ * right after the PNG decode, same [LaunchedEffect], same [Dispatchers.Default] hop, so the
+ * bit-plane bitmap is ready by the time the thumbnail is — no per-tap recompute. An "image" /
+ * "bit-plane" [FireflyBitPlaneToggle] swaps which bitmap the 96dp thumbnail renders. AUDIO's
+ * `wav`/`peaks` path (Stage D/3's spectrogram is a separate task) is untouched.
  */
 @Composable
 private fun FireflyCarrierBlock(
@@ -671,6 +678,13 @@ private fun FireflyCarrierBlock(
     accent: Color,
 ) {
     var bitmap by remember(firefly.id) { mutableStateOf<Bitmap?>(null) }
+    // Stage D/2 (gate-19): the IMAGE carrier's LSB bit-plane, precomputed alongside `bitmap`
+    // (same LaunchedEffect, same IO/Default dispatch) rather than on toggle-tap -- the transform
+    // is cheap ([LsbBitPlane]'s KDoc) but there's no reason to do it on the composition thread
+    // when this coroutine is already off it. Null until ready; `showBitPlane` below only ever
+    // has something to show once it is.
+    var bitPlaneBitmap by remember(firefly.id) { mutableStateOf<Bitmap?>(null) }
+    var showBitPlane by remember(firefly.id) { mutableStateOf(false) }
     var wav by remember(firefly.id) { mutableStateOf<WavFile.ParsedWav?>(null) }
     var peaks by remember(firefly.id) { mutableStateOf<FloatArray?>(null) }
     var failed by remember(firefly.id) { mutableStateOf(false) }
@@ -689,7 +703,13 @@ private fun FireflyCarrierBlock(
         when (kind) {
             "IMAGE" -> {
                 val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                if (decoded == null) failed = true else bitmap = decoded
+                if (decoded == null) {
+                    failed = true
+                } else {
+                    val bitPlane = withContext(Dispatchers.Default) { LsbBitPlane.ofBitmap(decoded) }
+                    bitmap = decoded
+                    bitPlaneBitmap = bitPlane
+                }
             }
             "AUDIO" -> {
                 val decoded = withContext(Dispatchers.IO) {
@@ -716,6 +736,7 @@ private fun FireflyCarrierBlock(
     // Local vals -- `by remember` properties don't smart-cast, so the `when` below reads these
     // instead of `bitmap`/`wav`/`peaks` directly.
     val currentBitmap = bitmap
+    val currentBitPlane = bitPlaneBitmap
     val currentWav = wav
     val currentPeaks = peaks
     if (currentBitmap == null && currentWav == null && !failed) return // still decoding -- nothing to show yet
@@ -739,13 +760,30 @@ private fun FireflyCarrierBlock(
                     color = JarWatchingDim,
                     textAlign = TextAlign.Center,
                 )
-                currentBitmap != null -> Image(
-                    bitmap = currentBitmap.asImageBitmap(),
-                    contentDescription = "the image this firefly hid inside",
-                    modifier = Modifier
-                        .size(96.dp)
-                        .border(width = 1.dp, color = JarGlassOutline),
-                )
+                currentBitmap != null -> Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    val displayed = if (showBitPlane && currentBitPlane != null) currentBitPlane else currentBitmap
+                    Image(
+                        bitmap = displayed.asImageBitmap(),
+                        contentDescription = if (showBitPlane && currentBitPlane != null) {
+                            "the LSB bit-plane of the image this firefly hid inside -- bright pixels are where a payload bit lives"
+                        } else {
+                            "the image this firefly hid inside"
+                        },
+                        modifier = Modifier
+                            .size(96.dp)
+                            .border(width = 1.dp, color = JarGlassOutline),
+                    )
+                    if (currentBitPlane != null) {
+                        FireflyBitPlaneToggle(
+                            showBitPlane = showBitPlane,
+                            accent = accent,
+                            onToggle = { showBitPlane = it },
+                        )
+                    }
+                }
                 currentWav != null && currentPeaks != null -> FireflyAudioCarrier(
                     wav = currentWav,
                     peaks = currentPeaks,
@@ -754,6 +792,34 @@ private fun FireflyCarrierBlock(
                 )
             }
         }
+    }
+}
+
+/**
+ * Stage D/2 (gate-19) — the "image" / "bit-plane" switch under an IMAGE carrier's thumbnail.
+ * Two tappable labels, not a Material `Switch`: this reuses the exact selected/unselected color
+ * grammar `ImageStegoScreen.kt`'s `JarCoverRow` already established for this app's other
+ * two-option pick (selected text takes the firefly's own [accent], unselected drops to
+ * [JarTextTertiary]) rather than introducing a new control shape for one toggle. [JarType.Footer]
+ * — this app's dimmest text tier — keeps the control visibly secondary to the 96dp thumbnail
+ * above it, matching the "data visualization, not decoration" framing in
+ * `design/firefly-jar-identity.md`.
+ */
+@Composable
+private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle: (Boolean) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(
+            text = "image",
+            style = JarType.Footer,
+            color = if (!showBitPlane) accent else JarTextTertiary,
+            modifier = Modifier.clickable(onClick = { onToggle(false) }),
+        )
+        Text(
+            text = "bit-plane",
+            style = JarType.Footer,
+            color = if (showBitPlane) accent else JarTextTertiary,
+            modifier = Modifier.clickable(onClick = { onToggle(true) }),
+        )
     }
 }
 
