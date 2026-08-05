@@ -38,14 +38,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.LsbBitPlane
+import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.spectrogram
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.ui.theme.FireflyCreated
@@ -64,6 +69,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -667,8 +673,17 @@ private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else
  * Stage D/2 (gate-19) adds the IMAGE case's "where it hid" layer: [LsbBitPlane.ofBitmap] runs
  * right after the PNG decode, same [LaunchedEffect], same [Dispatchers.Default] hop, so the
  * bit-plane bitmap is ready by the time the thumbnail is — no per-tap recompute. An "image" /
- * "bit-plane" [FireflyBitPlaneToggle] swaps which bitmap the 96dp thumbnail renders. AUDIO's
- * `wav`/`peaks` path (Stage D/3's spectrogram is a separate task) is untouched.
+ * "bit-plane" [FireflyBitPlaneToggle] swaps which bitmap the 96dp thumbnail renders.
+ *
+ * Stage D/3 (gate-19) adds the AUDIO case's own "where it hid" layer, same shape: [spectrogram]
+ * runs right after the WAV decode, same [LaunchedEffect], a [Dispatchers.Default] hop, tinted
+ * into an accent-colored [ImageBitmap] ([spectrogramImageBitmap]) so it's ready by the time the
+ * waveform is. A "waveform" / "spectrogram" [FireflyAudioViewToggle] swaps which the carrier
+ * shows. Unlike the IMAGE toggle, this one also honestly labels itself — [audioSpectrogramCaption]
+ * brackets what a magnitude spectrogram genuinely can and can't reveal per
+ * [FireflyRecord.technique], since two of the three [dev.herakles.nightjar.AudioStegoTechnique]
+ * cases hide their payload in a domain (sub-perceptual log-magnitude QIM, stereo polarity) no
+ * magnitude spectrogram can show — see that function's KDoc for the four cases.
  */
 @Composable
 private fun FireflyCarrierBlock(
@@ -687,6 +702,12 @@ private fun FireflyCarrierBlock(
     var showBitPlane by remember(firefly.id) { mutableStateOf(false) }
     var wav by remember(firefly.id) { mutableStateOf<WavFile.ParsedWav?>(null) }
     var peaks by remember(firefly.id) { mutableStateOf<FloatArray?>(null) }
+    // Stage D/3 (gate-19): the AUDIO carrier's spectrogram, precomputed and tinted into an
+    // ImageBitmap alongside `wav`/`peaks` (same LaunchedEffect, same Default hop) -- same
+    // "precompute once, never on toggle-tap" reasoning `bitPlaneBitmap` above already documents.
+    // Null until ready; `showSpectrogram` only ever has something to show once it is.
+    var spectrogramImage by remember(firefly.id) { mutableStateOf<ImageBitmap?>(null) }
+    var showSpectrogram by remember(firefly.id) { mutableStateOf(false) }
     var failed by remember(firefly.id) { mutableStateOf(false) }
 
     LaunchedEffect(firefly.id) {
@@ -720,8 +741,13 @@ private fun FireflyCarrierBlock(
                 if (decoded == null) {
                     failed = true
                 } else {
-                    wav = decoded.first
-                    peaks = decoded.second
+                    val (parsedWav, computedPeaks) = decoded
+                    wav = parsedWav
+                    peaks = computedPeaks
+                    spectrogramImage = withContext(Dispatchers.Default) {
+                        val data = spectrogram(parsedWav.samples, channels = parsedWav.numChannels)
+                        spectrogramImageBitmap(data, accent)
+                    }
                 }
             }
             else -> failed = true
@@ -787,6 +813,10 @@ private fun FireflyCarrierBlock(
                 currentWav != null && currentPeaks != null -> FireflyAudioCarrier(
                     wav = currentWav,
                     peaks = currentPeaks,
+                    spectrogramImage = spectrogramImage,
+                    showSpectrogram = showSpectrogram,
+                    onToggleSpectrogram = { showSpectrogram = it },
+                    technique = firefly.technique,
                     accent = accent,
                     player = player,
                 )
@@ -824,15 +854,31 @@ private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle
 }
 
 /**
- * Waveform + play/stop control (gate-18) — this app's first Canvas waveform. The bars use
- * [accent] at two alphas (played vs. not-yet-played) plus a drawn playhead line, the same "dim
- * track, bright fill" grammar the acoustic modem's jar-mode glow-strength meter already
- * established (AcousticModemScreen.kt's `JarListeningCard`) rather than a new visual language.
- * The play/stop pill reuses [JarType.ButtonLabel], the same style "send"/"stop"/"watch" already
- * use there.
+ * Waveform/spectrogram + play/stop control (gate-18, gate-19) — this app's first Canvas
+ * waveform, plus Stage D/3's spectrogram toggle alongside it. The waveform bars use [accent] at
+ * two alphas (played vs. not-yet-played) plus a drawn playhead line, the same "dim track, bright
+ * fill" grammar the acoustic modem's jar-mode glow-strength meter already established
+ * (AcousticModemScreen.kt's `JarListeningCard`) rather than a new visual language. The play/stop
+ * pill reuses [JarType.ButtonLabel], the same style "send"/"stop"/"watch" already use there.
+ *
+ * [spectrogramImage] is null until [FireflyCarrierBlock]'s `LaunchedEffect` finishes computing
+ * it — the "waveform" / "spectrogram" [FireflyAudioViewToggle] and [audioSpectrogramCaption] only
+ * render once it isn't, same "toggle absent until ready" rule the IMAGE case's
+ * [FireflyBitPlaneToggle] already follows. Playback is unaffected by which view is showing: the
+ * play/stop control and [wav]/[peaks] stay the source of truth for audio either way, the
+ * spectrogram is a read-only visualization, not a second player.
  */
 @Composable
-private fun FireflyAudioCarrier(wav: WavFile.ParsedWav, peaks: FloatArray, accent: Color, player: FireflyPlayer) {
+private fun FireflyAudioCarrier(
+    wav: WavFile.ParsedWav,
+    peaks: FloatArray,
+    spectrogramImage: ImageBitmap?,
+    showSpectrogram: Boolean,
+    onToggleSpectrogram: (Boolean) -> Unit,
+    technique: String?,
+    accent: Color,
+    player: FireflyPlayer,
+) {
     var isPlaying by remember { mutableStateOf(false) }
     val clock = rememberFireflyClock()
 
@@ -852,16 +898,42 @@ private fun FireflyAudioCarrier(wav: WavFile.ParsedWav, peaks: FloatArray, accen
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        FireflyWaveform(
-            peaks = peaks,
-            isPlaying = isPlaying,
-            player = player,
-            clock = clock,
-            accent = accent,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp),
-        )
+        if (showSpectrogram && spectrogramImage != null) {
+            FireflySpectrogramCanvas(
+                image = spectrogramImage,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+            )
+        } else {
+            FireflyWaveform(
+                peaks = peaks,
+                isPlaying = isPlaying,
+                player = player,
+                clock = clock,
+                accent = accent,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+            )
+        }
+        if (spectrogramImage != null) {
+            FireflyAudioViewToggle(
+                showSpectrogram = showSpectrogram,
+                accent = accent,
+                onToggle = onToggleSpectrogram,
+            )
+            if (showSpectrogram) {
+                val caption = audioSpectrogramCaption(technique)
+                Text(
+                    text = caption.text,
+                    style = JarType.Footer,
+                    color = if (caption.genuinelyVisible) JarTextTertiary else JarWatchingDim,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
         FireflyPlayButton(
             playing = isPlaying,
             accent = accent,
@@ -876,6 +948,149 @@ private fun FireflyAudioCarrier(wav: WavFile.ParsedWav, peaks: FloatArray, accen
             },
         )
     }
+}
+
+/**
+ * Stage D/3 (gate-19) — the "waveform" / "spectrogram" switch under an AUDIO carrier, mirroring
+ * [FireflyBitPlaneToggle]'s exact grammar: two tappable [JarType.Footer] labels, selected takes
+ * the firefly's own [accent], unselected drops to [JarTextTertiary] — not a new control shape
+ * for what is still this app's one two-option carrier-view pick.
+ */
+@Composable
+private fun FireflyAudioViewToggle(showSpectrogram: Boolean, accent: Color, onToggle: (Boolean) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Text(
+            text = "waveform",
+            style = JarType.Footer,
+            color = if (!showSpectrogram) accent else JarTextTertiary,
+            modifier = Modifier.clickable(onClick = { onToggle(false) }),
+        )
+        Text(
+            text = "spectrogram",
+            style = JarType.Footer,
+            color = if (showSpectrogram) accent else JarTextTertiary,
+            modifier = Modifier.clickable(onClick = { onToggle(true) }),
+        )
+    }
+}
+
+/**
+ * Stage D/3 (gate-19) — draws a precomputed spectrogram [image] ([spectrogramImageBitmap]) at
+ * whatever size the layout gives it. No clock read here (unlike [FireflyWaveform]): the
+ * spectrogram isn't synced to playback position, so this draws once per [image] change instead
+ * of repainting every frame.
+ */
+@Composable
+private fun FireflySpectrogramCanvas(image: ImageBitmap, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        drawImage(
+            image = image,
+            dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+        )
+    }
+}
+
+/**
+ * Stage D/3 (gate-19) — turns a pure [SpectrogramData] into an [accent]-tinted [ImageBitmap]:
+ * one pixel per (time column, frequency bin), alpha carrying normalized log-magnitude (min..max
+ * across the whole clip, the same per-clip auto-range a real spectrogram viewer uses since a
+ * fixed dB window would either clip a loud clip or wash out a quiet one) and RGB fixed to
+ * [accent] — the same "direction-colored glow" grammar [FireflyWaveform]'s bars and
+ * [swarmThumbModifier]'s tile chrome already use, applied here as a raster instead of drawn
+ * primitives. Frequency bin 0 (DC) renders at the BOTTOM row and the highest bin at the top —
+ * "low freq at bottom" per this stage's brief — so row `height-1-bin` holds bin's value, not row
+ * `bin`. Runs off the composition thread ([FireflyCarrierBlock]'s `Dispatchers.Default` hop),
+ * same as [LsbBitPlane.ofBitmap] — a multi-hundred-column, 513-bin raster is real allocation
+ * work, not something to redo on every recomposition.
+ *
+ * Deliberately NOT bin-downsampled: [AudioStegoTechnique.MFSK]'s honest "visible" claim
+ * ([audioSpectrogramCaption]) depends on its 8-bin-wide tone band (bins 420-427 of 513) staying
+ * distinguishable — averaging bins together to shrink the image could dilute that band into its
+ * quiet neighbors and turn a true claim into a false one. One [ImageBitmap] pixel per bin, drawn
+ * scaled by [FireflySpectrogramCanvas], costs one `drawImage` call regardless of resolution —
+ * cheaper than downsampling would have bought.
+ */
+private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageBitmap {
+    val width = data.columns.size
+    val height = data.binCount
+    if (width <= 0 || height <= 0) return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).asImageBitmap()
+
+    var minDb = Double.POSITIVE_INFINITY
+    var maxDb = Double.NEGATIVE_INFINITY
+    for (column in data.columns) {
+        for (value in column) {
+            if (value < minDb) minDb = value
+            if (value > maxDb) maxDb = value
+        }
+    }
+    val range = (maxDb - minDb).coerceAtLeast(1.0)
+
+    val accentArgb = accent.toArgb()
+    val r = (accentArgb shr 16) and 0xFF
+    val g = (accentArgb shr 8) and 0xFF
+    val b = accentArgb and 0xFF
+
+    val pixels = IntArray(width * height)
+    for (x in 0 until width) {
+        val column = data.columns[x]
+        for (bin in 0 until height) {
+            val row = height - 1 - bin // low freq (bin 0) at the bottom row
+            val normalized = ((column[bin] - minDb) / range).coerceIn(0.0, 1.0)
+            val alpha = (normalized * 255).roundToInt().coerceIn(0, 255)
+            pixels[row * width + x] = (alpha shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+    return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888).asImageBitmap()
+}
+
+/**
+ * Stage D/3 (gate-19) — the honesty labels this stage exists to ship. Branches on
+ * [FireflyRecord.technique] (a plain `String?`, never on [Module] — architecture.md § 6 reserves
+ * the per-[Module] `when` budget to [FireflyGlyphs.drawJarGlyph] and [catchFlowFor]; this is a
+ * per-technique branch on a data field, the same axis [FireflyBitPlaneToggle]'s neighbor
+ * `FireflyCarrierBlock` already draws on [kind] rather than [Module]).
+ *
+ * Four cases, matched against how `technique` is actually written (`AcousticModemScreen.kt`,
+ * `AudioStegoScreen.kt`):
+ * - `"MFSK"` — [AudioStegoTechnique.MFSK]'s eight tones (`AudioStegoCarrier.kt`'s
+ *   `MFSK_BASE_BIN`=420..427, ~19.7 kHz) really do sit in a bright band a spectrogram shows.
+ *   [SpectrogramTest] grounds the bin claim.
+ * - `null` — the acoustic modem (Module 3) also writes AUDIO media with no `technique`; its own
+ *   FSK tone grid (architecture.md § Acoustic Protocol) is equally genuinely visible here.
+ * - `"SPECTROGRAM_LSB"` — the payload is QIM on log-magnitude at `AudioStegoCarrier.kt`'s
+ *   `QUANTIZATION_STEP`=0.12, sub-perceptual by design. The spectrogram still renders (this
+ *   function never suppresses the view), but the caption says plainly that the eye can't catch
+ *   it — a cover-vs-stego difference view is the honest follow-up, out of scope here (spec.md).
+ * - `"PHASE_INVERSION"` — the payload lives in stereo polarity between L/R, a domain
+ *   [spectrogram]'s own mono-mix collapses before this function ever sees a column. A magnitude
+ *   spectrogram structurally cannot show it — an L/R-polarity view is the honest follow-up, also
+ *   out of scope here.
+ *
+ * The `else` branch is unreachable today (every AUDIO firefly's `technique` is one of the four
+ * cases above) and present anyway, same "unreachable-but-present" discipline
+ * `AudioStegoCarrier.kt`'s own `DecodeFailure` handling already documents for its unreachable
+ * cases.
+ */
+private data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
+
+private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
+    "MFSK" -> AudioSpectrogramCaption(
+        text = "eight tones sit in a bright band near 19.7khz. that's the payload, visible right here.",
+        genuinelyVisible = true,
+    )
+    null -> AudioSpectrogramCaption(
+        text = "this is the acoustic modem's own fsk tone grid, drawing its symbols directly. visible right here.",
+        genuinelyVisible = true,
+    )
+    "SPECTROGRAM_LSB" -> AudioSpectrogramCaption(
+        text = "the payload is quantization on log-magnitude, delta 0.12, sub-perceptual. a spectrogram can't show it.",
+        genuinelyVisible = false,
+    )
+    "PHASE_INVERSION" -> AudioSpectrogramCaption(
+        text = "the payload is a stereo polarity trick between the two channels. a magnitude spectrogram can't show it.",
+        genuinelyVisible = false,
+    )
+    else -> AudioSpectrogramCaption(text = "", genuinelyVisible = false)
 }
 
 /**
