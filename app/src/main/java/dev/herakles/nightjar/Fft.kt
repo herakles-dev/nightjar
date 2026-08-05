@@ -5,13 +5,13 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * In-place iterative radix-2 Cooley-Tukey FFT -- the same standard algorithm as
- * `AcousticDetector.fft`/`AcousticCarrier.fft`, but neither of those is reusable here: both
- * are declared inside a `private companion object` (`AcousticDetector.fft`) or as a private
- * member of one (`AcousticCarrier.fft`), so neither is visible outside its own file, and
- * de-duplicating them into a shared utility is explicitly out of scope for this task. This
- * is therefore a third, independent copy. `re.size` MUST be a power of two -- true for
- * [FRAME_SIZE].
+ * In-place iterative radix-2 Cooley-Tukey FFT -- the shared implementation promoted here so
+ * `AcousticCarrier`, `AcousticDetector`, and `AudioStegoCarrier` all call one copy instead of
+ * the three byte-identical private ones that used to exist. Package-level `internal`, so each
+ * of those files reaches it as an unqualified `fft(re, im)` with no import. `re.size` MUST be
+ * a power of two; callers frame their input accordingly. Windowing and input scaling are the
+ * caller's job -- this transform does neither, which is what lets a rectangular-window caller
+ * and a Hann-window caller share it unchanged.
  */
 internal fun fft(re: DoubleArray, im: DoubleArray) {
     val n = re.size
@@ -68,8 +68,8 @@ internal fun fft(re: DoubleArray, im: DoubleArray) {
  * the result's `im` again, then divide both `re` and `im` by `n`. There is no separate
  * inverse implementation to get wrong independently of [fft] -- and the `n` normalization
  * (not `sqrt(n)`, and applied to both `re` and `im`) is exactly what makes `ifft(fft(x))`
- * return `x` (up to floating-point rounding), which the class KDoc's "untouched frames
- * round-trip exactly" claim depends on.
+ * return `x` (up to floating-point rounding), which AudioStegoCarrier's "untouched frames
+ * round-trip exactly" property depends on.
  */
 internal fun ifft(re: DoubleArray, im: DoubleArray) {
     val n = re.size
