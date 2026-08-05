@@ -24,6 +24,8 @@ import dev.herakles.nightjar.modules.acoustic.AcousticModemScreen
 import dev.herakles.nightjar.modules.audiostego.AudioStegoScreen
 import dev.herakles.nightjar.modules.detector.DetectorScreen
 import dev.herakles.nightjar.modules.fireflyjar.FireflyDatabase
+import dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.JarDetailScreen
 import dev.herakles.nightjar.modules.fireflyjar.JarShelfScreen
 import dev.herakles.nightjar.modules.imagestego.ImageStegoScreen
@@ -31,6 +33,8 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Home screen entry point: module-picker → one of the real module screens. Task #4 built
@@ -71,6 +75,17 @@ private sealed interface Screen {
     data class ModuleStub(val module: Module) : Screen
 }
 
+/**
+ * Process-scoped latch for the orphan sweep (task #5, gate-20, INV-6): `LaunchedEffect(Unit)`
+ * re-runs on activity recreation (rotation, config change) even though the process survives, and
+ * the sweep is destructive against the media directory -- a re-run mid-catch (file written, row
+ * not yet inserted) would delete that firefly's just-caught media. `@Volatile` because the sweep
+ * itself hops onto [Dispatchers.IO], a different thread than the composition reads this from.
+ */
+private object OrphanSweepGuard {
+    @Volatile var hasRun = false
+}
+
 /** Label the `COVERT_DEBUG` probe (task #18) reports for each [Screen] value. */
 private val Screen.debugLabel: String
     get() = when (this) {
@@ -90,6 +105,20 @@ fun NightjarApp() {
 
     val context = LocalContext.current
     val fireflyDao = remember { FireflyDatabase.getInstance(context).fireflyDao() }
+    // Task #4 (gate-20, INV-6): rows and files inseparable. The jar UI (shelf, detail, and the
+    // three catch flows) now threads FireflyRepository throughout -- see FireflyRepository.kt's
+    // file KDoc for the write-then-insert path.
+    val fireflyRepository = remember { FireflyRepository(fireflyDao, FireflyMediaStore(context)) }
+
+    // Task #5 (gate-20, INV-6): reclaim orphaned media files once per process, at start-up,
+    // before the jar UI is reachable. Guarded by OrphanSweepGuard so activity recreation
+    // (rotation/config change) can't trigger a second, destructive sweep mid-catch.
+    LaunchedEffect(Unit) {
+        if (!OrphanSweepGuard.hasRun) {
+            OrphanSweepGuard.hasRun = true
+            withContext(Dispatchers.IO) { fireflyRepository.sweepOrphans() }
+        }
+    }
 
     // Task #18 probe wiring: every screen change (including the initial composition,
     // since LaunchedEffect runs immediately too) is reported to DebugProbe, so
@@ -118,13 +147,13 @@ fun NightjarApp() {
     ) {
         when (val current = screen) {
             is Screen.JarShelf -> JarShelfScreen(
-                dao = fireflyDao,
+                repository = fireflyRepository,
                 onSelectModule = { module -> screen = Screen.JarDetail(module) },
                 onRevealTechnicalMode = { screen = Screen.Picker },
             )
             is Screen.JarDetail -> JarDetailScreen(
                 module = current.module,
-                dao = fireflyDao,
+                repository = fireflyRepository,
                 onBack = { screen = Screen.JarShelf },
             )
             is Screen.Picker -> ModulePicker(

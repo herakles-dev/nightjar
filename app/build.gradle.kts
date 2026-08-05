@@ -55,6 +55,13 @@ android {
     }
 }
 
+// Room schema export (gate-16) — must be turned on while FireflyDatabase is still version 1.
+// The Room Gradle plugin is not applied in this project, so this is the ksp-arg form rather
+// than a `room { schemaDirectory(...) }` block.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.05.01")
     implementation(composeBom)

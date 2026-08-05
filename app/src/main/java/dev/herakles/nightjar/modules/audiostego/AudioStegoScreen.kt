@@ -1,8 +1,5 @@
 package dev.herakles.nightjar.modules.audiostego
 
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -30,8 +28,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.AudioStegoCarrier
 import dev.herakles.nightjar.AudioStegoTechnique
@@ -40,16 +41,25 @@ import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DecodeResult
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
-import dev.herakles.nightjar.ui.theme.JarGlassOutline
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarTileFill
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import kotlinx.coroutines.CoroutineScope
@@ -59,6 +69,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Module 2 (audio steganography) real UI — the closest architectural analog is
@@ -80,16 +91,14 @@ import kotlinx.coroutines.launch
  * in-memory-only.
  *
  * Scope boundary (same one `AcousticModemScreen.kt`'s KDoc draws): [CovertCarrier] is a pure
- * codec over in-memory buffers, not the audio transport. This screen owns playback —
- * `android.media.AudioTrack` for "play cover"/"play working" — mirroring
- * `AcousticModemController.playPcm`'s `AudioTrack.Builder()`/`AudioAttributes`/`AudioFormat`
- * construction exactly (`MODE_STATIC`, `USAGE_MEDIA`/`CONTENT_TYPE_MUSIC`,
- * `ENCODING_PCM_16BIT`), the only existing `AudioTrack` usage in this app. One necessary
- * departure: [AudioStegoTechnique.PHASE_INVERSION]'s `encode()` output is interleaved stereo
- * (`AudioStegoCarrier`'s class KDoc), twice the mono cover's sample count — [AudioStegoController]
- * tracks the working clip's channel count alongside its samples so "play working" can build an
- * `AudioTrack` with the correct `CHANNEL_OUT_MONO`/`CHANNEL_OUT_STEREO` mask instead of assuming
- * mono like the acoustic modem's own playback (which is always mono).
+ * codec over in-memory buffers, not the audio transport. This screen owns the "play cover"/"play
+ * working" UX, delegating the actual `android.media.AudioTrack` construction/stop machinery to
+ * [FireflyPlayer] (Stage C lift, shared with the carrier detail screen) rather than keeping its
+ * own copy. One necessary departure: [AudioStegoTechnique.PHASE_INVERSION]'s `encode()` output is
+ * interleaved stereo (`AudioStegoCarrier`'s class KDoc), twice the mono cover's sample count —
+ * [AudioStegoController] tracks the working clip's channel count alongside its samples so "play
+ * working" can hand [FireflyPlayer] the correct channel count instead of assuming mono like the
+ * acoustic modem's own playback (which is always mono).
  */
 
 /**
@@ -184,7 +193,7 @@ fun AudioStegoScreen(
  * One departure from this file's top-of-file "zero references to the concrete
  * [AudioStegoCarrier] class" discipline: that rule describes [AudioStegoScreen]/
  * [AudioStegoContent], whose `carrierFactory` is injected from `MainActivity.kt`. The Firefly
- * Jar dispatcher's stub signature (`jarCatchFlow(dao: FireflyDao, onExit: () -> Unit)`, task #9,
+ * Jar dispatcher's stub signature (`jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit)`, task #9,
  * not touched by this task) has no factory-injection slot, so this composable builds its own
  * [AudioStegoController] the same way `MainActivity.kt` builds the technical screen's one —
  * `AudioStegoCarrier(cover, technique)` — just inlined here instead of at a call site.
@@ -198,7 +207,7 @@ fun AudioStegoScreen(
  * "catch a firefly" expands into the technique + cover selectors and the payload field inline;
  * "look for fireflies" has no fields of its own and fires [AudioStegoController.extract]
  * directly — same two-section shape screen-flow.md's diagram specifies. A successful catch/look
- * inserts exactly one [FireflyRecord] into [dao] (`direction = "CREATED"`/`"RECEIVED"`) via a
+ * inserts exactly one [FireflyRecord] into [repository] (`direction = "CREATED"`/`"RECEIVED"`) via a
  * `LaunchedEffect` keyed on [AudioStegoController.status]: [AudioStegoController.embed]/
  * [AudioStegoController.extract] are fire-and-forget from their own coroutine (they mutate
  * `status`, no completion callback to hang the insert off directly), and each real transition
@@ -207,7 +216,7 @@ fun AudioStegoScreen(
  * once per completed action rather than only once per distinct value.
  */
 @Composable
-fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val controller = remember {
         AudioStegoController(carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) })
     }
@@ -239,9 +248,41 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     // then the genuine ExtractedSuccess-triggered relaunch inserted a second, identical row for
     // the same completed extract (task #18's live-reproduced double insert, ids 8 & 9).
     val fireflyStatus = controller.status
+
+    // Task #18 (gate-17), Stage B: persist the carrier WAV alongside the FireflyRecord at both
+    // catch sites below, so a caught firefly keeps the actual audio the message was hidden in.
+    // Same `controller.workingAudio`/`controller.workingChannelCount` source "play working"
+    // already reads from. Mirrors ImageStegoScreen.kt's `jarCatchFlow` shape (task #17): a local
+    // suspend helper called from inside each existing transition-guarded arm, with the WAV
+    // encode pushed off the composition (Main) dispatcher via `withContext(Dispatchers.Default)`.
+    // Falls back to the existing media-less insert() when there's no audio to attach --
+    // `workingAudio` is a non-null `PcmAudio` that defaults to an empty `ShortArray`, so this
+    // guards with `isNotEmpty()` rather than a null check -- or when `workingChannelCount` is
+    // neither 1 nor 2. That second case is not currently reachable: `AudioStegoController` only
+    // ever sets `workingChannelCount` to 1 (`selectCover`, and `embed` for every technique except
+    // PHASE_INVERSION) or 2 (`embed` for PHASE_INVERSION). Guarded anyway rather than assumed, so
+    // a future technique with a different channel count degrades to a media-less insert instead
+    // of guessing an encoder.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
+        val pcm = controller.workingAudio
+        val channelCount = controller.workingChannelCount
+        if (pcm.isEmpty() || (channelCount != 1 && channelCount != 2)) {
+            repository.insert(record)
+            return
+        }
+        val wavBytes = withContext(Dispatchers.Default) {
+            if (channelCount == 2) {
+                WavFile.encodePcm16Stereo(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            } else {
+                WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            }
+        }
+        repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+    }
+
     LaunchedEffect(fireflyStatus) {
         when (fireflyStatus) {
-            is AudioStegoStatus.Embedded -> dao.insert(
+            is AudioStegoStatus.Embedded -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.AUDIO_STEGANOGRAPHY.name,
                     direction = "CREATED",
@@ -251,7 +292,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     payloadPreview = payloadText.take(40),
                 ),
             )
-            is AudioStegoStatus.ExtractedSuccess -> dao.insert(
+            is AudioStegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.AUDIO_STEGANOGRAPHY.name,
                     direction = "RECEIVED",
@@ -316,86 +357,101 @@ private fun JarAudioStegoCatchFlowContent(
     val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column {
-            JarFlowRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatchExpanded)
-            if (catchExpanded) {
-                Column(
-                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "technique",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = JarTextSecondary,
-                        )
-                        AudioStegoTechnique.entries.forEach { option ->
-                            JarSelectorRow(
-                                label = techniqueLabel(option),
-                                selected = option == technique,
-                                enabled = idleEquivalent,
-                                onClick = { onSelectTechnique(option) },
-                            )
-                        }
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "cover clip",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = JarTextSecondary,
-                        )
-                        AudioSampleCover.entries.forEach { option ->
-                            JarSelectorRow(
-                                label = option.label,
-                                selected = option == cover,
-                                enabled = idleEquivalent,
-                                onClick = { onSelectCover(option) },
-                            )
-                        }
-                    }
-                    BasicTextField(
-                        value = payloadText,
-                        onValueChange = onPayloadTextChange,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
-                        cursorBrush = SolidColor(JarTextPrimary),
-                        enabled = idleEquivalent,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(width = 1.dp, color = JarGlassOutline)
-                            .padding(12.dp),
-                        decorationBox = { innerTextField ->
-                            if (payloadText.isEmpty()) {
-                                Text(
-                                    text = "what do you want to hide?",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = JarTextSecondary,
+        // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look are the humming
+        // jar's two stacked rows (§5 1g); the status readout and back link are their own sections.
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column {
+                JarFlowRow(
+                    label = "catch a firefly",
+                    enabled = idleEquivalent,
+                    fill = JarActionCatchFill,
+                    border = JarActionCatchBorder,
+                    onClick = onToggleCatchExpanded,
+                )
+                if (catchExpanded) {
+                    Column(
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(text = "technique", style = JarType.SectionLabel, color = JarTextTertiary)
+                            AudioStegoTechnique.entries.forEach { option ->
+                                JarSelectorRow(
+                                    label = techniqueLabel(option),
+                                    selected = option == technique,
+                                    enabled = idleEquivalent,
+                                    onClick = { onSelectTechnique(option) },
                                 )
                             }
-                            innerTextField()
-                        },
-                    )
-                    Text(
-                        text = if (payloadBytes > maxPayloadBytes) {
-                            "too big for this jar — trim it or try a different light"
-                        } else {
-                            "$payloadBytes / $maxPayloadBytes bytes"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JarTextSecondary,
-                    )
-                    JarFlowRow(label = "let it glow", enabled = canEmbed, onClick = onEmbed)
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(text = "cover clip", style = JarType.SectionLabel, color = JarTextTertiary)
+                            AudioSampleCover.entries.forEach { option ->
+                                JarSelectorRow(
+                                    label = option.label,
+                                    selected = option == cover,
+                                    enabled = idleEquivalent,
+                                    onClick = { onSelectCover(option) },
+                                )
+                            }
+                        }
+                        BasicTextField(
+                            value = payloadText,
+                            onValueChange = onPayloadTextChange,
+                            singleLine = true,
+                            textStyle = JarType.Body.copy(color = JarTextPrimary),
+                            cursorBrush = SolidColor(JarTextPrimary),
+                            enabled = idleEquivalent,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(JarTileFill)
+                                .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            decorationBox = { innerTextField ->
+                                if (payloadText.isEmpty()) {
+                                    Text(text = "what do you want to hide?", style = JarType.Body, color = JarTextTertiary)
+                                }
+                                innerTextField()
+                            },
+                        )
+                        Text(
+                            text = if (payloadBytes > maxPayloadBytes) {
+                                "too big for this jar — trim it or try a different light"
+                            } else {
+                                "$payloadBytes / $maxPayloadBytes bytes"
+                            },
+                            style = JarType.TileCaption,
+                            color = JarTextTertiary,
+                        )
+                        // A primary confirm action, not another list row — 12dp per
+                        // DESIGN_SPEC.md §3's "12px (primary buttons...)" radius tier.
+                        JarFlowRow(
+                            label = "let it glow",
+                            enabled = canEmbed,
+                            fill = JarActionCatchFill,
+                            border = JarActionCatchBorder,
+                            onClick = onEmbed,
+                            radius = 12.dp,
+                        )
+                    }
                 }
             }
-        }
 
-        JarFlowRow(label = "look for fireflies", enabled = idleEquivalent, onClick = onExtract)
+            JarFlowRow(
+                label = "look for fireflies",
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onExtract,
+            )
+        }
 
         JarStatusBlock(status = status)
 
         Text(
-            text = "back to the shelf",
-            style = MaterialTheme.typography.labelSmall,
+            text = "← back to the shelf",
+            style = JarType.BackLink,
             color = JarTextSecondary,
             modifier = Modifier
                 .clickable(onClick = onExit)
@@ -404,29 +460,45 @@ private fun JarAudioStegoCatchFlowContent(
     }
 }
 
-/** 44dp full-width jar-mode verb row — [JarFlowRow] is this flow's own thing, not
+/** Tinted, rounded jar-mode verb row — [JarFlowRow] is this flow's own thing, not
  *  [ActionRow]/[SelectorRowWithInfo], since the jar surface's palette (design/
  *  firefly-jar-identity.md) is [JarTextPrimary]/[JarTextSecondary], not
- *  [TextPrimary]/[TextSecondary], and this flow has no per-row info toggle. */
+ *  [TextPrimary]/[TextSecondary], and this flow has no per-row info toggle. Gold for "catch",
+ *  cyan for "look" (DESIGN_SPEC.md §1's card/row tint table); [radius] defaults to the 8dp
+ *  action-row tier, with the inline "let it glow" confirm button passing 12dp instead. */
 @Composable
-private fun JarFlowRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun JarFlowRow(
+    label: String,
+    enabled: Boolean,
+    fill: Color,
+    border: Color,
+    onClick: () -> Unit,
+    radius: Dp = 8.dp,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(44.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .clip(RoundedCornerShape(radius))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) JarTextPrimary else JarTextSecondary,
+            style = JarType.TileTitle,
+            color = if (enabled) JarTextPrimary else JarTextTertiary,
         )
     }
 }
 
 /** One selectable technique/cover-clip row inside the expanded "catch a firefly" section — no
- *  info toggle (unlike [SelectorRowWithInfo]), matching this jar-mode flow's simpler field set. */
+ *  info toggle (unlike [SelectorRowWithInfo]), matching this jar-mode flow's simpler field set.
+ *  Plain row, not a chip pill: DESIGN_SPEC.md §5 1g's technique chips are a horizontal group,
+ *  but re-laying this out as one would rearrange the existing vertical list, not just restyle it
+ *  — selected/unselected color follows the chip convention (gold chosen, tertiary otherwise)
+ *  without the chip's own fill/border/shape. */
 @Composable
 private fun JarSelectorRow(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
     Box(
@@ -438,8 +510,8 @@ private fun JarSelectorRow(label: String, selected: Boolean, enabled: Boolean, o
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) JarTextPrimary else JarTextSecondary,
+            style = JarType.TileTitle,
+            color = if (selected) FireflyCreated else JarTextTertiary,
         )
     }
 }
@@ -448,21 +520,15 @@ private fun JarSelectorRow(label: String, selected: Boolean, enabled: Boolean, o
 private fun JarStatusBlock(status: AudioStegoStatus) {
     when (status) {
         is AudioStegoStatus.Idle -> Unit
-        is AudioStegoStatus.Embedding -> Text(
-            text = "catching...",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextSecondary,
-        )
-        is AudioStegoStatus.Extracting -> Text(
-            text = "looking...",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextSecondary,
-        )
+        is AudioStegoStatus.Embedding -> Text(text = "catching", style = JarType.Footer, color = JarWatchingDim)
+        is AudioStegoStatus.Extracting -> Text(text = "looking", style = JarType.Footer, color = JarWatchingDim)
         is AudioStegoStatus.Embedded -> {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
                 text = "you caught one — ${status.payloadBytes} byte$plural",
-                style = MaterialTheme.typography.bodyLarge,
+                // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
+                // accented announcement, not the message body itself.
+                style = JarType.SectionLabel,
                 // design/firefly-jar-identity.md § Palette: FireflyCreated fires on every
                 // successful catch on this surface, unlike identity.md's "silence is success".
                 color = FireflyCreated,
@@ -470,12 +536,14 @@ private fun JarStatusBlock(status: AudioStegoStatus) {
         }
         is AudioStegoStatus.ExtractedSuccess -> Text(
             text = status.text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = FireflyReceived,
+            // DESIGN_SPEC.md §2's "Message/body text" role — cream, not the FireflyReceived
+            // accent; only a short result label above a real message takes the accent color.
+            style = JarType.Body,
+            color = JarTextPrimary,
         )
         is AudioStegoStatus.ExtractedFailure -> Text(
             text = jarExtractFailureMessage(status.reason),
-            style = MaterialTheme.typography.bodyLarge,
+            style = JarType.Body,
             color = JarTextSecondary,
         )
     }
@@ -969,14 +1037,17 @@ private fun extractFailureMessage(reason: DecodeFailure): String = when (reason)
 }
 
 /**
- * Owns the [CovertCarrier] round-trip work plus the `AudioTrack` playback transport for this
- * screen — same split `AcousticModemController`/`ImageStegoController` already use (codec is a
- * pure in-memory interface call; transport is this screen's own responsibility).
+ * Owns the [CovertCarrier] round-trip work for this screen, plus the "play cover"/"play working"
+ * UX (target tracking, tap-to-cutover, auto-stop after playback finishes) built on top of a
+ * shared [FireflyPlayer] instance that actually owns the `AudioTrack` transport (Stage C lift —
+ * see that class's KDoc). Same split `AcousticModemController`/`ImageStegoController` already use
+ * (codec is a pure in-memory interface call; transport is a separate concern).
  *
  * Two separate [CoroutineScope]s, on purpose: [codecScope] runs on [Dispatchers.Default] (CPU-
  * bound embed/extract math — FFTs, Reed-Solomon — exactly like `ImageStegoController`, NOT
  * `Dispatchers.IO`), while [playbackScope] runs on [Dispatchers.IO] (genuinely I/O-adjacent
- * `AudioTrack` construction/`write()`/`play()`, mirroring `AcousticModemController.playPcm`).
+ * `AudioTrack` construction/`write()`/`play()` inside [fireflyPlayer], mirroring
+ * `AcousticModemController.playPcm`).
  */
 class AudioStegoController(
     private val carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
@@ -1008,8 +1079,10 @@ class AudioStegoController(
     private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var playbackJob: Job? = null
 
-    @Volatile
-    private var activeAudioTrack: AudioTrack? = null
+    /** Lifted playback transport (Stage C) -- owns the `AudioTrack` construction/stop machinery
+     *  this controller used to keep as its own `activeAudioTrack`/`stopActiveTrack`/
+     *  `buildAudioTrack` trio. See [FireflyPlayer]'s class KDoc. */
+    private val fireflyPlayer = FireflyPlayer()
 
     /** Which clip is currently playing, if any -- see [PlaybackTarget]'s KDoc. */
     var nowPlaying: PlaybackTarget? by mutableStateOf(null)
@@ -1086,68 +1159,28 @@ class AudioStegoController(
     }
 
     /**
-     * Stops/releases any currently-playing `AudioTrack` before starting [pcm] — tapping
-     * "play working" while "play cover" is still playing cuts it off cleanly rather than
-     * overlapping, per the approved design. Sets/clears [nowPlaying] around the actual playback
-     * window (UX pass) so the row can show "playing X" instead of a static, feedback-free label.
+     * Delegates to [fireflyPlayer], which stops/releases any currently-playing clip before
+     * starting [pcm] — tapping "play working" while "play cover" is still playing cuts it off
+     * cleanly rather than overlapping, per the approved design. Sets/clears [nowPlaying] around
+     * the actual playback window (UX pass) so the row can show "playing X" instead of a static,
+     * feedback-free label. [FireflyPlayer.isPlaying] distinguishes a genuine start from
+     * [FireflyPlayer.play]'s silent no-op cases (empty [pcm], unsupported format) so those cases
+     * skip setting [nowPlaying] and the auto-stop delay below, exactly as the pre-lift code did.
      */
     private fun play(pcm: PcmAudio, channelCount: Int, target: PlaybackTarget) {
         playbackJob?.cancel()
         playbackJob = playbackScope.launch {
-            stopActiveTrack()
-            if (pcm.isEmpty()) return@launch
-            val track = buildAudioTrack(pcm, channelCount) ?: return@launch
-            activeAudioTrack = track
+            fireflyPlayer.play(pcm, channelCount)
+            if (!fireflyPlayer.isPlaying) return@launch
             nowPlaying = target
             try {
-                track.write(pcm, 0, pcm.size)
-                track.play()
                 val frameCount = pcm.size / channelCount
                 val durationMs = frameCount.toLong() * 1000L / NightjarAcoustics.SAMPLE_RATE_HZ
                 delay(durationMs + 200)
             } finally {
-                stopActiveTrack()
+                fireflyPlayer.stop()
                 nowPlaying = null
             }
-        }
-    }
-
-    private fun stopActiveTrack() {
-        activeAudioTrack?.let { track ->
-            try {
-                track.stop()
-            } catch (alreadyStopped: IllegalStateException) {
-                // Already stopped/uninitialized -- nothing to clean up.
-            }
-            track.release()
-        }
-        activeAudioTrack = null
-    }
-
-    private fun buildAudioTrack(pcm: PcmAudio, channelCount: Int): AudioTrack? {
-        val channelMask = if (channelCount == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
-        return try {
-            AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(NightjarAcoustics.SAMPLE_RATE_HZ)
-                        .setChannelMask(channelMask)
-                        .build(),
-                )
-                .setBufferSizeInBytes(pcm.size * 2)
-                .setTransferMode(AudioTrack.MODE_STATIC)
-                .build()
-        } catch (unsupported: UnsupportedOperationException) {
-            null
-        } catch (invalid: IllegalArgumentException) {
-            null
         }
     }
 
@@ -1157,7 +1190,7 @@ class AudioStegoController(
         codecScope.cancel()
         playbackJob?.cancel()
         playbackScope.cancel()
-        stopActiveTrack()
+        fireflyPlayer.release()
     }
 }
 

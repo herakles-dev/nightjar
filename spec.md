@@ -39,6 +39,18 @@ anywhere in the covert-data research base.
   deliberately different visual language (explicit user direction, not an
   oversight). The four technical screens are unchanged and remain fully
   functional side-by-side with this front-end.
+- **In scope (v4 addition, this spec revision):** Firefly content — the carrier
+  artifact behind each firefly is persisted alongside its `FireflyRecord`, so a
+  caught firefly can be seen, heard, and understood rather than only counted.
+  The stego image and the stego/transmitted audio clip are written app-private
+  at catch time; the per-jar swarm becomes a browsable roster of thumbnails; the
+  firefly detail gains a carrier viewer (image render, or waveform + playback), a
+  "where it hid" visualization, and a capacity readout. Storage is user-governed,
+  not silently unbounded: a total-usage readout, an advisory warning above a
+  threshold, clear-all, and per-firefly delete. Carrier kind is a field on the
+  record, not a per-`Module` branch — `architecture.md` § 6 still permits exactly
+  two exhaustive per-module `when`s and this adds none. The detector is untouched:
+  it creates no fireflies and therefore gains no media (INV-4).
 - **Out of scope:** Module 4 video steganography (needs a non-mobile ML
   watermarking component) — deferred; an `AudioStegDetector` counterpart for
   Module 2 (phase-correlation / cepstral-anomaly analysis) — deferred until
@@ -51,7 +63,15 @@ anywhere in the covert-data research base.
   technique (Track 4's subject matter turned on the app's own interface), not
   a hardened operational disguise tool; a persisted firefly history for the
   detector (Module 5) — it stays a passive one-way analyzer per INV-4, its
-  existing flagged-detection history is re-skinned, not modeled as a firefly
+  existing flagged-detection history is re-skinned, not modeled as a firefly;
+  a cross-jar library screen for the v4 addition — the per-jar swarm is the
+  collection surface (explicit user direction); automatic eviction or capping of
+  stored carrier media — retention is user-managed through the usage readout and
+  clear controls, not silently enforced (explicit user direction); export or
+  share of carrier media *from jar mode* — writing to `Pictures/Nightjar` and
+  `Music/Nightjar` stays the technical screens' deliberate save/share gesture;
+  a cover-vs-stego difference view and an L/R polarity view — the honest
+  follow-ups for the two techniques a spectrogram cannot show, deferred
 - **Crosses:** device speaker/mic (AudioRecord/AudioTrack); local
   filesystem/MediaStore for sample images; the existing `hek` ADB bridge for
   install + debug-state verification (not a runtime dependency); no
@@ -66,6 +86,12 @@ anywhere in the covert-data research base.
   architect-defined max size at the architect-defined SNR/distance envelope
 - INV-4: The detector can identify the app's own Module 3 transmission live —
   self-detectability is the defensive proof-of-concept this app exists for
+- INV-5: Persisted carrier media stays app-private (`filesDir`) — it is never
+  written to shared storage and never leaves the device except through the
+  technical screens' existing, explicitly-invoked save/share action
+- INV-6: No firefly media outlives its record and no record outlives its media —
+  clearing (all, or one) removes rows and files together, and an orphan sweep
+  reclaims any file a crash stranded between the two writes
 
 ## Non-goals
 - Not a Bluetooth/WiFi file-transfer replacement — throughput is
@@ -75,12 +101,18 @@ anywhere in the covert-data research base.
 - No backend/server component in v1
 - No broad device-compatibility matrix — targets the Pixel 6a + one second
   test device only
+- Not a media gallery or file manager — the firefly collection exists to explain
+  the covert channel that produced it, not to organize the user's media
 
 ## Runtime Verification Surface
 - Probe contract: debug builds expose a logcat-tagged JSON state dump
   (`COVERT_DEBUG` tag) — last encode/decode result, detector confidence
   score, current module-picker screen — queryable via the existing `hek
   logcat` bridge, so verification never falls back to screenshot-only checks
+- Probe contract (v4 addition): the same dump gains stored-media state — record
+  count, count carrying media, total media bytes, and orphan-file count — so
+  retention, clear-all, per-firefly delete and the orphan sweep are all assertable
+  as queryable state rather than judged from a screenshot
 - Waiver: N/A — probe required and defined above
 
 ## Agents
@@ -90,6 +122,7 @@ anywhere in the covert-data research base.
 | implementation | spec-implementer-v11 | bulk Kotlin build across module-picker, modem, detector, image stego |
 | visual/UX | android-designer | already scoped to this pixel6a workspace |
 | testing | spec-tester-v11 | round-trip + detector accuracy verification on both physical devices |
+| persistence (v4) | database-engineer | the Room v1→v2 migration is the one change that can brick launch for existing installs |
 
 ## Gates
 - gate-1: scaffolded, builds, module-picker navigates 3 empty stubs
@@ -134,3 +167,33 @@ anywhere in the covert-data research base.
   restarts) reviewed for what it stores, and a clear-history action exists
 - gate-15: covert-data cross-referenced (a short note in the relevant module
   README(s) or `RESEARCH_CONTEXT.md`); session closed
+
+## Gates — v4 addition (firefly carrier content)
+- gate-16: schema v2 lands safely — `FireflyRecord` gains its carrier fields, a
+  `Migration(1,2)` ships, schema export is switched on, and a JVM test proves a
+  v1 database holding rows opens, migrates, and keeps those rows with null
+  carrier fields. The database is version 1 today with no migration and no
+  destructive fallback, so this is the one change in the addition that can brick
+  launch for anyone with existing fireflies — it lands alone, before any UI
+- gate-17: carrier media is captured and provably intact — the three creating
+  jars write their artifact at catch time, and a round-trip test shows the bytes
+  the media store wrote decode back to a bitmap/PCM that still yields the
+  original payload through that carrier's own `decode`; the detector still
+  writes nothing (INV-4)
+- gate-18: a caught firefly can be seen and heard — images render, audio plays
+  with one clip at a time and stops on dispose, and pre-migration records with
+  no media degrade to the existing text-only layout instead of erroring
+- gate-19: the channel is legible, honestly — LSB bit-plane for images and a
+  spectrogram for audio, with the two cases a spectrogram genuinely cannot show
+  (spectrogram-LSB's sub-perceptual QIM, phase-inversion's stereo polarity)
+  labeled as such rather than shipped with a visualization that implies the eye
+  should catch something it cannot
+- gate-20: retention is governed and honest — usage readout, advisory warning
+  above threshold, clear-all removing rows *and* files, per-firefly delete, and
+  an orphan sweep; INV-5/INV-6 hold under test, extending gate-14's retention
+  review to cover carrier media
+- gate-21: docs reconciled — `architecture.md` § 3/§ 6, `design/screen-flow.md`
+  (its Screen 7 content list and its explicit per-firefly-delete deferral are
+  both superseded), `design/firefly-jar-identity.md` (waveform/spectrogram/
+  bit-plane are data visualizations, not decoration — confirm against the
+  mascot/carousel/Discover ban); covert-data cross-referenced; session closed

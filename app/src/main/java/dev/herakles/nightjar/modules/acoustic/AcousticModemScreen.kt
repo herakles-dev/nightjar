@@ -30,11 +30,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -48,6 +52,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -62,16 +68,27 @@ import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.WavFile
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
+import dev.herakles.nightjar.modules.fireflyjar.JarGlyph
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
+import dev.herakles.nightjar.ui.theme.JarCardFill
+import dev.herakles.nightjar.ui.theme.JarMeterTrack
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import java.io.ByteArrayOutputStream
@@ -323,9 +340,16 @@ fun AcousticModemScreen(
  * `Transmitting` — moot here anyway since [JarModemFlowContent]'s `canCatch` gate matches
  * [AcousticModemContent]'s `canTransmit` and disables the row over budget), and
  * [ModemStatus.DecodedSuccess] is itself a terminal, one-shot state.
+ *
+ * Task #17 (design refresh) re-skins everything below against
+ * `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md` §5 screens 1d/1e — the catch flow
+ * gets its own small jar preview, gold input box, and gradient "send" button; the listen flow
+ * gets a cyan listening card with a real level meter and a "you spotted one" result card. This
+ * function's own state/controller wiring is untouched; only [JarModemFlowContent] and its
+ * private helpers below changed.
  */
 @Composable
-fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
 
     var protocol by remember { mutableStateOf(NightjarAcoustics.Protocol.AUDIBLE) }
@@ -356,6 +380,30 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
     val status = controller.status
     var previousStatus by remember { mutableStateOf<ModemStatus>(ModemStatus.Idle) }
+
+    // Task #19 (gate-17), Stage B: persist the carrier WAV alongside the FireflyRecord at both
+    // catch sites below. Mirrors ImageStegoScreen.kt's/AudioStegoScreen.kt's `jarCatchFlow` shape
+    // (tasks #17/#18): a local suspend helper called from inside the existing transition-guarded
+    // arms, WAV encode pushed off the composition (Main) dispatcher via
+    // `withContext(Dispatchers.Default)` (encoding a full 20s capture -- ~1.9 MB, the largest
+    // media this app writes -- inline in the LaunchedEffect body would block composition). Unlike
+    // the other two screens, this one has no single controller-held "current media" property that
+    // both directions can share: CREATED wants [AcousticModemController.lastTransmittedPcm] and
+    // RECEIVED wants [AcousticModemController.lastDecodedPcm], so [pcm] is a parameter rather than
+    // read from a fixed controller field. Falls back to the existing media-less insert() when
+    // there's no PCM (nothing transmitted/decoded yet) or it's empty -- never writes a zero-byte
+    // file.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord, pcm: PcmAudio?) {
+        if (pcm == null || pcm.isEmpty()) {
+            repository.insert(record)
+            return
+        }
+        val wavBytes = withContext(Dispatchers.Default) {
+            WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+        }
+        repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+    }
+
     // Keyed on the status's class rather than the full value: ModemStatus.Listening carries a
     // levelDb/remainingSeconds pair that changes on every ~85ms captured chunk (200+ instances
     // over a full listen window), and neither branch below needs to observe that churn — only
@@ -363,7 +411,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     LaunchedEffect(status::class) {
         if (status is ModemStatus.Idle && previousStatus is ModemStatus.Transmitting) {
             val bytes = payloadText.encodeToByteArray().size
-            dao.insert(
+            insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.ACOUSTIC_MODEM.name,
                     direction = "CREATED",
@@ -372,11 +420,12 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     technique = null,
                     payloadPreview = payloadText.take(40),
                 ),
+                controller.lastTransmittedPcm,
             )
             catchResultMessage = "you caught one — $bytes bytes"
         } else if (status is ModemStatus.DecodedSuccess) {
             val bytes = status.text.encodeToByteArray().size
-            dao.insert(
+            insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.ACOUSTIC_MODEM.name,
                     direction = "RECEIVED",
@@ -385,6 +434,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     technique = null,
                     payloadPreview = status.text.take(40),
                 ),
+                controller.lastDecodedPcm,
             )
         }
         previousStatus = status
@@ -423,13 +473,14 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
 /**
  * Pure UI for [jarCatchFlow]: no [FireflyDao], no carrier, no permission logic — same
- * stateful-root/pure-content split every screen in this app uses. Two clusters (screen-flow.md §
- * Screen 7): "catch a firefly" expands inline into the payload field + protocol/symbol-rate
- * selector + a confirm row when tapped (the same fields [AcousticModemContent] defines for this
- * module, per gate-13 — nothing here is a second implementation of them); "look for fireflies"
- * (toggles to "stop") needs no extra fields. Jar palette throughout ([JarTextPrimary]/
- * [JarTextSecondary]/[FireflyCreated]/[FireflyReceived]) rather than this file's technical
- * [TextPrimary]/[TextSecondary]/[AccentSignal] — this content sits inside
+ * stateful-root/pure-content split every screen in this app uses. Two clusters: "catch a
+ * firefly" expands inline into a small jar preview, payload field, protocol/symbol-rate
+ * selector, and a "send" button when tapped (the same fields [AcousticModemContent] defines
+ * for this module, per gate-13 — nothing here is a second implementation of them); "look for
+ * fireflies" swaps for a cyan listening card the moment [status] actually is
+ * [ModemStatus.Listening], per DESIGN_SPEC.md §5 screens 1d/1e. Jar palette throughout
+ * ([JarTextPrimary]/[JarTextTertiary]/[FireflyCreated]/[FireflyReceived]) rather than this
+ * file's technical [TextPrimary]/[TextSecondary]/[AccentSignal] — this content sits inside
  * [dev.herakles.nightjar.modules.fireflyjar.JarDetailContent]'s dusk/horizon gradient shell, not
  * this screen's own [BgBase].
  */
@@ -456,61 +507,51 @@ private fun JarModemFlowContent(
     val payloadBytes = payloadText.encodeToByteArray().size
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
     val canToggleLook = idleEquivalent || status is ModemStatus.Listening
-    val lookLabel = if (status is ModemStatus.Listening) "stop" else "look for fireflies"
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column {
-            JarFlowRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatch)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            JarFlowRow(
+                label = "catch a firefly",
+                accent = FireflyCreated,
+                fill = JarActionCatchFill,
+                border = JarActionCatchBorder,
+                enabled = idleEquivalent,
+                onClick = onToggleCatch,
+            )
             if (catchExpanded) {
-                Column(
-                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    BasicTextField(
-                        value = payloadText,
-                        onValueChange = onPayloadTextChange,
-                        singleLine = true,
-                        enabled = idleEquivalent,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
-                        cursorBrush = SolidColor(JarTextPrimary),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(width = 1.dp, color = JarTextSecondary.copy(alpha = 0.4f))
-                            .padding(12.dp),
-                        decorationBox = { innerTextField ->
-                            if (payloadText.isEmpty()) {
-                                Text(
-                                    text = "what do you want to send?",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = JarTextSecondary,
-                                )
-                            }
-                            innerTextField()
-                        },
-                    )
-                    Text(
-                        text = "$payloadBytes / $maxPayloadBytes bytes",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JarTextSecondary,
-                    )
-                    JarProtocolAndRateSelector(
-                        protocol = protocol,
-                        onProtocolChange = onProtocolChange,
-                        symbolRate = symbolRate,
-                        onSymbolRateChange = onSymbolRateChange,
-                        enabled = idleEquivalent,
-                    )
-                    JarFlowRow(label = "send it out", enabled = canCatch, onClick = onCatch)
-                }
+                JarCatchExpanded(
+                    payloadText = payloadText,
+                    onPayloadTextChange = onPayloadTextChange,
+                    payloadBytes = payloadBytes,
+                    maxPayloadBytes = maxPayloadBytes,
+                    protocol = protocol,
+                    onProtocolChange = onProtocolChange,
+                    symbolRate = symbolRate,
+                    onSymbolRateChange = onSymbolRateChange,
+                    enabled = idleEquivalent,
+                    canCatch = canCatch,
+                    onCatch = onCatch,
+                )
             }
         }
 
-        JarFlowRow(label = lookLabel, enabled = canToggleLook, onClick = onToggleLook)
+        if (status is ModemStatus.Listening) {
+            JarListeningCard(status = status, onStop = onToggleLook)
+        } else {
+            JarFlowRow(
+                label = "look for fireflies",
+                accent = FireflyReceived,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                enabled = canToggleLook,
+                onClick = onToggleLook,
+            )
+        }
 
         if (micPermissionDenied) {
             Text(
                 text = "needs the microphone to look for fireflies.",
-                style = MaterialTheme.typography.bodyLarge,
+                style = JarType.Body,
                 color = JarTextSecondary,
             )
         }
@@ -519,30 +560,139 @@ private fun JarModemFlowContent(
     }
 }
 
-/** One tappable jar-flow row — [JarTextPrimary]/[JarTextSecondary] equivalent of this file's own
- *  technical [ActionRow]. */
+/** One tappable jar-flow row (DESIGN_SPEC.md §5 1d/1e screen titles doubling as this app's
+ *  single-screen entry point — no separate navigation exists, so the row IS the title). [fill]/
+ *  [border] are the module's own accent-tinted tokens ([JarActionCatchFill]/[JarActionLookFill]
+ *  and their border twins) — never a new inline color. */
 @Composable
-private fun JarFlowRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun JarFlowRow(label: String, accent: Color, fill: Color, border: Color, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .clip(RoundedCornerShape(8.dp))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(8.dp))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) JarTextPrimary else JarTextSecondary,
+            style = JarType.ActionTitle,
+            color = if (enabled) accent else JarTextTertiary,
         )
     }
 }
 
 /**
+ * DESIGN_SPEC.md §5 1d — the expanded "catch a firefly" flow: a small jar preview, the payload
+ * field, the (preserved, restyled) protocol/symbol-rate selector, and the "send" button. Same
+ * fields [AcousticModemContent] defines for this module, per gate-13 — nothing here is a second
+ * implementation of them.
+ */
+@Composable
+private fun JarCatchExpanded(
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    payloadBytes: Int,
+    maxPayloadBytes: Int,
+    protocol: NightjarAcoustics.Protocol,
+    onProtocolChange: (NightjarAcoustics.Protocol) -> Unit,
+    symbolRate: NightjarAcoustics.SymbolRate,
+    onSymbolRateChange: (NightjarAcoustics.SymbolRate) -> Unit,
+    enabled: Boolean,
+    canCatch: Boolean,
+    onCatch: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            JarGlyph(
+                module = Module.ACOUSTIC_MODEM,
+                fireflies = listOf(FireflyVisual(id = 10, color = FireflyCreated)),
+                modifier = Modifier.size(width = 80.dp, height = 96.dp),
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(text = "your message", style = JarType.SectionLabel, color = JarTextTertiary)
+            BasicTextField(
+                value = payloadText,
+                onValueChange = onPayloadTextChange,
+                singleLine = true,
+                enabled = enabled,
+                textStyle = JarType.Body.copy(color = JarTextPrimary),
+                cursorBrush = SolidColor(JarTextPrimary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(JarCardFill)
+                    .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                    .padding(12.dp),
+                decorationBox = { innerTextField ->
+                    if (payloadText.isEmpty()) {
+                        Text(text = "what do you want to send?", style = JarType.Body, color = JarTextTertiary)
+                    }
+                    innerTextField()
+                },
+            )
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                Text(
+                    text = "$payloadBytes / $maxPayloadBytes bytes",
+                    style = JarType.MetaLabel,
+                    color = JarTextTertiary,
+                )
+            }
+        }
+
+        JarProtocolAndRateSelector(
+            protocol = protocol,
+            onProtocolChange = onProtocolChange,
+            symbolRate = symbolRate,
+            onSymbolRateChange = onSymbolRateChange,
+            enabled = enabled,
+        )
+
+        JarSendButton(enabled = canCatch, onClick = onCatch)
+    }
+}
+
+/** DESIGN_SPEC.md §5 1d's gold gradient "send" button — the gradient/border alphas are derived
+ *  from [FireflyCreated] via `.copy(alpha = …)`, never a new named color. */
+@Composable
+private fun JarSendButton(enabled: Boolean, onClick: () -> Unit) {
+    val strength = if (enabled) 1f else 0.4f
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        FireflyCreated.copy(alpha = 0.15f * strength),
+                        FireflyCreated.copy(alpha = 0.08f * strength),
+                    ),
+                ),
+            )
+            .border(width = 1.dp, color = FireflyCreated.copy(alpha = 0.25f * strength), shape = RoundedCornerShape(12.dp))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(text = "send", style = JarType.ButtonLabel, color = FireflyCreated.copy(alpha = strength))
+        Text(text = "plays sound from speaker", style = JarType.Footer, color = JarTextSecondary)
+    }
+}
+
+/**
  * Jar-palette equivalent of this file's own technical [ChannelSettingsBlock] — same
- * protocol/symbol-rate fields and [protocolLabel]/[symbolRateLabel] copy (screen-flow.md § Screen
- * 7: "same fields Screen 2/4/5 already define for this module"), just re-colored for the jar
- * shell and with its mismatch note softened into jar voice.
+ * protocol/symbol-rate fields and [protocolLabel]/[symbolRateLabel] copy, just re-colored for the
+ * jar shell and with its mismatch note softened into jar voice. Not part of DESIGN_SPEC.md's 1d
+ * mockup (which has no home for this control) — preserved per this task's own instruction to keep
+ * existing controls the spec's layout doesn't show, restyled rather than deleted.
  */
 @Composable
 private fun JarProtocolAndRateSelector(
@@ -554,7 +704,7 @@ private fun JarProtocolAndRateSelector(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = "protocol", style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+            Text(text = "protocol", style = JarType.SectionLabel, color = JarTextTertiary)
             NightjarAcoustics.Protocol.entries.forEach { option ->
                 JarOptionRow(
                     label = protocolLabel(option),
@@ -565,7 +715,7 @@ private fun JarProtocolAndRateSelector(
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = "symbol rate", style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+            Text(text = "symbol rate", style = JarType.SectionLabel, color = JarTextTertiary)
             NightjarAcoustics.SymbolRate.entries.forEach { option ->
                 JarOptionRow(
                     label = symbolRateLabel(option),
@@ -577,7 +727,7 @@ private fun JarProtocolAndRateSelector(
         }
         Text(
             text = "both phones need to match here, or the other one won't see your light.",
-            style = MaterialTheme.typography.labelSmall,
+            style = JarType.Footer,
             color = JarTextSecondary,
         )
     }
@@ -595,8 +745,8 @@ private fun JarOptionRow(label: String, selected: Boolean, enabled: Boolean, onC
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) JarTextPrimary else JarTextSecondary,
+            style = JarType.Body,
+            color = if (selected) JarTextPrimary else JarTextTertiary,
         )
     }
 }
@@ -604,39 +754,30 @@ private fun JarOptionRow(label: String, selected: Boolean, enabled: Boolean, onC
 /**
  * Jar-palette, jar-copy twin of this file's own technical [StatusBlock]. [catchResultMessage]
  * (set by [jarCatchFlow] the moment a catch round-trip completes — [ModemStatus] itself has no
- * persisted "encode succeeded" state, unlike e.g. `ImageStegoScreen`'s `Embedded`) renders in the
- * one idle-equivalent slot the technical screen leaves silent (this file's "no success color,
- * silence is success" rule stays true for the *technical* screen; the jar shell's whole point is
- * a warmer, narrated voice — screen-flow.md's copy table gives "you caught one — N bytes" as
- * exactly this state's mapped phrase). [ModemStatus.Importing]/[ModemStatus.ImportFailed] can
- * never actually occur here (this flow has no import affordance — "look for fireflies" is listen-
- * only, screen-flow.md § Screen 7), but [ModemStatus] is sealed so the `when` still names them.
+ * persisted "encode succeeded" state, unlike e.g. `ImageStegoScreen`'s `Embedded`) renders gold —
+ * firefly-jar-identity.md's doctrine reversal explicitly allows a success color here, unlike this
+ * file's own technical screen. [ModemStatus.Listening] is handled by [JarListeningCard] one level
+ * up, not here, so it's `Unit` in this `when`. [ModemStatus.Importing]/[ModemStatus.ImportFailed]
+ * can never actually occur in this flow (no import affordance — "look for fireflies" is listen-
+ * only), but [ModemStatus] is sealed so the `when` still names them.
  */
 @Composable
 private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?) {
     when (status) {
         is ModemStatus.Idle -> if (catchResultMessage != null) {
-            Text(text = catchResultMessage, style = MaterialTheme.typography.bodyLarge, color = JarTextPrimary)
+            Text(text = catchResultMessage, style = JarType.SectionLabel, color = FireflyCreated)
+        } else {
+            Text(text = "ready to catch", style = JarType.Footer, color = JarWatchingDim)
         }
         is ModemStatus.Encoding -> JarStatusWord("warming up the light")
         is ModemStatus.Transmitting -> JarStatusWord("sending the glow", color = FireflyCreated)
-        is ModemStatus.Listening -> JarListeningBlock(status)
+        is ModemStatus.Listening -> Unit
         is ModemStatus.Importing -> Unit
         is ModemStatus.Decoding -> JarStatusWord("reading the light")
-        is ModemStatus.DecodedSuccess -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = status.text, style = MaterialTheme.typography.bodyLarge, color = JarTextPrimary)
-            if (status.correctedByteErrors > 0) {
-                val plural = if (status.correctedByteErrors == 1) "" else "s"
-                Text(
-                    text = "${status.correctedByteErrors} byte$plural corrected",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = JarTextSecondary,
-                )
-            }
-        }
+        is ModemStatus.DecodedSuccess -> JarCatchResultCard(status)
         is ModemStatus.DecodedFailure -> Text(
             text = jarFailureMessage(status.reason),
-            style = MaterialTheme.typography.bodyLarge,
+            style = JarType.Body,
             color = JarTextSecondary,
         )
         is ModemStatus.ImportFailed -> Unit
@@ -645,33 +786,114 @@ private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?
 
 @Composable
 private fun JarStatusWord(word: String, color: Color = JarTextSecondary) {
-    Text(text = word, style = MaterialTheme.typography.labelLarge, color = color)
+    Text(text = word, style = JarType.SectionLabel, color = color)
+}
+
+/** DESIGN_SPEC.md §5 1e's "you spotted one" result card — reuses [JarActionLookFill]/
+ *  [JarActionLookBorder] rather than a new token, same cyan the listening card itself uses. The
+ *  byte count and correction count both always render (the mockup's own example, "22 bytes · 0
+ *  corrected", shows the zero case rather than hiding it). */
+@Composable
+private fun JarCatchResultCard(status: ModemStatus.DecodedSuccess) {
+    val bytes = status.text.encodeToByteArray().size
+    val plural = if (status.correctedByteErrors == 1) "" else "s"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(JarActionLookFill)
+            .border(width = 1.dp, color = JarActionLookBorder, shape = RoundedCornerShape(10.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(text = "you spotted one", style = JarType.SectionLabel, color = FireflyReceived)
+        Text(text = status.text, style = JarType.Body, color = JarTextPrimary)
+        Text(
+            text = "$bytes bytes · ${status.correctedByteErrors} byte$plural corrected",
+            style = JarType.MetaLabel,
+            color = JarTextTertiary,
+        )
+    }
 }
 
 /**
- * Jar-palette twin of this file's own technical [ListeningBlock]. `levelDb` is remapped from
- * dBFS ([SILENCE_FLOOR_DB]..0) onto the same plain 0-100 "strength" convention the watching jar
- * (detector) already uses for its confidence readout, rather than surfacing a raw dB number —
- * the jar shell's whole premise is staying in plain, undisguised-technical language.
+ * DESIGN_SPEC.md §5 1e — the cyan listening card: a small jar preview, the "listening"/countdown
+ * row, a real level meter (never the mockup's sine-wave placeholder, §4.8 — [status.levelDb] is
+ * the actual captured level), and the "stop" button. Jar-palette twin of this file's own
+ * technical [ListeningBlock]; `levelDb` is remapped from dBFS ([SILENCE_FLOOR_DB]..0) onto the
+ * same plain 0-100 "strength" convention the watching jar (detector) already uses for its
+ * confidence readout, rather than surfacing a raw dB number.
  */
 @Composable
-private fun JarListeningBlock(status: ModemStatus.Listening) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        JarStatusWord("looking for fireflies", color = FireflyReceived)
+private fun JarListeningCard(status: ModemStatus.Listening, onStop: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(JarActionLookFill)
+            .border(width = 1.dp, color = JarActionLookBorder, shape = RoundedCornerShape(12.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            JarGlyph(
+                module = Module.ACOUSTIC_MODEM,
+                fireflies = listOf(FireflyVisual(id = 11, color = FireflyReceived)),
+                modifier = Modifier.size(width = 80.dp, height = 96.dp),
+            )
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(text = "listening", style = JarType.SectionLabel, color = FireflyReceived)
+            val remaining = status.remainingSeconds.roundToInt().coerceAtLeast(0)
+            Text(text = "${remaining}s left", style = JarType.MetaLabel, color = JarTextSecondary)
+        }
+
         val glowStrength = status.levelDb?.let { db ->
             (((db - SILENCE_FLOOR_DB) / -SILENCE_FLOOR_DB) * 100).roundToInt().coerceIn(0, 100)
         }
-        Text(
-            text = glowStrength?.let { "glow strength $it" } ?: "waiting for a glow to start",
-            style = MaterialTheme.typography.labelSmall,
-            color = JarTextSecondary,
-        )
-        val remaining = status.remainingSeconds.roundToInt().coerceAtLeast(0)
-        Text(
-            text = "${remaining}s left to spot one",
-            style = MaterialTheme.typography.labelSmall,
-            color = JarTextSecondary,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(text = "glow strength", style = JarType.MetaLabel, color = JarTextTertiary)
+                Text(
+                    text = glowStrength?.toString() ?: "waiting",
+                    style = JarType.MetaLabel,
+                    color = JarTextTertiary,
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(JarMeterTrack),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction = (glowStrength ?: 0) / 100f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(FireflyReceived.copy(alpha = 0.25f), FireflyReceived),
+                            ),
+                        ),
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(FireflyReceived.copy(alpha = 0.10f))
+                .border(width = 1.dp, color = FireflyReceived.copy(alpha = 0.20f), shape = RoundedCornerShape(12.dp))
+                .clickable(onClick = onStop)
+                .padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(text = "stop", style = JarType.ButtonLabel, color = FireflyReceived)
+        }
     }
 }
 
@@ -1152,6 +1374,28 @@ class AcousticModemController(
     var fileActionBusyLabel: String? by mutableStateOf(null)
         private set
 
+    /**
+     * Task #19 (gate-17), Stage B: the last successfully-transmitted clip. [ModemStatus] carries
+     * no PCM of its own, and the `pcm` [transmit] encodes is a coroutine-local that's gone by the
+     * time `jarCatchFlow`'s separate `LaunchedEffect(status::class)` reacts to the
+     * Transmitting→Idle edge and wants to persist it alongside the CREATED [FireflyRecord]. One
+     * clip, overwritten on every transmit -- not a history buffer.
+     */
+    var lastTransmittedPcm: PcmAudio? by mutableStateOf(null)
+        private set
+
+    /**
+     * Task #19 (gate-17), Stage B: the audio [carrier.decode] most recently ran against -- from
+     * either a live [capturePcm] mic window ([startListening]) or an [importAndDecode] file pick,
+     * whichever path most recently produced the [ModemStatus.DecodedSuccess] that
+     * `jarCatchFlow`'s effect reacts to. Same retain-because-the-local-goes-out-of-scope need as
+     * [lastTransmittedPcm]; kept path-agnostic (updated by both callers) so a
+     * decode-success-via-import never gets tagged with a stale clip left over from an earlier
+     * live listen. One clip, overwritten on every decode attempt -- not a history buffer.
+     */
+    var lastDecodedPcm: PcmAudio? by mutableStateOf(null)
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listening = AtomicBoolean(false)
 
@@ -1174,6 +1418,7 @@ class AcousticModemController(
             }
             DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.ENCODE, success = true)
             status = ModemStatus.Transmitting
+            lastTransmittedPcm = pcm
             playPcm(pcm)
             status = ModemStatus.Idle
         }
@@ -1328,6 +1573,7 @@ class AcousticModemController(
             // does by chance. Padding with trailing silence is safe: decode() locates every
             // window from the header's own declared length, never from the buffer's total size.
             val pcm = padToFrameBoundary(imported.samples)
+            lastDecodedPcm = pcm
             status = when (val result = carrier.decode(pcm)) {
                 is DecodeResult.Success -> {
                     DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, success = true)
@@ -1356,6 +1602,7 @@ class AcousticModemController(
                 status = ModemStatus.Idle
                 return@launch
             }
+            lastDecodedPcm = captureResult.pcm
             status = ModemStatus.Decoding
             status = when (val result = carrier.decode(captureResult.pcm)) {
                 is DecodeResult.Success -> {

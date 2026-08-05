@@ -45,17 +45,24 @@ enum class JarRole { CREATION, WATCHING }
  * Task #4 (Firefly Jar v3): added [jarName]/[jarRole] — the disguise-themed name and
  * shelf role shown on the Firefly Jar surface (design/firefly-jar-identity.md). Not used
  * by [ModulePicker] itself; consumed by the jar shelf/detail screens.
+ *
+ * Task #16 (design refresh): added [jarChannel] — the one-word carrier a firefly
+ * travelled over, for the firefly-detail popup's metadata row (DESIGN_SPEC.md §5 1c).
+ * It lives here for the same reason [jarName] does: architecture.md § 6 allows exactly
+ * two exhaustive per-module branches in the app, and the detail screen is not one of
+ * them, so a display string it needs has to arrive as enum data rather than a `when`.
  */
 enum class Module(
     val label: String,
     val description: String,
     val jarName: String,
     val jarRole: JarRole,
+    val jarChannel: String,
 ) {
-    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION),
-    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the framed jar", JarRole.CREATION),
-    DETECTOR("detector", "continuously listens for the modem's signal", "the watching jar", JarRole.WATCHING),
-    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION),
+    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION, "sound"),
+    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the framed jar", JarRole.CREATION, "a picture"),
+    DETECTOR("detector", "continuously listens for the modem's signal", "the watching jar", JarRole.WATCHING, "the air"),
+    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION, "a recording"),
 }
 
 /**

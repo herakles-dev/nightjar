@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -38,10 +39,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.CovertDetector
@@ -53,7 +57,7 @@ import dev.herakles.nightjar.ImageSteganalysis
 import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.R
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.ui.theme.AccentSignal
@@ -61,8 +65,18 @@ import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionCheckBorder
+import dev.herakles.nightjar.ui.theme.JarActionCheckFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarTileFill
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import java.io.ByteArrayOutputStream
@@ -330,7 +344,7 @@ fun ImageStegoScreen(
  * embed/extract... logic, it re-presents it." Builds its own [ImageStegoController] wrapping the
  * concrete [ImageStegoCarrier]/[ImageSteganalysis] pair directly: unlike [ImageStegoScreen],
  * this function's call site (`catchFlowFor` in `JarCatchFlows.kt`, task #9) has a fixed
- * `(dao, onExit)` signature with no carrier/detector injection point the way `MainActivity`'s
+ * `(repository, onExit)` signature with no carrier/detector injection point the way `MainActivity`'s
  * technical-screen route has, so there's nowhere else for that wiring to live. Zero changes to
  * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
  *
@@ -358,7 +372,7 @@ fun ImageStegoScreen(
  * affordance — worth a second look if that reading turns out wrong.
  */
 @Composable
-fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
     val controller = remember {
         ImageStegoController(
@@ -408,7 +422,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     // that triggered that specific instance, both instances ended up reading the *same* final
     // Embedded(N) value — and raced on the shared `previousStatus` remembered state, both
     // reading it as not-yet-Embedded before either wrote back, so both independently passed
-    // the transition guard and both called `dao.insert(...)`. Live-reproduced and confirmed via
+    // the transition guard and both called `repository.insert(...)`. Live-reproduced and confirmed via
     // temporary logging: two effect firings, identical status object identity, both reading
     // `previousStatus=Idle`, 31ms apart — the same signature as every prior duplicate-insert
     // report. AcousticModemScreen.kt's `jarCatchFlow` never exhibited this bug because it
@@ -418,9 +432,29 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     // gap: an effect instance can now only ever observe the value it was actually launched for.
     val status = controller.status
     var previousStatus: StegoStatus by remember { mutableStateOf(StegoStatus.Idle) }
+
+    // Task #17 (gate-17), Stage B: persist the carrier PNG alongside the FireflyRecord at both
+    // catch sites below, so the firefly the operator caught keeps the actual image the message
+    // was hidden in. Same `controller.workingBitmap ?: coverBitmap` source onLookForFireflies/
+    // onPeekInside already read from. PNG encoding is real CPU work, so it's pushed off the
+    // composition (Main) dispatcher -- this LaunchedEffect body otherwise runs on Main. Falls
+    // back to the existing media-less insert() when there's no bitmap to attach (should not
+    // happen in practice -- coverBitmap is always a decoded bundled resource here -- but keeps
+    // this path crash-free and zero-byte-file-free either way). Called from inside the two
+    // transition-guarded `when` arms below, never outside them.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
+        val bitmap = controller.workingBitmap ?: coverBitmap
+        if (bitmap == null) {
+            repository.insert(record)
+            return
+        }
+        val pngBytes = withContext(Dispatchers.Default) { encodePngBytes(bitmap) }
+        repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
+    }
+
     LaunchedEffect(status) {
         when {
-            status is StegoStatus.Embedded && previousStatus !is StegoStatus.Embedded -> dao.insert(
+            status is StegoStatus.Embedded && previousStatus !is StegoStatus.Embedded -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.IMAGE_STEGANOGRAPHY.name,
                     direction = "CREATED",
@@ -430,7 +464,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     payloadPreview = pendingCatchPreview.take(40),
                 ),
             )
-            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> dao.insert(
+            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.IMAGE_STEGANOGRAPHY.name,
                     direction = "RECEIVED",
@@ -469,11 +503,14 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
 /**
  * Pure UI for [jarCatchFlow]: no [FireflyDao], no `Context`/bitmap decoding, same
- * stateful-root/pure-content split every screen in this app uses. Jar palette only
- * ([JarTextPrimary]/[JarTextSecondary]/[FireflyCreated]/[FireflyReceived]) — never
- * [TextPrimary]/[TextSecondary]/[AccentSignal], which belong to the technical surface this jar
- * disguises (design/firefly-jar-identity.md § Palette). No cards, no borders, matching
- * screen-flow.md § Screen 7's plain wireframe.
+ * stateful-root/pure-content split every screen in this app uses. Jar palette and type only
+ * ([JarType], [JarTextPrimary]/[JarTextSecondary]/[JarTextTertiary]/[FireflyCreated]/
+ * [FireflyReceived]) — never [MaterialTheme.typography]/[TextPrimary]/[TextSecondary]/
+ * [AccentSignal], which belong to the technical surface this jar disguises (design/
+ * firefly-jar-identity.md § Palette). Design-refresh pass (Task #18): action rows and the
+ * payload field now carry the tinted, rounded-corner card treatment DESIGN_SPEC.md §1/§3
+ * defines for them (gold/cyan/purple by verb, 8dp rows, 12dp confirm button) — this file's
+ * three rows previously rendered as bare text with no fill or border.
  */
 @Composable
 private fun JarImageStegoContent(
@@ -498,69 +535,114 @@ private fun JarImageStegoContent(
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column {
-            JarActionRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatchExpanded)
-            if (catchExpanded) {
-                Column(
-                    modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SampleCover.entries.forEach { cover ->
-                        JarCoverRow(
-                            label = cover.label,
-                            selected = coverChoice == cover,
+        // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look/peek are the
+        // framed jar's three stacked rows (§5 1f); the status readout below is its own section.
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column {
+                JarActionRow(
+                    label = "catch a firefly",
+                    enabled = idleEquivalent,
+                    fill = JarActionCatchFill,
+                    border = JarActionCatchBorder,
+                    onClick = onToggleCatchExpanded,
+                )
+                if (catchExpanded) {
+                    Column(
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SampleCover.entries.forEach { cover ->
+                            JarCoverRow(
+                                label = cover.label,
+                                selected = coverChoice == cover,
+                                enabled = idleEquivalent,
+                                onClick = { onSelectCover(cover) },
+                            )
+                        }
+                        BasicTextField(
+                            value = payloadText,
+                            onValueChange = onPayloadTextChange,
+                            singleLine = true,
+                            textStyle = JarType.Body.copy(color = JarTextPrimary),
+                            cursorBrush = SolidColor(JarTextPrimary),
                             enabled = idleEquivalent,
-                            onClick = { onSelectCover(cover) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(JarTileFill)
+                                .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            decorationBox = { innerTextField ->
+                                if (payloadText.isEmpty()) {
+                                    Text(text = "what to hide", style = JarType.Body, color = JarTextTertiary)
+                                }
+                                innerTextField()
+                            },
+                        )
+                        Text(
+                            text = "$payloadBytes / $maxPayloadBytes bytes",
+                            style = JarType.TileCaption,
+                            color = JarTextTertiary,
+                        )
+                        // A primary confirm action, not another list row — 12dp per DESIGN_SPEC.md
+                        // §3's "12px (primary buttons...)" radius tier, distinct from the 8dp rows above.
+                        JarActionRow(
+                            label = "catch",
+                            enabled = canCatch,
+                            fill = JarActionCatchFill,
+                            border = JarActionCatchBorder,
+                            onClick = onCatch,
+                            radius = 12.dp,
                         )
                     }
-                    BasicTextField(
-                        value = payloadText,
-                        onValueChange = onPayloadTextChange,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
-                        cursorBrush = SolidColor(JarTextPrimary),
-                        enabled = idleEquivalent,
-                        modifier = Modifier.fillMaxWidth(),
-                        decorationBox = { innerTextField ->
-                            if (payloadText.isEmpty()) {
-                                Text(
-                                    text = "what to hide",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = JarTextSecondary,
-                                )
-                            }
-                            innerTextField()
-                        },
-                    )
-                    Text(
-                        text = "$payloadBytes / $maxPayloadBytes bytes",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JarTextSecondary,
-                    )
-                    JarActionRow(label = "catch", enabled = canCatch, onClick = onCatch)
                 }
             }
+            JarActionRow(
+                label = "look for fireflies",
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onLookForFireflies,
+            )
+            JarActionRow(
+                label = "peek inside",
+                enabled = idleEquivalent,
+                fill = JarActionCheckFill,
+                border = JarActionCheckBorder,
+                onClick = onPeekInside,
+            )
         }
-        JarActionRow(label = "look for fireflies", enabled = idleEquivalent, onClick = onLookForFireflies)
-        JarActionRow(label = "peek inside", enabled = idleEquivalent, onClick = onPeekInside)
 
         JarStatusBlock(status = status)
     }
 }
 
+/** One tinted, rounded action row — gold for "catch", cyan for "look", purple for "peek/check"
+ *  (DESIGN_SPEC.md §1's card/row tint table). [radius] defaults to the 8dp action-row tier;
+ *  the inline "catch"/"send"-style confirm button passes 12dp, the primary-button tier. */
 @Composable
-private fun JarActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun JarActionRow(
+    label: String,
+    enabled: Boolean,
+    fill: Color,
+    border: Color,
+    onClick: () -> Unit,
+    radius: Dp = 8.dp,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .clip(RoundedCornerShape(radius))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) JarTextPrimary else JarTextSecondary,
+            style = JarType.TileTitle,
+            color = if (enabled) JarTextPrimary else JarTextTertiary,
         )
     }
 }
@@ -576,8 +658,10 @@ private fun JarCoverRow(label: String, selected: Boolean, enabled: Boolean, onCl
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) JarTextPrimary else JarTextSecondary,
+            // DESIGN_SPEC.md §1/§5 1g: selected option text takes the gold "chosen" accent,
+            // unselected drops to the tertiary tier — the same pairing the technique chips use.
+            style = JarType.TileTitle,
+            color = if (selected) FireflyCreated else JarTextTertiary,
         )
     }
 }
@@ -593,18 +677,22 @@ private fun JarStatusBlock(status: StegoStatus) {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
                 text = "you caught one — ${status.payloadBytes} byte$plural",
-                style = MaterialTheme.typography.bodyLarge,
+                // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
+                // accented announcement, not the message body itself.
+                style = JarType.SectionLabel,
                 color = FireflyCreated,
             )
         }
         is StegoStatus.ExtractedSuccess -> Text(
             text = status.text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = FireflyReceived,
+            // DESIGN_SPEC.md §2's "Message/body text" role — cream, not the FireflyReceived
+            // accent; only the short result label above a real message takes the accent color.
+            style = JarType.Body,
+            color = JarTextPrimary,
         )
         is StegoStatus.ExtractedFailure -> Text(
             text = jarExtractFailureMessage(status.reason),
-            style = MaterialTheme.typography.bodyLarge,
+            style = JarType.Body,
             color = JarTextSecondary,
         )
         is StegoStatus.Analyzed -> JarAnalyzedBlock(result = status.result)
@@ -613,7 +701,7 @@ private fun JarStatusBlock(status: StegoStatus) {
 
 @Composable
 private fun JarStatusWord(word: String) {
-    Text(text = word, style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+    Text(text = word, style = JarType.Footer, color = JarWatchingDim)
 }
 
 /** "peek inside"'s readout — confidence number kept (same "real data, not smoothed" discipline
@@ -626,19 +714,22 @@ private fun JarAnalyzedBlock(result: DetectionResult) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = "${(result.confidence * 100).roundToInt()}%",
-            style = MaterialTheme.typography.displayLarge,
+            style = JarType.Numeral,
             color = JarTextPrimary,
         )
         Text(
             text = if (result.flagged) "something's out there" else "all quiet",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextPrimary,
+            style = JarType.TileTitle,
+            // DESIGN_SPEC.md §7 item 1: the mockup hardcodes this label to cyan regardless of
+            // value — a documented bug. The history-row convention (cyan when flagged, cream
+            // otherwise) is the intended semantic; implemented here rather than reproduced.
+            color = if (result.flagged) FireflyReceived else JarTextPrimary,
         )
         result.estimatedPayloadBytes?.let { bytes ->
             Text(
                 text = "about $bytes bytes, near as we can tell",
-                style = MaterialTheme.typography.labelSmall,
-                color = JarTextSecondary,
+                style = JarType.TileCaption,
+                color = JarTextTertiary,
             )
         }
     }
