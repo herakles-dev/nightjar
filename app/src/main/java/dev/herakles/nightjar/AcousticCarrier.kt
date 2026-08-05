@@ -2,7 +2,6 @@ package dev.herakles.nightjar
 
 import java.util.zip.CRC32
 import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -679,60 +678,6 @@ class AcousticCarrier(
                 }
             }
             return crc
-        }
-
-        /**
-         * In-place iterative radix-2 Cooley-Tukey FFT (task #6 demod side). `re.size` MUST be a
-         * power of two — true for [NightjarAcoustics.FRAME_SAMPLES] (1024).
-         */
-        private fun fft(re: DoubleArray, im: DoubleArray) {
-            val n = re.size
-            require(n and (n - 1) == 0) { "FFT size must be a power of two, was $n" }
-
-            var j = 0
-            for (i in 1 until n) {
-                var bit = n shr 1
-                while (j and bit != 0) {
-                    j = j xor bit
-                    bit = bit shr 1
-                }
-                j = j or bit
-                if (i < j) {
-                    val tr = re[i]; re[i] = re[j]; re[j] = tr
-                    val ti = im[i]; im[i] = im[j]; im[j] = ti
-                }
-            }
-
-            var len = 2
-            while (len <= n) {
-                val ang = -2.0 * PI / len
-                val wRe = cos(ang)
-                val wIm = sin(ang)
-                var i = 0
-                while (i < n) {
-                    var curRe = 1.0
-                    var curIm = 0.0
-                    val half = len / 2
-                    for (k in 0 until half) {
-                        val evenIdx = i + k
-                        val oddIdx = evenIdx + half
-                        val uRe = re[evenIdx]
-                        val uIm = im[evenIdx]
-                        val vRe = re[oddIdx] * curRe - im[oddIdx] * curIm
-                        val vIm = re[oddIdx] * curIm + im[oddIdx] * curRe
-                        re[evenIdx] = uRe + vRe
-                        im[evenIdx] = uIm + vIm
-                        re[oddIdx] = uRe - vRe
-                        im[oddIdx] = uIm - vIm
-                        val nextCurRe = curRe * wRe - curIm * wIm
-                        val nextCurIm = curRe * wIm + curIm * wRe
-                        curRe = nextCurRe
-                        curIm = nextCurIm
-                    }
-                    i += len
-                }
-                len = len shl 1
-            }
         }
     }
 }
