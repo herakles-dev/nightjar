@@ -32,10 +32,11 @@ data class SpectrogramData(
  *
  * [pcm] is [channels]-interleaved PCM16, the exact layout [WavFile.ParsedWav.samples] already
  * returns. Stereo is mono-mixed (plain per-frame average across channels) before windowing --
- * a magnitude spectrogram has nothing meaningful to say about which channel carried what, which
- * is exactly why [AudioStegoTechnique.PHASE_INVERSION]'s stereo-polarity payload is one of the
- * two honest "can't show" cases this stage exists to label (see `FireflyCarrierBlock`'s caption
- * logic), not something mono-mixing accidentally hides that a channel-aware view would reveal.
+ * and that mono sum is itself the DECODE for [AudioStegoTechnique.PHASE_INVERSION], which holds
+ * its payload in L-vs-R polarity: averaging L+R cancels the cover and leaves the payload exposed
+ * (measured near-maximal in the normalized image), so `FireflyCarrierBlock` labels it visible,
+ * not hidden. The one genuinely sub-perceptual "can't show" case is [AudioStegoTechnique
+ * .SPECTROGRAM_LSB]'s log-magnitude QIM (see that caption's logic).
  *
  * Applies the SAME standard Hann window [AcousticDetector] already uses per frame
  * (`0.5 - 0.5*cos(2*PI*n/(N-1))`, `AcousticDetector.kt`) -- no separate window formula invented
