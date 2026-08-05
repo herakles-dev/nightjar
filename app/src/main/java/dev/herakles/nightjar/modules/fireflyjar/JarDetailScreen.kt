@@ -650,6 +650,28 @@ private fun formatFireflyTime(timestampMillis: Long): String =
 
 private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else "$bytes bytes"
 
+// Stage D/4 (gate-19): the carrier's media size, human-readable. SI (1000-based) to match the
+// "MB" copy the shelf storage readout uses. Locale.US keeps the decimal point deterministic.
+internal fun fireflyMediaSizeLabel(bytes: Long): String = when {
+    bytes < 1000L -> if (bytes == 1L) "1 byte" else "$bytes bytes"
+    bytes < 1_000_000L -> String.format(Locale.US, "%.0f KB", bytes / 1000.0)
+    else -> String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
+}
+
+internal fun fireflyCapacityPercent(percent: Double): String = when {
+    percent <= 0.0 -> "0%"
+    percent < 0.001 -> "<0.001%"
+    percent >= 1.0 -> String.format(Locale.US, "%.1f%%", percent)
+    else -> String.format(Locale.US, "%.3f%%", percent)
+}
+
+// Stage D/4 (gate-19): the single highest-value teaching string on the detail screen -- how
+// little of the carrier the payload occupies. "hid 13 bytes in 1.2 MB · 0.001% used".
+internal fun fireflyCapacityLine(payloadBytes: Int, mediaBytes: Long): String {
+    val percent = if (mediaBytes > 0L) payloadBytes.toDouble() / mediaBytes.toDouble() * 100.0 else 0.0
+    return "hid ${fireflyByteLabel(payloadBytes)} in ${fireflyMediaSizeLabel(mediaBytes)} · ${fireflyCapacityPercent(percent)} used"
+}
+
 /**
  * The carrier viewer (gate-18, v4 addition): what an image or audio firefly actually looked or
  * sounded like. Only ever composed when [FireflyRecord.carrierKind] is non-null — a
@@ -780,6 +802,13 @@ private fun FireflyCarrierBlock(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(text = "carrier", style = JarType.MetaLabel, color = JarTextTertiary)
+        if (firefly.mediaBytes > 0L) {
+            Text(
+                text = fireflyCapacityLine(firefly.payloadSizeBytes, firefly.mediaBytes),
+                style = JarType.Footer,
+                color = JarTextTertiary,
+            )
+        }
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 failed -> Text(
