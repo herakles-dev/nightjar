@@ -397,3 +397,13 @@ reason (a future reorder of the trail shouldn't silently remap anyone's in-progr
   owner would rather it be "whichever jar you finish third" (order-dependent, since this trail
   is fixed-order that's moot today, but would matter if steps 1–3 ever become reorderable),
   that's a one-line change to this doc's own step 5 section, not a structural one.
+
+## Owner decisions (2026-09-22)
+
+- Riddle and gloss wording above **approved as written** (after the orchestrator's three
+  accuracy fixes, commit d6473d6). Gate-37's final sign-off still happens on the phone (W3-3).
+- Practice fireflies are **generated at runtime** (first launch and "start the trail again")
+  by the production encoders from the `strings.xml` riddle text, into private app storage —
+  not shipped as pre-encoded assets. INV-11 holds either way (the text is only ever shown
+  from a decode); runtime generation keeps the wording editable in one place and ready for
+  translation.
