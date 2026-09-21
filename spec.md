@@ -194,7 +194,8 @@ anywhere in the covert-data research base.
   The screen's own copy was corrected to say so rather than promise "sounds
   unchanged" for a technique where that wasn't true
 - gate-9: safety-scope compliance check passed (synthetic payloads only, no
-  exploit content); anti-AI-tell checklist re-run against the new screen
+  exploit content); anti-AI-tell checklist re-run against the new screen (see
+  `design/identity.md`'s 2026-09-21 re-run entry — not recorded until then)
 - gate-10: covert-data's `module_2_audio_steganography/README.md` updated to
   point at nightjar as its hands-on home (matching modules 1/3/5's existing
   cross-reference); session closed
