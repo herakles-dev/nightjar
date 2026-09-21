@@ -1068,17 +1068,7 @@ private fun FireflyCarrierBlock(
                     val displayed = if (showBitPlane && currentBitPlane != null) currentBitPlane else currentBitmap
                     Image(
                         bitmap = displayed.asImageBitmap(),
-                        // P5 (on-device review, honesty): "bright pixels are where a payload bit
-                        // lives" was false -- every pixel has a least-significant bit, payload or
-                        // not, and this exact contradiction is why imageBitPlaneCaption() exists
-                        // ("fuzz here doesn't mean a message is hiding here"). Say what's actually
-                        // drawn instead, so a screen-reader user gets the same honest picture a
-                        // sighted one does from the caption right below it.
-                        contentDescription = if (showBitPlane && currentBitPlane != null) {
-                            "this image's least-significant bit plane, white where a pixel's bit is 1, black where it's 0"
-                        } else {
-                            "the image this firefly hid inside"
-                        },
+                        contentDescription = fireflyImageContentDescription(showBitPlane && currentBitPlane != null),
                         modifier = Modifier
                             .size(96.dp)
                             .border(width = 1.dp, color = JarGlassOutline),
@@ -1175,6 +1165,23 @@ private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle
  */
 internal fun imageBitPlaneCaption(): String =
     "even an untouched photo's bit-plane already looks like static, not a picture. fuzz here doesn't mean a message is hiding here."
+
+/**
+ * P5 (on-device review, honesty): the carrier image's spoken label -- pulled out to a pure
+ * function so it's testable the same way [imageBitPlaneCaption] already is. Previously said
+ * "bright pixels are where a payload bit lives" for the bit-plane case, which is false: every
+ * pixel has a least-significant bit whether or not a payload touched it, and it directly
+ * contradicted [imageBitPlaneCaption]'s own honest "fuzz here doesn't mean a message is hiding
+ * here" right below it in [FireflyCarrierBlock] -- a screen-reader user got the opposite lesson
+ * from a sighted one. This states only what's actually drawn: which color each bit value maps
+ * to, never a payload/location claim. [FireflyImageContentDescriptionTest] asserts both branches
+ * exactly and that neither ever mentions a payload.
+ */
+internal fun fireflyImageContentDescription(showBitPlane: Boolean): String = if (showBitPlane) {
+    "this image's least-significant bit plane, white where a pixel's bit is 1, black where it's 0"
+} else {
+    "the image this firefly hid inside"
+}
 
 /**
  * v5 addition (design-v5.md §5, gate-24/25) — the AUDIO carrier's view switch, generalized from
