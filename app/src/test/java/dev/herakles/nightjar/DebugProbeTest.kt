@@ -17,10 +17,10 @@ import org.junit.Test
 class DebugProbeTest {
 
     @Test
-    fun `empty state serializes all four top-level fields as null`() {
+    fun `empty state serializes all five top-level fields as null`() {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
-                "\"stored_media\":null}",
+                "\"stored_media\":null,\"incoming\":null}",
             toJson(DebugProbe.ProbeState()),
         )
     }
@@ -38,7 +38,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"ENCODE\"," +
                 "\"success\":true,\"timestamp_ms\":1700000000000}," +
-                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null}",
+                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
+                "\"incoming\":null}",
             toJson(state),
         )
     }
@@ -56,7 +57,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"IMAGE_LSB_CODEC\",\"operation\":\"DECODE\"," +
                 "\"success\":false,\"timestamp_ms\":42}," +
-                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null}",
+                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
+                "\"incoming\":null}",
             toJson(state),
         )
     }
@@ -73,7 +75,7 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null," +
                 "\"detector_confidence\":{\"module\":\"ACOUSTIC_DETECTOR\",\"confidence\":0.73," +
-                "\"timestamp_ms\":999},\"screen\":null,\"stored_media\":null}",
+                "\"timestamp_ms\":999},\"screen\":null,\"stored_media\":null,\"incoming\":null}",
             toJson(state),
         )
     }
@@ -88,13 +90,14 @@ class DebugProbeTest {
     fun `screen serializes as a plain string`() {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
-                "\"screen\":\"module_stub:IMAGE_STEGANOGRAPHY\",\"stored_media\":null}",
+                "\"screen\":\"module_stub:IMAGE_STEGANOGRAPHY\",\"stored_media\":null," +
+                "\"incoming\":null}",
             toJson(DebugProbe.ProbeState(screen = "module_stub:IMAGE_STEGANOGRAPHY")),
         )
     }
 
     @Test
-    fun `all four fields populated at once round-trip independently`() {
+    fun `all five fields populated at once round-trip independently`() {
         val state = DebugProbe.ProbeState(
             lastEncodeDecode = DebugProbe.EncodeDecodeResult(
                 ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, true, 111L,
@@ -107,6 +110,13 @@ class DebugProbeTest {
                 totalMediaBytes = 4_200_000L,
                 orphanFileCount = 1,
             ),
+            incoming = DebugProbe.IncomingState(
+                action = "SEND",
+                sniffedType = "PNG",
+                technique = "EXACT_LSB",
+                outcome = "caught",
+                timestampMs = 333L,
+            ),
         )
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"DECODE\"," +
@@ -115,7 +125,9 @@ class DebugProbeTest {
                 "\"timestamp_ms\":222}," +
                 "\"screen\":\"module_stub:ACOUSTIC_MODEM\"," +
                 "\"stored_media\":{\"record_count\":7,\"records_with_media_count\":5," +
-                "\"total_media_bytes\":4200000,\"orphan_file_count\":1}}",
+                "\"total_media_bytes\":4200000,\"orphan_file_count\":1}," +
+                "\"incoming\":{\"action\":\"SEND\",\"sniffed_type\":\"PNG\"," +
+                "\"technique\":\"EXACT_LSB\",\"outcome\":\"caught\",\"timestamp_ms\":333}}",
             toJson(state),
         )
     }
@@ -132,7 +144,7 @@ class DebugProbeTest {
 
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
-                "\"screen\":\"$expectedEscaped\",\"stored_media\":null}",
+                "\"screen\":\"$expectedEscaped\",\"stored_media\":null,\"incoming\":null}",
             json,
         )
     }
@@ -152,7 +164,7 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
                 "\"stored_media\":{\"record_count\":12,\"records_with_media_count\":9," +
-                "\"total_media_bytes\":480000,\"orphan_file_count\":0}}",
+                "\"total_media_bytes\":480000,\"orphan_file_count\":0},\"incoming\":null}",
             toJson(state),
         )
     }
@@ -174,6 +186,49 @@ class DebugProbeTest {
             json.contains(
                 "\"stored_media\":{\"record_count\":0,\"records_with_media_count\":0," +
                     "\"total_media_bytes\":0,\"orphan_file_count\":0}",
+            ),
+        )
+    }
+
+    // --- incoming (v6 addition, gate-31/32 probe contract) ---
+
+    @Test
+    fun `incoming serializes action, sniffed type, technique, outcome for a caught firefly`() {
+        val state = DebugProbe.ProbeState(
+            incoming = DebugProbe.IncomingState(
+                action = "SEND",
+                sniffedType = "WAV",
+                technique = "ACOUSTIC_MODEM",
+                outcome = "caught",
+                timestampMs = 555L,
+            ),
+        )
+        assertEquals(
+            "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
+                "\"stored_media\":null,\"incoming\":{\"action\":\"SEND\",\"sniffed_type\":\"WAV\"," +
+                "\"technique\":\"ACOUSTIC_MODEM\",\"outcome\":\"caught\",\"timestamp_ms\":555}}",
+            toJson(state),
+        )
+    }
+
+    @Test
+    fun `incoming with no technique serializes technique as an explicit null, not an omitted key`() {
+        val json = toJson(
+            DebugProbe.ProbeState(
+                incoming = DebugProbe.IncomingState(
+                    action = "VIEW",
+                    sniffedType = "JPEG",
+                    technique = null,
+                    outcome = "squeezed",
+                    timestampMs = 666L,
+                ),
+            ),
+        )
+        assertEquals(
+            true,
+            json.contains(
+                "\"incoming\":{\"action\":\"VIEW\",\"sniffed_type\":\"JPEG\"," +
+                    "\"technique\":null,\"outcome\":\"squeezed\",\"timestamp_ms\":666}",
             ),
         )
     }

@@ -1844,8 +1844,15 @@ private suspend fun decodeCancellable(carrier: CovertCarrier<PcmAudio>, pcm: Pcm
 // class. All of it runs off the main thread from inside AcousticModemController.importAndDecode's
 // `scope.launch` (already Dispatchers.IO), same as that file's `decodePickedCoverImage`. ---
 
-/** Outcome of [readAudioFile]: one PCM16 buffer plus the format it was recorded at. */
-private class ImportedAudio(val sampleRateHz: Int, val numChannels: Int, val samples: ShortArray)
+/**
+ * Outcome of [readAudioFile]: one PCM16 buffer plus the format it was recorded at.
+ *
+ * `internal`, not `private` (v6 receive-plumbing, task W1-2): read directly by
+ * `dev.herakles.nightjar.incoming.IncomingAndroidAdapters.decodeCompressedAudioForModem`, which
+ * reuses [decodeCompressedAudioToPcm] as-is rather than reimplementing its MediaExtractor/
+ * MediaCodec path. Visibility-only change -- no behavior here is different.
+ */
+internal class ImportedAudio(val sampleRateHz: Int, val numChannels: Int, val samples: ShortArray)
 
 /**
  * Size cap on a picked WAV file read fully into memory. This app's own longest export (20s @
@@ -1936,8 +1943,14 @@ private fun readBoundedBytes(context: Context, uri: Uri, maxBytes: Int): ByteArr
  * never accept anyway.
  *
  * Returns `null` on any failure to open/demux/decode the file, or if it has no audio track.
+ *
+ * `internal`, not `private` (v6 receive-plumbing, task W1-2): this is the exact MediaExtractor/
+ * MediaCodec decode path `dev.herakles.nightjar.incoming.IncomingAndroidAdapters
+ * .decodeCompressedAudioForModem` reuses for a shared/opened compressed-audio file's acoustic-
+ * modem detection, rather than reimplementing container demux + codec decode a second time.
+ * Visibility-only change -- no behavior here is different.
  */
-private suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
+internal suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
     val extractor = MediaExtractor()
     return try {
         extractor.setDataSource(context, uri, null)
@@ -2084,8 +2097,13 @@ private suspend fun decodeSelectedTrack(
  * chance. Padding with trailing silence is safe: `decode()` locates every window (START marker,
  * header, payload, END marker) from the header's own declared length, never from the buffer's
  * total size, so extra trailing zero samples after the real content never shift anything it reads.
+ *
+ * `internal`, not `private` (v6 receive-plumbing, task W1-2): reused by
+ * `dev.herakles.nightjar.incoming.IncomingAndroidAdapters.decodeCompressedAudioForModem` for the
+ * same reason -- a compressed-audio import's sample count is no more likely to be frame-aligned
+ * than this screen's own WAV import. Visibility-only change -- no behavior here is different.
  */
-private fun padToFrameBoundary(samples: ShortArray): ShortArray {
+internal fun padToFrameBoundary(samples: ShortArray): ShortArray {
     val frameSamples = NightjarAcoustics.FRAME_SAMPLES
     val remainder = samples.size % frameSamples
     if (remainder == 0) return samples
