@@ -116,7 +116,8 @@ anywhere in the covert-data research base.
     meadow" in all user-facing copy (it never keeps a firefly, it only notices
     them), and moves to 4th on the shelf, swapping with the humming jar, so the
     three creating jars come first. The order comes from the `Module` enum, so the
-    workshop list follows. Internal identifiers (`JarRole.WATCHING`,
+    workshop list follows. "The framed jar" (image steganography) likewise becomes
+    "the art jar" in all user-facing copy. Internal identifiers (`JarRole.WATCHING`,
     `JarWatching*` color tokens) keep their names (owner direction, 2026-09-21)
 - **Out of scope:** Module 4 video steganography (needs a non-mobile ML
   watermarking component) — deferred, and still out of scope under v5; the
@@ -465,9 +466,9 @@ anywhere in the covert-data research base.
   custom-drawn carrier views (bit-plane, spectrogram, difference, polarity) have
   TalkBack descriptions (closes follow-up #12), and all v6 copy lives in
   `strings.xml`
-- gate-39: the meadow — no user-facing string says "watching jar" (audited by a
-  grep-backed JVM test over the copy); the shelf and the workshop list show
-  singing, framed, humming, meadow in that order, pinned by a test on
+- gate-39: the meadow and the art jar — no user-facing string says "watching
+  jar" or "framed jar" (audited by a grep-backed JVM test over the copy); the
+  shelf and the workshop list show singing, art, humming, meadow in that order, pinned by a test on
   `Module.entries`; nothing persists an enum ordinal (verified before the reorder),
   so stored fireflies keep their jars; the meadow tile's visual treatment follows
   the v6 design addendum; verified on Hek
