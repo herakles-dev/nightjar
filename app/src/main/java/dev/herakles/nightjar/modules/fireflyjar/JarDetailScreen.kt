@@ -1225,6 +1225,15 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
  *   bundled cover, so the caption says both things honestly: most of the payload stays below a
  *   spectrogram's threshold, AND the silent-cover gaps genuinely show. A cover-vs-stego
  *   difference view is the honest follow-up, out of scope here (spec.md).
+ *
+ *   **The "under 1.8 db" figure is itself measured, not asserted** (independent-review
+ *   follow-up): [SpectrogramTest] recomputes the real encoder's NUDGED-cell log-magnitude delta
+ *   on the codec's own block-aligned basis, both covers, strengths 1-4, at each cover's max
+ *   payload. Measured worst case: 1.6287 dB (SOFT_SYNTH, strength 3) — a hair over the
+ *   theoretical 1.5·`QUANTIZATION_STEP` = 1.56 dB QIM bound because real PCM16 rounding
+ *   (`ifft` + `roundToShort`) adds a small amount on top of the encoder's pure-math quantization
+ *   step. 1.8 db is that measured ceiling plus a safety margin, not the original unverified
+ *   figure.
  * - `"PHASE_INVERSION"` — **corrected 2026-08-05 per rev-t2's adversarial-lite HIGH finding.**
  *   The original caption here claimed a magnitude spectrogram can't show this technique's
  *   payload; that was backwards. [spectrogram]'s mono-mix (`(L+R)/channels`) is EXACTLY
@@ -1255,7 +1264,7 @@ private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption
         genuinelyVisible = true,
     )
     "SPECTROGRAM_LSB" -> AudioSpectrogramCaption(
-        text = "most of the payload is nudges under 1.6 db a spectrogram can't show. where the cover " +
+        text = "most of the payload is nudges under 1.8 db a spectrogram can't show. where the cover " +
             "went silent, the codec had to add faint sound -- that part can show here.",
         genuinelyVisible = false,
     )

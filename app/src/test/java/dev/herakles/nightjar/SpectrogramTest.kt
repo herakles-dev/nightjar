@@ -4,8 +4,11 @@ import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -345,6 +348,107 @@ class SpectrogramTest {
             "expected multiple columns with many brightened cells, not one isolated outlier " +
                 "(measured $columnsWithManyBrightCells columns with > 50 bright cells)",
             columnsWithManyBrightCells >= 3,
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // Independent-review follow-up on the corrected SPECTROGRAM_LSB caption
+    // (audioSpectrogramCaption, JarDetailScreen.kt): it originally claimed "nudges under 1.6 db",
+    // carried over from design-v5.md's scratch-prototype measurement (0.180 nats = 1.5 *
+    // QUANTIZATION_STEP, embedBitInBin's own round-then-parity-flip worst case) without ever
+    // being grounded in this repo's tests. This measures the real encoder's NUDGED-cell
+    // log-magnitude delta directly, on the codec's OWN basis: block-aligned, rectangular-windowed,
+    // non-overlapping 1024-sample frames (NOT this file's Hann-windowed/50%-overlap spectrogram()
+    // grid -- the SLSB visibility tests above already note that grid straddles the encoder's block
+    // boundaries and would misstate the per-bin delta). "NUDGED" matches the codec's own floor: a
+    // cell only counts if the COVER's raw magnitude is already >= LOG_MAGNITUDE_FLOOR (1000.0) --
+    // a cell that starts below the floor is a CREATED cell (the codec adds fresh energy, not a
+    // bounded nudge to existing energy), out of scope for this specific claim and already covered
+    // by the silent-gap test above. Both bundled covers, every valid strength (1-4), at each
+    // cover's own max payload (so every eligible bin in every usable frame actually carries a
+    // bit).
+    //
+    // MEASURED: worst case 1.6287 dB (0.18752 nats), SOFT_SYNTH strength=3 frame=227 bin=47 --
+    // slightly ABOVE the 0.18-nats/1.56-dB theoretical QIM bound and above the original "1.6 db"
+    // caption claim. The extra ~0.007 nats over the theoretical 1.5*QUANTIZATION_STEP bound comes
+    // from real-world 16-bit rounding: [embedBitInBin]'s continuous math is exact, but
+    // [AudioStegoCarrier.encodeSpectrogramLsb] then runs the frame through `ifft` and
+    // `roundToShort` to produce real PCM16 samples, and this test re-FFTs those actual samples
+    // (the same bytes a real firefly's carrier would persist and a real spectrogram would render)
+    // rather than trusting the encoder's pre-quantization intermediate value. The caption below
+    // was corrected to "under 1.8 db" to match -- a real, measured ceiling with a safety margin
+    // over floating-point/architecture jitter, not the unverified original figure.
+    // ---------------------------------------------------------------------
+
+    /** Recomputes the codec's own block-aligned spectrum for frame [frameIndex] of [pcm] --
+     *  rectangular window, no overlap, exactly [AudioStegoCarrier.encodeSpectrogramLsb]'s own
+     *  framing (that private function's own source, re-derived here since a JVM test can't reach
+     *  its intermediate re/im arrays directly). */
+    private fun blockAlignedSpectrum(pcm: ShortArray, frameIndex: Int, codecFrameSize: Int): Pair<DoubleArray, DoubleArray> {
+        val start = frameIndex * codecFrameSize
+        val re = DoubleArray(codecFrameSize) { i -> pcm[start + i].toDouble() }
+        val im = DoubleArray(codecFrameSize)
+        fft(re, im)
+        return re to im
+    }
+
+    @Test
+    fun `spectrogram-LSB's NUDGED cells never move more than 1_8 db in log-magnitude, measured on the real encoder`() {
+        val codecFrameSize = 1024 // AudioStegoCarrier.kt's own FRAME_SIZE, recomputed inline
+        val logMagnitudeFloor = 1000.0 // AudioStegoCarrier.kt's own LOG_MAGNITUDE_FLOOR, recomputed inline
+        val binsPerStrengthLevel = 8 // AudioStegoCarrier.kt's own BINS_PER_STRENGTH_LEVEL, recomputed inline
+        val eligibleBinStart = 32 // AudioStegoCarrier.kt's own ELIGIBLE_BIN_START, recomputed inline
+
+        var worstNats = 0.0
+        var worstDescription = "n/a"
+
+        for (cover in AudioSampleCover.entries) {
+            val coverPcm = synthesizeSampleCover(cover)
+            val numFrames = coverPcm.size / codecFrameSize
+
+            for (strength in 1..4) {
+                val carrier = AudioStegoCarrier(coverPcm, AudioStegoTechnique.SPECTROGRAM_LSB, strength)
+                val payload = fillerPayload(carrier.maxPayloadBytes)
+                val stego = carrier.encode(payload)
+                assertEquals(coverPcm.size, stego.size)
+
+                val binsPerFrame = (strength * binsPerStrengthLevel)
+                    .coerceAtMost(codecFrameSize / 2 - eligibleBinStart - 1)
+
+                for (frameIndex in 0 until numFrames) {
+                    val (coverRe, coverIm) = blockAlignedSpectrum(coverPcm, frameIndex, codecFrameSize)
+                    val (stegoRe, stegoIm) = blockAlignedSpectrum(stego, frameIndex, codecFrameSize)
+
+                    for (binSlot in 0 until binsPerFrame) {
+                        val bin = eligibleBinStart + binSlot
+                        val coverMagnitude = sqrt(coverRe[bin] * coverRe[bin] + coverIm[bin] * coverIm[bin])
+                        if (coverMagnitude < logMagnitudeFloor) continue // CREATED, not NUDGED -- out of scope here
+
+                        val stegoMagnitude = sqrt(stegoRe[bin] * stegoRe[bin] + stegoIm[bin] * stegoIm[bin])
+                        val coverLogM = ln(max(coverMagnitude, logMagnitudeFloor))
+                        val stegoLogM = ln(max(stegoMagnitude, logMagnitudeFloor))
+                        val deltaNats = abs(stegoLogM - coverLogM)
+
+                        if (deltaNats > worstNats) {
+                            worstNats = deltaNats
+                            worstDescription = "${cover.label} strength=$strength frame=$frameIndex bin=$bin"
+                        }
+                    }
+                }
+            }
+        }
+
+        val worstDb = worstNats * 20.0 / ln(10.0)
+        // 1.8 dB keeps a real margin over the measured worst case (1.6287 dB) -- comfortably
+        // above the ~0.065 dB of 16-bit-rounding overshoot past the theoretical 1.56 dB QIM bound
+        // this class's own KDoc explains, without being loosened to paper over a caption that
+        // overstated the true ceiling (the original "1.6 db" claim, which this measurement broke).
+        assertTrue(
+            "expected every NUDGED cell's log-magnitude change to stay under 1.8 dB across both " +
+                "covers and strengths 1-4 (measured worst case $worstDb dB = $worstNats nats at " +
+                "$worstDescription) -- the caption's specific number must be grounded in a real " +
+                "measurement, not asserted",
+            worstDb < 1.8,
         )
     }
 }
