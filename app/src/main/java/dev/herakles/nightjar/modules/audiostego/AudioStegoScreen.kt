@@ -229,6 +229,22 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     var payloadText by remember { mutableStateOf("") }
     var catchExpanded by remember { mutableStateOf(false) }
 
+    // S-02: the image jar flow's time-based debounce (ImageStegoScreen.kt's
+    // `debounceCatchDispatch`), ported here — this flow had no equivalent, so a double-tap
+    // delivery on "let it glow"/"look for fireflies" could still insert two fireflies even after
+    // the synchronous status-write fix above, exactly the gap that fix alone doesn't close (see
+    // ImageStegoScreen.kt's jarCatchFlow KDoc for the full "one slow double-click vs. two fast
+    // legitimate clicks" rationale -- identical reasoning applies to this screen's tiny synthetic
+    // covers). Rejects any second catch/look dispatch within 500ms of the last one, regardless of
+    // its origin.
+    var lastCatchDispatchAtMillis by remember { mutableStateOf(0L) }
+    fun debounceCatchDispatch(action: () -> Unit) {
+        val now = System.currentTimeMillis()
+        if (now - lastCatchDispatchAtMillis < 500L) return
+        lastCatchDispatchAtMillis = now
+        action()
+    }
+
     val coverAudio = remember(cover) { synthesizeSampleCover(cover) }
     val maxPayloadBytes = remember(coverAudio, technique) { controller.maxPayloadBytesFor(coverAudio, technique) }
 
@@ -317,8 +333,12 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
         payloadText = payloadText,
         onPayloadTextChange = { payloadText = it },
         maxPayloadBytes = maxPayloadBytes,
-        onEmbed = { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) },
-        onExtract = { controller.extract(technique) },
+        onEmbed = {
+            debounceCatchDispatch { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) }
+        },
+        onExtract = {
+            debounceCatchDispatch { controller.extract(technique) }
+        },
         onExit = onExit,
     )
 }
@@ -416,10 +436,13 @@ private fun JarAudioStegoCatchFlowContent(
                             },
                         )
                         Text(
-                            text = if (payloadBytes > maxPayloadBytes) {
-                                "too big for this jar — trim it or try a different light"
-                            } else {
-                                "$payloadBytes / $maxPayloadBytes bytes"
+                            // codec-H02: a cover/technique combo too small to hold even an empty
+                            // frame gets its own line rather than a bare `0 / 0 bytes` counter.
+                            text = when {
+                                maxPayloadBytes <= 0 -> "too small to hide anything in this jar"
+                                payloadBytes > maxPayloadBytes ->
+                                    "too big for this jar — trim it or try a different light"
+                                else -> "$payloadBytes / $maxPayloadBytes bytes"
                             },
                             style = JarType.TileCaption,
                             color = JarTextTertiary,
@@ -727,11 +750,16 @@ fun AudioStegoContent(
                 )
                 Text(
                     // UX pass: over-capacity previously just silently grayed out "embed" with no
-                    // explanation -- now the counter itself says why.
-                    text = if (payloadBytes > maxPayloadBytes) {
-                        "$payloadBytes / $maxPayloadBytes bytes — ${payloadBytes - maxPayloadBytes} over, trim it or switch technique"
-                    } else {
-                        "$payloadBytes / $maxPayloadBytes bytes"
+                    // explanation -- now the counter itself says why. codec-H02: maxPayloadBytes
+                    // == 0 can mean "this cover/technique combo can't hold a frame at all"
+                    // (AudioStegoCarrier.canEmbed == false), not just "trimmed to zero" -- a
+                    // distinct message rather than a bare `0 / 0 bytes` that reads as a typo.
+                    text = when {
+                        maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
+                        payloadBytes > maxPayloadBytes ->
+                            "$payloadBytes / $maxPayloadBytes bytes — " +
+                                "${payloadBytes - maxPayloadBytes} over, trim it or switch technique"
+                        else -> "$payloadBytes / $maxPayloadBytes bytes"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
@@ -1111,11 +1139,20 @@ class AudioStegoController(
      * Hide [payload] in [cover] using [technique] and make the result the new working clip.
      * No-op while busy. Always encodes into the pristine selected [cover] (never into an
      * already-embedded working clip), so repeated taps stay predictable.
+     *
+     * S-02 fix: `status = AudioStegoStatus.Embedding` used to be the first statement *inside*
+     * `codecScope.launch { ... }`, which only schedules the coroutine rather than running it
+     * immediately — the exact double-tap race `ImageStegoController.embed` was fixed for at
+     * task #19 (see that method's KDoc). A second `embed()` arriving before the dispatcher hop
+     * completed could still read `status` as idle-equivalent and pass the gate, launching a
+     * second concurrent encode and (via `jarCatchFlow`'s status-keyed effect) inserting two
+     * fireflies for one tap. Writing `status` here, synchronously, before `codecScope.launch`,
+     * closes that window exactly like `ImageStegoController.embed` does.
      */
     fun embed(cover: PcmAudio, technique: AudioStegoTechnique, payload: ByteArray) {
         if (!idleEquivalent) return
+        status = AudioStegoStatus.Embedding
         codecScope.launch {
-            status = AudioStegoStatus.Embedding
             val carrier = carrierFactory(cover, technique)
             val stego = try {
                 carrier.encode(payload)
@@ -1130,12 +1167,12 @@ class AudioStegoController(
     }
 
     /** Attempt to recover a payload from the current [workingAudio] using [technique]. No-op
-     *  while busy. */
+     *  while busy. Same synchronous-gate discipline as [embed] (S-02 fix) — see its KDoc. */
     fun extract(technique: AudioStegoTechnique) {
         if (!idleEquivalent) return
+        status = AudioStegoStatus.Extracting
         val sample = workingAudio
         codecScope.launch {
-            status = AudioStegoStatus.Extracting
             val carrier = carrierFactory(sample, technique)
             status = when (val result = carrier.decode(sample)) {
                 is DecodeResult.Success -> AudioStegoStatus.ExtractedSuccess(result.payload.decodeToString())

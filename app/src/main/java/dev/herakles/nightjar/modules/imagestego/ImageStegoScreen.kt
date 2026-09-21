@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -175,6 +176,15 @@ sealed interface StegoStatus {
     data class ExtractedSuccess(val text: String) : StegoStatus
     data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : StegoStatus
     data class Analyzed(val result: DetectionResult) : StegoStatus
+
+    /**
+     * S-01 defense in depth: an embed/extract/check attempt ran out of memory mid-operation
+     * (huge picked-cover bitmap copy, or `ImageSteganalysis`'s per-pixel channel-sample array —
+     * see [ImageStegoController]'s catch sites) instead of the fixed [downsampleFactor] bug that
+     * normally prevents this. Idle-equivalent (the operator can immediately retry with a smaller
+     * image), never a crash.
+     */
+    data class Failed(val message: String) : StegoStatus
 }
 
 /**
@@ -224,6 +234,10 @@ fun ImageStegoScreen(
     var payloadText by remember { mutableStateOf("") }
     var isCoverLoading by remember { mutableStateOf(false) }
     var coverLoadError by remember { mutableStateOf<String?>(null) }
+    // codec-M01: set instead of coverLoadError (this is informational, not a failure) whenever a
+    // picked cover actually had transparency and got flattened onto an opaque background --
+    // never touched for the two bundled sample covers, which are already opaque.
+    var coverImportNotice by remember { mutableStateOf<String?>(null) }
     var saveStatus: SaveStatus by remember { mutableStateOf<SaveStatus>(SaveStatus.Idle) }
 
     val pickCoverScope = rememberCoroutineScope()
@@ -233,13 +247,21 @@ fun ImageStegoScreen(
         if (uri == null) return@rememberLauncherForActivityResult // operator backed out of the picker; keep current cover
         isCoverLoading = true
         coverLoadError = null
+        coverImportNotice = null
         pickCoverScope.launch {
             val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
             isCoverLoading = false
             if (decoded == null) {
                 coverLoadError = "couldn't load that image. try a different one."
             } else {
-                coverSource = CoverSource.Picked(decoded)
+                // codec-M01: flatten transparency (if any) once at import, off the main thread --
+                // real work for a large picked photo, same reasoning as the decode itself.
+                val flattened = withContext(Dispatchers.Default) { flattenToOpaque(decoded) }
+                if (flattened !== decoded) {
+                    coverImportNotice = "that image had transparent areas — they were filled in " +
+                        "so the hidden data survives on this device."
+                }
+                coverSource = CoverSource.Picked(flattened)
             }
         }
     }
@@ -311,6 +333,7 @@ fun ImageStegoScreen(
         coverSource = coverSource,
         isCoverLoading = isCoverLoading,
         coverLoadError = coverLoadError,
+        coverImportNotice = coverImportNotice,
         onSelectSample = { coverSource = CoverSource.Sample(it) },
         onPickFromDevice = {
             pickCoverImage.launch(
@@ -530,7 +553,8 @@ private fun JarImageStegoContent(
         status is StegoStatus.Embedded ||
         status is StegoStatus.ExtractedSuccess ||
         status is StegoStatus.ExtractedFailure ||
-        status is StegoStatus.Analyzed
+        status is StegoStatus.Analyzed ||
+        status is StegoStatus.Failed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
@@ -580,7 +604,13 @@ private fun JarImageStegoContent(
                             },
                         )
                         Text(
-                            text = "$payloadBytes / $maxPayloadBytes bytes",
+                            // codec-H01: a jar too small to hold even an empty frame gets its own
+                            // line rather than a bare `0 / 0 bytes` counter.
+                            text = if (maxPayloadBytes <= 0) {
+                                "too small to hide anything in this jar"
+                            } else {
+                                "$payloadBytes / $maxPayloadBytes bytes"
+                            },
                             style = JarType.TileCaption,
                             color = JarTextTertiary,
                         )
@@ -696,6 +726,11 @@ private fun JarStatusBlock(status: StegoStatus) {
             color = JarTextSecondary,
         )
         is StegoStatus.Analyzed -> JarAnalyzedBlock(result = status.result)
+        is StegoStatus.Failed -> Text(
+            text = status.message,
+            style = JarType.Body,
+            color = JarTextSecondary,
+        )
     }
 }
 
@@ -779,6 +814,10 @@ fun ImageStegoContent(
     coverSource: CoverSource,
     isCoverLoading: Boolean,
     coverLoadError: String?,
+    // codec-M01: defaults to null so every existing call site (all six @Preview functions in
+    // this file) keeps compiling unchanged -- only ImageStegoScreen's real launcher callback
+    // ever has a non-null value to pass.
+    coverImportNotice: String? = null,
     onSelectSample: (SampleCover) -> Unit,
     onPickFromDevice: () -> Unit,
     payloadText: String,
@@ -798,7 +837,8 @@ fun ImageStegoContent(
             status is StegoStatus.Embedded ||
             status is StegoStatus.ExtractedSuccess ||
             status is StegoStatus.ExtractedFailure ||
-            status is StegoStatus.Analyzed
+            status is StegoStatus.Analyzed ||
+            status is StegoStatus.Failed
         ) && !isCoverLoading && saveStatus !is SaveStatus.Saving && saveStatus !is SaveStatus.Sharing
     val payloadBytes = payloadText.encodeToByteArray().size
     val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
@@ -862,6 +902,13 @@ fun ImageStegoContent(
                         color = TextSecondary,
                     )
                 }
+                coverImportNotice?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                    )
+                }
                 Image(
                     bitmap = workingBitmap.asImageBitmap(),
                     contentDescription = "${coverSource.previewLabel} cover image preview",
@@ -900,7 +947,19 @@ fun ImageStegoContent(
                     },
                 )
                 Text(
-                    text = "$payloadBytes / $maxPayloadBytes bytes",
+                    // S-03: over capacity previously just silently grayed out "embed" with no
+                    // explanation -- mirrors AudioStegoContent's counter, which already said why.
+                    // codec-H01: maxPayloadBytes == 0 can mean "this cover can't hold a frame at
+                    // all" (ImageStegoCarrier.canEmbed == false), not just "trimmed to zero" --
+                    // worth a distinct message rather than a bare `0 / 0 bytes` that reads as a
+                    // typo.
+                    text = when {
+                        maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
+                        payloadBytes > maxPayloadBytes ->
+                            "$payloadBytes / $maxPayloadBytes bytes — " +
+                                "${payloadBytes - maxPayloadBytes} over, trim it"
+                        else -> "$payloadBytes / $maxPayloadBytes bytes"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
                 )
@@ -1002,6 +1061,11 @@ private fun StatusBlock(status: StegoStatus) {
             color = TextSecondary,
         )
         is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+        is StegoStatus.Failed -> Text(
+            text = status.message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
     }
 }
 
@@ -1141,7 +1205,8 @@ class ImageStegoController(
             status is StegoStatus.Embedded ||
             status is StegoStatus.ExtractedSuccess ||
             status is StegoStatus.ExtractedFailure ||
-            status is StegoStatus.Analyzed
+            status is StegoStatus.Analyzed ||
+            status is StegoStatus.Failed
 
     /** Reset to a freshly selected cover image, discarding any prior embed/extract/check result. */
     fun selectCover(cover: Bitmap) {
@@ -1168,6 +1233,12 @@ class ImageStegoController(
      * task #18 live-reproduced from what looked like a single tap. Writing `status` here,
      * before `scope.launch`, closes that window: a second call arriving even a moment later
      * sees `status == Embedding` and is rejected by the gate.
+     *
+     * S-01 defense in depth: [ImageStegoCarrier.encode]'s mutable-bitmap copy is real allocation
+     * pressure even after [downsampleFactor]'s fix bounds the source bitmap's dimensions (a
+     * still-sizable device is still a real allocation on a memory-constrained device) — catching
+     * [OutOfMemoryError] here turns that into a visible, idle-equivalent [StegoStatus.Failed]
+     * instead of a crash.
      */
     fun embed(cover: Bitmap, payload: ByteArray) {
         if (!idleEquivalent) return
@@ -1179,6 +1250,9 @@ class ImageStegoController(
             } catch (oversized: IllegalArgumentException) {
                 status = StegoStatus.Idle
                 return@launch
+            } catch (oom: OutOfMemoryError) {
+                status = StegoStatus.Failed(OOM_ERROR_MESSAGE)
+                return@launch
             }
             workingBitmap = stego
             hasEmbeddedPayload = true
@@ -1187,36 +1261,52 @@ class ImageStegoController(
     }
 
     /** Attempt to recover a payload from [sample]. No-op while busy. Same synchronous-gate
-     *  discipline as [embed] — see its KDoc. */
+     *  discipline as [embed] — see its KDoc, including the S-01 [OutOfMemoryError] catch. */
     fun extract(sample: Bitmap) {
         if (!idleEquivalent) return
         status = StegoStatus.Extracting
         scope.launch {
             val carrier = carrierFactory(sample)
-            status = when (val result = carrier.decode(sample)) {
-                is DecodeResult.Success ->
-                    StegoStatus.ExtractedSuccess(result.payload.decodeToString())
-                is DecodeResult.Failure ->
-                    StegoStatus.ExtractedFailure(result.reason, result.detail)
+            status = try {
+                when (val result = carrier.decode(sample)) {
+                    is DecodeResult.Success ->
+                        StegoStatus.ExtractedSuccess(result.payload.decodeToString())
+                    is DecodeResult.Failure ->
+                        StegoStatus.ExtractedFailure(result.reason, result.detail)
+                }
+            } catch (oom: OutOfMemoryError) {
+                StegoStatus.Failed(OOM_ERROR_MESSAGE)
             }
         }
     }
 
     /** Score [sample] for the likelihood it holds an embedded payload. No-op while busy. Same
-     *  synchronous-gate discipline as [embed] — see its KDoc. */
+     *  synchronous-gate discipline as [embed] — see its KDoc, including the S-01
+     *  [OutOfMemoryError] catch ([ImageSteganalysis]'s per-pixel channel-sample array is the
+     *  largest single allocation in this file's whole embed/extract/check pipeline). */
     fun analyze(sample: Bitmap) {
         if (!idleEquivalent) return
         status = StegoStatus.Analyzing
         scope.launch {
-            val result = detector.analyze(sample)
-            DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
-            status = StegoStatus.Analyzed(result)
+            status = try {
+                val result = detector.analyze(sample)
+                DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
+                StegoStatus.Analyzed(result)
+            } catch (oom: OutOfMemoryError) {
+                StegoStatus.Failed(OOM_ERROR_MESSAGE)
+            }
         }
     }
 
     /** Cancels any in-flight work. Call from `DisposableEffect.onDispose`. */
     fun dispose() {
         scope.cancel()
+    }
+
+    private companion object {
+        /** Copy shown for [StegoStatus.Failed] — plain, lowercase, matches this screen's other
+         *  short failure captions (e.g. `coverLoadError`'s "couldn't load that image..."). */
+        const val OOM_ERROR_MESSAGE = "that image is too large to work with here. try a smaller one."
     }
 }
 
@@ -1287,21 +1377,101 @@ private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
 }
 
 /**
- * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings both [width] and
- * [height] under [maxDimension], per `BitmapFactory.Options.inSampleSize`'s own contract
- * (power-of-two values decode fastest/cleanest — non-power-of-two values get rounded down to
- * the nearest power of two internally anyway).
+ * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings the post-scale long
+ * edge of a [width]x[height] image to [maxDimension] or under, per `BitmapFactory.Options
+ * .inSampleSize`'s own contract (power-of-two values decode fastest/cleanest — non-power-of-two
+ * values get rounded down to the nearest power of two internally anyway). An edge that lands
+ * exactly on [maxDimension] stays at sample size 1 — it's already within budget, not over it.
+ *
+ * S-01 fix (CRITICAL): the previous condition compared the *already-halved* `w`/`h` against
+ * [maxDimension] (`while (w / 2 >= maxDimension ...)`) instead of the current, not-yet-halved
+ * value. That off-by-one-power-of-two meant any cover up to ~2x [maxDimension] on its long edge
+ * (e.g. a real 24-50MP photo, 8000x6000 or 5712x4284) evaluated the loop condition as false on
+ * its very first check and skipped downsampling entirely — `inSampleSize` stayed 1, and
+ * `BitmapFactory` decoded the image at full, undownsampled resolution (~183MB ARGB_8888 for
+ * 8000x6000 against this function's own KDoc promise of a ~64MB ceiling), risking an OOM crash
+ * in this decode or the very next `copy()`/pixel-array allocation downstream (`ImageStegoCarrier
+ * .encode`, `ImageSteganalysis`). `internal` (not `private`) purely for `ImageStegoScreenTest`'s
+ * visibility, matching [encodePngBytes]'s precedent in this same file.
  */
-private fun downsampleFactor(width: Int, height: Int, maxDimension: Int): Int {
+internal fun downsampleFactor(width: Int, height: Int, maxDimension: Int): Int {
     var sampleSize = 1
     var w = width
     var h = height
-    while (w / 2 >= maxDimension || h / 2 >= maxDimension) {
+    while (w > maxDimension || h > maxDimension) {
         w /= 2
         h /= 2
         sampleSize *= 2
     }
     return sampleSize
+}
+
+// --- codec-M01: Android stores an ARGB_8888 Bitmap's pixels premultiplied by alpha, so
+// setPixel/getPixel's R/G/B LSBs for any pixel with alpha < 255 don't survive the store/read
+// round trip intact on a real device (Robolectric's ShadowBitmap stores ARGB ints verbatim and
+// doesn't reproduce this, which is why it wasn't caught by CI). Bundled sample covers are opaque
+// PNGs, so this only bites a Photo-Picker-selected cover with real transparency -- flattening it
+// onto an opaque background at import time, once, is simpler and more robust than trying to
+// disable premultiplication on every subsequent setPixel/getPixel call in ImageStegoCarrier. ---
+
+/**
+ * True if any pixel in [bitmap] has an alpha channel below fully opaque (255). Checked via one
+ * bulk [Bitmap.getPixels] call (fast: a single JNI round trip) rather than per-pixel
+ * `getPixel()`, since this runs on every Photo-Picker import regardless of size.
+ * `Bitmap.hasAlpha()` alone isn't enough here — it's a format-level flag (an ARGB_8888 bitmap
+ * decoded from a PNG with an alpha channel can report `hasAlpha() == true` even when every pixel
+ * happens to be opaque), and [flattenToOpaque] only wants to flatten — and tell the operator
+ * about — covers that are *actually* transparent somewhere.
+ */
+internal fun hasTransparency(bitmap: Bitmap): Boolean {
+    if (!bitmap.hasAlpha()) return false
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    return pixels.any { (it ushr 24) and 0xFF != 0xFF }
+}
+
+/**
+ * Flattens any non-opaque pixels in [bitmap] onto a solid black background and returns a new,
+ * fully-opaque [Bitmap] — or [bitmap] itself, unchanged, when [hasTransparency] is already false
+ * (the common case: both bundled sample covers, and most real photos, have no alpha channel to
+ * begin with).
+ *
+ * Deliberately plain per-pixel arithmetic (standard "composite over black" alpha blend:
+ * `resultChannel = srcChannel * srcAlpha / 255`, since the background channel is 0) via bulk
+ * [Bitmap.getPixels]/[Bitmap.setPixels] rather than a [Canvas]/`drawBitmap` composite — the
+ * platform compositor would do the same math, but it also depends on `Canvas`'s own blend-mode
+ * behavior being faithfully reproduced by whatever's running the code (a real device, or a test
+ * environment), and this fix's whole point is to stop depending on unverified platform behavior
+ * around alpha (`M-01`'s premultiplied-alpha bug was exactly that kind of gap — real, but
+ * invisible to Robolectric). Doing the blend explicitly means [ImageStegoScreenTest] can verify
+ * the *actual* arithmetic, not just that some `Canvas` call was made. `internal` (not `private`)
+ * for that test's visibility, matching [downsampleFactor]/[encodePngBytes]'s precedent in this
+ * file.
+ */
+internal fun flattenToOpaque(bitmap: Bitmap): Bitmap {
+    if (!hasTransparency(bitmap)) return bitmap
+    val width = bitmap.width
+    val height = bitmap.height
+    val pixels = IntArray(width * height)
+    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+    for (i in pixels.indices) {
+        val pixel = pixels[i]
+        val alpha = (pixel ushr 24) and 0xFF
+        if (alpha == 0xFF) continue // already opaque -- leave the RGB bits exactly as they are
+        val r = (pixel ushr 16) and 0xFF
+        val g = (pixel ushr 8) and 0xFF
+        val b = pixel and 0xFF
+        // Composite over solid black (0,0,0): resultChannel = srcChannel * srcAlpha / 255.
+        // Correct even for alpha == 0 (fully transparent -> pure black, matching the visible
+        // background this bitmap would actually have shown), same as a real compositor.
+        val blendedR = (r * alpha) / 0xFF
+        val blendedG = (g * alpha) / 0xFF
+        val blendedB = (b * alpha) / 0xFF
+        pixels[i] = (0xFF shl 24) or (blendedR shl 16) or (blendedG shl 8) or blendedB
+    }
+    val flattened = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    flattened.setPixels(pixels, 0, width, 0, 0, width, height)
+    return flattened
 }
 
 // --- Task #34: save the working stego image as a PNG via MediaStore, and share it through

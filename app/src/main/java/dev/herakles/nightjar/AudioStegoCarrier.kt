@@ -2,6 +2,7 @@ package dev.herakles.nightjar
 
 import java.util.zip.CRC32
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.log10
@@ -139,10 +140,15 @@ import kotlin.math.sqrt
  * module's frequency plan even though both live in the same app.
  *
  * **Additive, not replacing**: each active tone's sine contribution (amplitude [TONE_AMPLITUDE])
- * is summed and saturate-added on top of [cover]'s own samples for that block (see
- * [saturatingAdd]) — the cover's own content survives underneath, exactly matching "mixed into an
- * existing carrier" the way [PHASE_INVERSION]'s secondary signal is mixed in, rather than
- * synthesizing a fresh transmission the way Module 3's live modem does.
+ * is summed on top of [cover]'s own samples for that block — the cover's own content survives
+ * underneath, exactly matching "mixed into an existing carrier" the way [PHASE_INVERSION]'s
+ * secondary signal is mixed in, rather than synthesizing a fresh transmission the way Module 3's
+ * live modem does. Clipping fix (design-v5.md §12.2): rather than a plain saturating add, each
+ * block's tone waveform and [cover] segment are each scaled by their own gain (`toneGain`,
+ * `coverGain` in [encodeMfsk]) so the two can never sum past `Short` range in the first place —
+ * see that function's inline comments for the tone-first budget split (the tone carries the
+ * payload [decodeMfsk] has to detect; the cover doesn't, so it gives up amplitude first).
+ * [MFSK_SAMPLE_CEILING] is the shared ceiling both gains are computed against.
  *
  * **Detection (decode)**: FFTs each candidate block (reusing [fft]) and reads tone channel `i` as
  * active if its magnitude exceeds the local noise floor (the median magnitude of a
@@ -257,6 +263,20 @@ class AudioStegoCarrier(
 
     override val maxPayloadBytes: Int = (totalCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
 
+    /**
+     * True if [cover] has enough raw capacity, at this instance's [technique] (and
+     * [stegoStrength] for [AudioStegoTechnique.SPECTROGRAM_LSB]), to hold even an empty-payload
+     * frame ([FRAME_OVERHEAD_BYTES] bytes). Same role as [ImageStegoCarrier.canEmbed] (codec-H02
+     * is the audio-codec twin of codec-H01): `maxPayloadBytes == 0` used to be ambiguous between
+     * "this cover can embed an empty payload" and "this cover cannot hold a frame at all," and
+     * only the second case actually made every `encode()` call throw, including
+     * `encode(ByteArray(0))`, from a second, buried capacity check the caller had no way to
+     * predict from `maxPayloadBytes` alone. Each `encode*` function below now checks this first,
+     * with a message that says so directly; callers (the screens) use it to show "this cover is
+     * too small to hide anything" instead of a bare `0 / 0 bytes` counter.
+     */
+    val canEmbed: Boolean = totalCapacityBytes >= FRAME_OVERHEAD_BYTES
+
     override fun encode(payload: ByteArray): PcmAudio = when (technique) {
         AudioStegoTechnique.PHASE_INVERSION -> encodePhaseInversion(payload)
         AudioStegoTechnique.SPECTROGRAM_LSB -> encodeSpectrogramLsb(payload)
@@ -277,6 +297,11 @@ class AudioStegoCarrier(
      * `2 * cover.size`.
      */
     private fun encodePhaseInversion(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples, $totalCapacityBytes-byte phase-inversion capacity) " +
+                "cannot hold even an empty payload frame ($FRAME_OVERHEAD_BYTES bytes) -- this " +
+                "cover is too small to hide anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
                 "phase-inversion capacity of $maxPayloadBytes bytes"
@@ -284,10 +309,9 @@ class AudioStegoCarrier(
         val frame = buildFrame(payload)
         val totalBits = frame.size * 8
         val requiredSamples = totalBits.toLong() * SEGMENT_SAMPLES
-        require(requiredSamples <= cover.size) {
-            "cover (${cover.size} samples) is too small to hold even an empty payload frame " +
-                "($FRAME_OVERHEAD_BYTES bytes = ${FRAME_OVERHEAD_BYTES * 8} segments of " +
-                "$SEGMENT_SAMPLES samples each)"
+        check(requiredSamples <= cover.size) {
+            "required samples ($requiredSamples) exceed cover size (${cover.size}) -- should be " +
+                "unreachable once canEmbed and the payload-size check above both hold"
         }
 
         val n = cover.size
@@ -391,6 +415,11 @@ class AudioStegoCarrier(
      * [encodePhaseInversion], no stereo interleaving is needed here).
      */
     private fun encodeSpectrogramLsb(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples, $totalCapacityBytes-byte spectrogram-LSB capacity at " +
+                "stegoStrength=$stegoStrength) cannot hold even an empty payload frame " +
+                "($FRAME_OVERHEAD_BYTES bytes) -- this cover is too small to hide anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
                 "spectrogram-LSB capacity of $maxPayloadBytes bytes at stegoStrength=$stegoStrength"
@@ -398,10 +427,9 @@ class AudioStegoCarrier(
         val frame = buildFrame(payload)
         val totalBits = frame.size * 8
         val numFrames = cover.size / FRAME_SIZE
-        require(totalBits <= numFrames.toLong() * binsPerFrame) {
-            "cover ($numFrames usable $FRAME_SIZE-sample frames) is too small to hold even an " +
-                "empty payload frame ($FRAME_OVERHEAD_BYTES bytes = ${FRAME_OVERHEAD_BYTES * 8} " +
-                "bits) at $binsPerFrame bins/frame (stegoStrength=$stegoStrength)"
+        check(totalBits <= numFrames.toLong() * binsPerFrame) {
+            "frame bits ($totalBits) exceed available bins (${numFrames.toLong() * binsPerFrame}) " +
+                "-- should be unreachable once canEmbed and the payload-size check above both hold"
         }
 
         // Start from an exact copy of `cover`: every frame past the last embedded bit, and every
@@ -549,6 +577,11 @@ class AudioStegoCarrier(
      * [cover] (only the first `MFSK_CODEWORD_BYTES * FRAME_SIZE` samples are touched).
      */
     private fun encodeMfsk(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples) cannot hold an MFSK codeword ($MFSK_CODEWORD_BYTES " +
+                "symbol blocks of $FRAME_SIZE samples each) -- this cover is too small to hide " +
+                "anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds MFSK's fixed capacity of $maxPayloadBytes bytes"
         }
@@ -563,15 +596,27 @@ class AudioStegoCarrier(
             "unexpected RS codeword size ${codeword.size}, expected $MFSK_CODEWORD_BYTES"
         }
         val neededSamples = MFSK_CODEWORD_BYTES.toLong() * FRAME_SIZE
-        require(neededSamples <= cover.size) {
-            "cover (${cover.size} samples) is too small to hold an MFSK codeword " +
-                "($MFSK_CODEWORD_BYTES symbol blocks of $FRAME_SIZE samples each)"
+        check(neededSamples <= cover.size) {
+            "needed samples ($neededSamples) exceed cover size (${cover.size}) -- should be " +
+                "unreachable once canEmbed holds"
         }
 
         val out = cover.copyOf()
+        val toneSamples = DoubleArray(FRAME_SIZE) // reused per block, overwritten each iteration
         for (blockIndex in 0 until MFSK_CODEWORD_BYTES) {
             val byteValue = codeword[blockIndex].toInt() and 0xFF
             val start = blockIndex * FRAME_SIZE
+
+            // Clipping fix (design-v5.md §12.2): TONE_AMPLITUDE * up to MFSK_TONE_COUNT
+            // simultaneous active tones can sum past int16 range on its own -- for byteValue ==
+            // 0xFF (all 8 tones active), the actual measured peak is ~47876, i.e. essentially the
+            // naive activeToneCount*TONE_AMPLITUDE bound (these 8 tones sit at adjacent FFT bins,
+            // 46.875 Hz apart, so they drift back into near-alignment well within one 1024-sample
+            // block) -- measured 96-141 saturated samples per stego on the two bundled covers
+            // before this fix. Pass 1: synthesize this block's tone waveform at full amplitude and
+            // record its own actual peak magnitude alongside the cover's.
+            var peakToneAbs = 0.0
+            var peakCoverAbs = 0
             for (i in 0 until FRAME_SIZE) {
                 var toneSample = 0.0
                 for (bit in 0 until MFSK_TONE_COUNT) {
@@ -581,7 +626,40 @@ class AudioStegoCarrier(
                         toneSample += sin(2.0 * PI * freqHz * i / NightjarAcoustics.SAMPLE_RATE_HZ) * TONE_AMPLITUDE
                     }
                 }
-                out[start + i] = saturatingAdd(cover[start + i], toneSample)
+                toneSamples[i] = toneSample
+                val toneAbs = abs(toneSample)
+                if (toneAbs > peakToneAbs) peakToneAbs = toneAbs
+                val coverAbs = abs(cover[start + i].toInt())
+                if (coverAbs > peakCoverAbs) peakCoverAbs = coverAbs
+            }
+
+            // Pass 2: tone-first budget split, not an even split -- the tone carries the payload
+            // decode() has to detect, the cover doesn't, so the tone claims MFSK_SAMPLE_CEILING
+            // first and only ever gives up amplitude when it would saturate ALL BY ITSELF (only
+            // ever true for the highest-popcount byte values); the cover gets whatever budget is
+            // left over, attenuated harder when it must be, since a quieter ~21ms block is a far
+            // smaller cost than a weakened tone is to decode()'s margin-over-median-noise-floor
+            // detection. |cover[i]*coverGain + toneSamples[i]*toneGain| <=
+            // coverGain*peakCoverAbs + toneGain*peakToneAbs <= MFSK_SAMPLE_CEILING by construction
+            // (triangle inequality), regardless of the two signals' relative phase at any single
+            // sample. In the common case (this app's own covers, whose real energy sits far below
+            // the ~19.7kHz tone band, and any byteValue with a handful of bits set) both gains are
+            // 1.0 -- full tone amplitude, decode() keeps its usual margin untouched, exactly the
+            // discipline the class KDoc's "decoder must stay unchanged" note requires.
+            val toneGain = if (peakToneAbs <= MFSK_SAMPLE_CEILING || peakToneAbs == 0.0) {
+                1.0
+            } else {
+                MFSK_SAMPLE_CEILING / peakToneAbs
+            }
+            val coverBudget = (MFSK_SAMPLE_CEILING - toneGain * peakToneAbs).coerceAtLeast(0.0)
+            val coverGain = if (peakCoverAbs <= coverBudget || peakCoverAbs == 0) {
+                1.0
+            } else {
+                coverBudget / peakCoverAbs
+            }
+            for (i in 0 until FRAME_SIZE) {
+                val sum = cover[start + i] * coverGain + toneSamples[i] * toneGain
+                out[start + i] = roundToShort(sum)
             }
         }
         return out
@@ -699,15 +777,6 @@ class AudioStegoCarrier(
         val mid = sorted.size / 2
         return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2.0 else sorted[mid]
     }
-
-    /**
-     * Adds a real-valued time-domain [toneValue] to a cover [Short] sample, saturating (not
-     * wrapping) into `Short` range — same saturating discipline as [negatedSample]/[roundToShort].
-     */
-    private fun saturatingAdd(sample: Short, toneValue: Double): Short =
-        Math.round(sample.toDouble() + toneValue)
-            .coerceIn(Short.MIN_VALUE.toLong(), Short.MAX_VALUE.toLong())
-            .toShort()
 
     // --- Frame assembly (same shape as ImageStegoCarrier.buildFrame) ---
 
@@ -945,14 +1014,30 @@ class AudioStegoCarrier(
         private const val MFSK_BASE_BIN = 420
 
         /**
-         * Amplitude of each active tone channel's sine contribution (summed across active
-         * channels, then saturate-added onto the cover -- see [saturatingAdd]). Needs to clear
-         * [MFSK_DETECTION_MARGIN_DB] reliably against typical cover energy in this high band;
-         * 6000 (~18% of full-scale 32767) was sized against this class's own round-trip tests,
-         * comfortably larger than [MIX_AMPLITUDE] since detection here relies on an absolute
-         * presence/absence margin rather than a signed-sum trick.
+         * Ceiling amplitude of each active tone channel's sine contribution before
+         * [encodeMfsk]'s per-block `toneGain` scaling (summed across active channels onto the
+         * cover). Needs to clear [MFSK_DETECTION_MARGIN_DB] reliably against typical cover energy
+         * in this high band; 6000 (~18% of full-scale 32767) was sized against this class's own
+         * round-trip tests, comfortably larger than [MIX_AMPLITUDE] since detection here relies
+         * on an absolute presence/absence margin rather than a signed-sum trick.
+         * [MFSK_TONE_COUNT] simultaneous tones at this amplitude can sum past int16 range on
+         * their own (design-v5.md §12.2, measured 96-141 saturated samples per stego pre-fix,
+         * byteValue == 0xFF's actual measured peak is ~47876 -- essentially the full 8 *
+         * TONE_AMPLITUDE bound, since these 8 adjacent-bin tones drift back into near-alignment
+         * within one 1024-sample block), which is exactly why [encodeMfsk]'s `toneGain` exists --
+         * this constant is the amplitude used whenever a block's own actual tone peak allows it,
+         * not an unconditional one.
          */
         private const val TONE_AMPLITUDE = 6000.0
+
+        /**
+         * Ceiling every MFSK cover-plus-tones sample is kept at or under (in magnitude), used by
+         * [encodeMfsk]'s `toneGain`/`coverGain` to derive each block's gain split. Comfortably
+         * short of `Short.MAX_VALUE` (32767) so no legitimate (non-clipped) sum can land exactly
+         * on the int16 saturation boundary either -- only genuine out-of-range arithmetic would,
+         * and this fix's whole point is that it never happens.
+         */
+        private const val MFSK_SAMPLE_CEILING = 32000.0
 
         /**
          * Minimum dB a tone bin's magnitude must exceed the surrounding guard band's median

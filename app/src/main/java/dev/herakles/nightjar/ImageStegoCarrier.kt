@@ -81,16 +81,33 @@ class ImageStegoCarrier(private val coverImage: Bitmap) : CovertCarrier<Bitmap> 
 
     override val maxPayloadBytes: Int = (totalCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
 
+    /**
+     * True if [coverImage] has enough raw LSB capacity to hold even an empty-payload frame
+     * ([FRAME_OVERHEAD_BYTES] bytes). False is a fundamentally different situation than
+     * "[maxPayloadBytes] is 0 because the payload got trimmed to fit" — there is no payload
+     * size, not even zero, this cover can actually carry a frame for. Before this property
+     * existed (codec-H01), a caller could see `maxPayloadBytes == 0`, reasonably read that as
+     * "an empty payload is fine," and still have [encode] throw from a second, buried capacity
+     * check (`frame.size <= totalCapacityBytes`) it had no way to predict. [encode] now checks
+     * this first, with a message that says so directly; callers (the screens) use it to show
+     * "this cover is too small to hide anything" instead of a bare `0 / 0 bytes` counter.
+     */
+    val canEmbed: Boolean = totalCapacityBytes >= FRAME_OVERHEAD_BYTES
+
     override fun encode(payload: ByteArray): Bitmap {
+        require(canEmbed) {
+            "cover image (${coverImage.width}x${coverImage.height}, $totalCapacityBytes-byte " +
+                "total capacity) cannot hold even an empty payload frame ($FRAME_OVERHEAD_BYTES " +
+                "bytes) -- this cover is too small to hide anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${coverImage.width}x${coverImage.height} " +
                 "cover image's capacity of $maxPayloadBytes bytes"
         }
         val frame = buildFrame(payload)
-        require(frame.size <= totalCapacityBytes) {
-            "cover image (${coverImage.width}x${coverImage.height}, $totalCapacityBytes-byte " +
-                "total capacity) is too small to hold even an empty payload frame " +
-                "($FRAME_OVERHEAD_BYTES bytes)"
+        check(frame.size <= totalCapacityBytes) {
+            "frame (${frame.size} bytes) exceeds total capacity ($totalCapacityBytes bytes) -- " +
+                "should be unreachable once canEmbed and the payload-size check above both hold"
         }
 
         val stego = coverImage.copy(Bitmap.Config.ARGB_8888, /* isMutable = */ true)
