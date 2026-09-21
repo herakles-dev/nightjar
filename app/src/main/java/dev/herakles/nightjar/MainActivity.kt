@@ -269,6 +269,7 @@ fun NightjarApp() {
             )
             is Screen.AudioSteganography -> AudioStegoScreen(
                 carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) },
+                detector = AudioStegDetector(),
                 onBack = { screen = Screen.Picker },
             )
             is Screen.ModuleStub -> ModuleStubScreen(
