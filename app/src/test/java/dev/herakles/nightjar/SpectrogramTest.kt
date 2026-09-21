@@ -1,5 +1,7 @@
 package dev.herakles.nightjar
 
+import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
+import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -268,6 +270,81 @@ class SpectrogramTest {
                 "(measured $cellsOverVisibleThreshold/$totalCells = $visibleFraction) -- a coherent " +
                 "band would fail this the way MFSK's own band should",
             visibleFraction < 0.01,
+        )
+    }
+
+    // ---------------------------------------------------------------------
+    // design-v5.md §3.3 / gate-19 remediation: the test above only exercises full-scale NOISE
+    // covers, which have no digital silence. Both bundled covers this app actually offers
+    // (AudioStegoSampleCovers.kt) do -- SPOKEN_WORD's burst/gap envelope holds the amplitude at
+    // literal zero between "syllables". Where the cover is silent, SPECTROGRAM_LSB's QIM has
+    // nothing to nudge, so LOG_MAGNITUDE_FLOOR creates fresh mid-magnitude bins instead, and
+    // rounding back to 16-bit fills the gap with broadband noise -- a real, coherent brightening,
+    // not the scattered handful of cells the noise-cover test above measures. This grounds the
+    // corrected `audioSpectrogramCaption("SPECTROGRAM_LSB")` (JarDetailScreen.kt): the caption
+    // can't regress back to an unqualified "a spectrogram can't show it" without this test
+    // failing.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `spectrogram-LSB is visibly brightened where the real SPOKEN_WORD cover goes silent`() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB)
+        // ~200 bytes, per the finding's own reproduction -- comfortably within this cover's
+        // default-strength capacity and large enough to reach several of SPOKEN_WORD's silent
+        // burst/gap windows, not just its first (sound-covered) syllable.
+        val payload = fillerPayload(minOf(200, carrier.maxPayloadBytes))
+        val stego = carrier.encode(payload)
+        assertEquals(cover.size, stego.size)
+
+        // Same production params FireflyCarrierBlock actually renders with.
+        val coverData = spectrogram(cover, channels = 1, frameSize = frameSize, sampleRateHz = sampleRateHz)
+        val stegoData = spectrogram(stego, channels = 1, frameSize = frameSize, sampleRateHz = sampleRateHz)
+        assertEquals(coverData.columns.size, stegoData.columns.size)
+
+        // spectrogramImageBitmap's own per-clip normalization, applied to the STEGO data -- the
+        // actual rendered pixel-alpha value a real jar detail screen would show.
+        var stegoMinDb = Double.POSITIVE_INFINITY
+        var stegoMaxDb = Double.NEGATIVE_INFINITY
+        for (column in stegoData.columns) {
+            for (v in column) {
+                if (v < stegoMinDb) stegoMinDb = v
+                if (v > stegoMaxDb) stegoMaxDb = v
+            }
+        }
+        val stegoRange = (stegoMaxDb - stegoMinDb).coerceAtLeast(1.0)
+
+        var totalCells = 0
+        var cellsOverVisibleThreshold = 0
+        var columnsWithManyBrightCells = 0
+        for (i in coverData.columns.indices) {
+            val a = coverData.columns[i]
+            val b = stegoData.columns[i]
+            var brightCellsThisColumn = 0
+            for (bin in a.indices) {
+                totalCells++
+                val coverNormalized = ((a[bin] - stegoMinDb) / stegoRange).coerceIn(0.0, 1.0)
+                val stegoNormalized = ((b[bin] - stegoMinDb) / stegoRange).coerceIn(0.0, 1.0)
+                if (abs(coverNormalized - stegoNormalized) > 0.2) {
+                    cellsOverVisibleThreshold++
+                    brightCellsThisColumn++
+                }
+            }
+            if (brightCellsThisColumn > 50) columnsWithManyBrightCells++
+        }
+
+        val visibleFraction = cellsOverVisibleThreshold.toDouble() / totalCells
+        assertTrue(
+            "expected the SPOKEN_WORD cover's silent gaps to produce a clearly visible " +
+                "brightening fraction (measured $cellsOverVisibleThreshold/$totalCells = " +
+                "$visibleFraction) -- this contradicts an unqualified 'a spectrogram can't show " +
+                "it' for this cover, which is exactly why the caption was corrected",
+            visibleFraction >= 0.005,
+        )
+        assertTrue(
+            "expected multiple columns with many brightened cells, not one isolated outlier " +
+                "(measured $columnsWithManyBrightCells columns with > 50 bright cells)",
+            columnsWithManyBrightCells >= 3,
         )
     }
 }

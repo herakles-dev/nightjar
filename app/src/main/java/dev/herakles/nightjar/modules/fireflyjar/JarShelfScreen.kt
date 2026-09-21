@@ -65,10 +65,16 @@ fun JarShelfScreen(
         val records by repository.observeByModule(module.name).collectAsState(initial = emptyList())
         records.size
     }
+    // Stage E/1 (gate-20): physical, deduplicated media usage -- observeTotalMediaBytes()'s own
+    // KDoc (FireflyLog.kt) covers why this is a DISTINCT-mediaPath sum, not a naive per-row one.
+    // `initial = 0L` is safe post-fix: the DAO query now COALESCEs an empty table to 0 rather
+    // than emitting null.
+    val totalMediaBytes by repository.observeTotalMediaBytes().collectAsState(initial = 0L)
     val coroutineScope = rememberCoroutineScope()
 
     JarShelfContent(
         fireflyCounts = fireflyCounts,
+        totalMediaBytes = totalMediaBytes,
         onSelectModule = onSelectModule,
         onRevealTechnicalMode = onRevealTechnicalMode,
         // Clear-history now goes through FireflyRepository (gate-20, INV-6) so files and rows
@@ -89,6 +95,9 @@ fun JarShelfScreen(
 @Composable
 fun JarShelfContent(
     fireflyCounts: Map<Module, Int>,
+    // Default keeps the one existing @Preview call site compiling unchanged -- same reasoning
+    // JarDetailContent's own `loadMedia` default already documents.
+    totalMediaBytes: Long = 0L,
     onSelectModule: (Module) -> Unit,
     onRevealTechnicalMode: () -> Unit,
     onClearHistory: () -> Unit = {},
@@ -122,15 +131,28 @@ fun JarShelfContent(
                 }
             }
 
-            Text(
-                text = "clear history",
-                style = JarType.Footer,
-                color = JarWatchingDim,
+            Column(
                 modifier = Modifier
                     .align(Alignment.End)
-                    .clickable { showClearConfirm = true }
                     .padding(top = 16.dp),
-            )
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                // Stage E/1 + E/2 (gate-20): usage readout beside "clear history", advisory-only
+                // warmer copy above the threshold -- never a dialog, never gates catching (spec.md:
+                // retention stays user-managed, no automatic eviction).
+                Text(
+                    text = jarStorageUsageLabel(totalMediaBytes),
+                    style = JarType.Footer,
+                    color = if (jarStorageUsageIsWarning(totalMediaBytes)) FireflyCreated else JarWatchingDim,
+                )
+                Text(
+                    text = "clear history",
+                    style = JarType.Footer,
+                    color = JarWatchingDim,
+                    modifier = Modifier.clickable { showClearConfirm = true },
+                )
+            }
         }
     }
 
@@ -211,6 +233,40 @@ private fun fireflyCountLabel(module: Module, count: Int): String = when {
     count == 0 -> "no fireflies yet"
     count == 1 -> "1 firefly"
     else -> "$count fireflies"
+}
+
+/**
+ * Stage E/1 + E/2 (gate-20) storage-usage threshold: above this, [jarStorageUsageLabel] switches
+ * to warmer, advisory copy and [jarStorageUsageIsWarning] flips its color to [FireflyCreated].
+ * 250 MB is the value the Stage E task family's own acceptance criteria specified (handoff-tasks
+ * family `fam-0a69daee3c28`, "above a 250 MB threshold"), not one picked here -- see the task
+ * brief's own sizing reality: audio dominates usage at ~480 KB mono / ~960 KB stereo per 5s clip
+ * (up to ~1.9 MB for a full 20s acoustic capture), so 250 MB is roughly 250-500 audio catches,
+ * comfortably past what a demo session produces but a real signal that the jar has been used a
+ * lot. Advisory only -- crossing it never gates catching, shows a dialog, or evicts anything
+ * (spec.md's explicit "retention is user-managed" boundary; INV-5/INV-6 don't change).
+ */
+internal const val STORAGE_WARNING_THRESHOLD_BYTES = 250L * 1_000_000L
+
+/** True once [totalBytes] reaches [STORAGE_WARNING_THRESHOLD_BYTES] -- drives both
+ *  [jarStorageUsageLabel]'s copy and the readout's accent color, from one shared boundary check
+ *  so the two can't independently drift. */
+internal fun jarStorageUsageIsWarning(totalBytes: Long): Boolean = totalBytes >= STORAGE_WARNING_THRESHOLD_BYTES
+
+/**
+ * The shelf's storage-usage line (Stage E/1 + E/2, gate-20): "your jars are holding 42 MB" below
+ * the threshold, "the jars are getting heavy — 280 MB" at or above it -- exact copy from the
+ * Stage E task family's acceptance criteria. Reuses [fireflyMediaSizeLabel] (JarDetailScreen.kt)
+ * rather than a second byte formatter, so the shelf's total and a single firefly's own capacity
+ * line (`fireflyCapacityLine`) never disagree on what "42 MB" means.
+ */
+internal fun jarStorageUsageLabel(totalBytes: Long): String {
+    val sizeLabel = fireflyMediaSizeLabel(totalBytes)
+    return if (jarStorageUsageIsWarning(totalBytes)) {
+        "the jars are getting heavy — $sizeLabel"
+    } else {
+        "your jars are holding $sizeLabel"
+    }
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF161229)

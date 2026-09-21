@@ -129,4 +129,67 @@ class FireflyLogTest {
 
         assertTrue(dao.observeAll().first().isEmpty())
     }
+
+    // --- observeTotalMediaBytes() (G-04, gate-20 Stage E prerequisite) ---
+
+    private fun recordWithMedia(
+        timestampMillis: Long,
+        mediaPath: String?,
+        mediaBytes: Long,
+    ) = record(moduleId = "IMAGE_LSB", timestampMillis = timestampMillis).copy(
+        carrierKind = if (mediaPath != null) "IMAGE" else null,
+        mediaPath = mediaPath,
+        mediaBytes = mediaBytes,
+    )
+
+    @Test
+    fun observeTotalMediaBytesOnAnEmptyTableIsZeroNotNull() = runBlocking {
+        assertEquals(0L, dao.observeTotalMediaBytes().first())
+    }
+
+    @Test
+    fun observeTotalMediaBytesSumsMediaBytesAcrossDistinctRows() = runBlocking {
+        dao.insert(recordWithMedia(timestampMillis = 1L, mediaPath = "a.png", mediaBytes = 100L))
+        dao.insert(recordWithMedia(timestampMillis = 2L, mediaPath = "b.wav", mediaBytes = 250L))
+        // Media-less row -- must not contribute a phantom 0 that masks a real bug, and must not throw.
+        dao.insert(recordWithMedia(timestampMillis = 3L, mediaPath = null, mediaBytes = 0L))
+
+        assertEquals(350L, dao.observeTotalMediaBytes().first())
+    }
+
+    /**
+     * Content-addressed dedup ([FireflyMediaStore.write]) means several rows can share one
+     * on-disk file. A naive `SUM(mediaBytes)` over every ROW would double-count that shared
+     * file's bytes once per referencing row -- exactly the overstatement dedup exists to remove.
+     * The DISTINCT-`(mediaPath, mediaBytes)` query must count the shared file exactly once.
+     */
+    @Test
+    fun observeTotalMediaBytesCountsASharedMediaPathOnlyOnce() = runBlocking {
+        dao.insert(recordWithMedia(timestampMillis = 1L, mediaPath = "shared.wav", mediaBytes = 480_000L))
+        dao.insert(recordWithMedia(timestampMillis = 2L, mediaPath = "shared.wav", mediaBytes = 480_000L))
+        dao.insert(recordWithMedia(timestampMillis = 3L, mediaPath = "other.png", mediaBytes = 5_000L))
+
+        assertEquals(485_000L, dao.observeTotalMediaBytes().first())
+    }
+
+    // --- countAll() / countWithMedia() (G-05, gate-20 v4 probe contract) ---
+
+    @Test
+    fun countAllAndCountWithMediaOnAnEmptyTableAreBothZero() = runBlocking {
+        assertEquals(0, dao.countAll())
+        assertEquals(0, dao.countWithMedia())
+    }
+
+    @Test
+    fun countAllAndCountWithMediaCountRowsNotDistinctFiles() = runBlocking {
+        // Same shared mediaPath as observeTotalMediaBytesCountsASharedMediaPathOnlyOnce -- these
+        // two counts are ROW counts (record_count / records_with_media_count in the probe dump),
+        // deliberately NOT deduplicated by file the way observeTotalMediaBytes is.
+        dao.insert(recordWithMedia(timestampMillis = 1L, mediaPath = "shared.wav", mediaBytes = 480_000L))
+        dao.insert(recordWithMedia(timestampMillis = 2L, mediaPath = "shared.wav", mediaBytes = 480_000L))
+        dao.insert(recordWithMedia(timestampMillis = 3L, mediaPath = null, mediaBytes = 0L))
+
+        assertEquals(3, dao.countAll())
+        assertEquals(2, dao.countWithMedia())
+    }
 }

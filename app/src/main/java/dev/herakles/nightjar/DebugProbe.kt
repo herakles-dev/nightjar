@@ -11,6 +11,8 @@ import android.util.Log
  *  - the active [CovertDetector]'s confidence score, if any ([reportDetectorConfidence] /
  *    [clearDetector])
  *  - the current top-level screen ([reportScreen])
+ *  - the Firefly Jar's stored-media state (v4 addition, gate-20): record count, count carrying
+ *    media, total media bytes, and orphan-file count ([reportStoredMedia])
  *
  * Deliberately small and injectable: any screen/controller can call a `report*` method
  * opportunistically as its own state changes, with no shared mutable coupling beyond this
@@ -46,11 +48,29 @@ object DebugProbe {
         val timestampMs: Long,
     )
 
+    /**
+     * Snapshot of the Firefly Jar's stored-media state (v4 addition, gate-20's probe contract --
+     * spec.md's Runtime Verification Surface: "the same dump gains stored-media state -- record
+     * count, count carrying media, total media bytes, and orphan-file count"). Sourced from
+     * [dev.herakles.nightjar.modules.fireflyjar.FireflyRepository.probeSnapshot], so retention,
+     * clear-all and per-firefly delete are all assertable as queryable state rather than judged
+     * from a screenshot. [orphanFileCount] is currently always 0 -- see `probeSnapshot`'s own
+     * KDoc for the known, documented gap; the orphan sweep itself still runs and reclaims files
+     * correctly, only this field can't yet report how many it found.
+     */
+    data class StoredMediaState(
+        val recordCount: Int,
+        val recordsWithMediaCount: Int,
+        val totalMediaBytes: Long,
+        val orphanFileCount: Int,
+    )
+
     /** Everything the `COVERT_DEBUG` dump reports, per spec.md's Runtime Verification Surface. */
     data class ProbeState(
         val lastEncodeDecode: EncodeDecodeResult? = null,
         val detector: DetectorState? = null,
         val screen: String? = null,
+        val storedMedia: StoredMediaState? = null,
     )
 
     @Volatile
@@ -102,6 +122,25 @@ object DebugProbe {
         emit()
     }
 
+    /**
+     * Record a Firefly Jar stored-media snapshot and log the full updated state dump. No-op in
+     * release builds. Callers pass the counts they already computed (e.g. from
+     * [dev.herakles.nightjar.modules.fireflyjar.FireflyRepository.probeSnapshot]) -- this never
+     * re-derives them itself, same discipline [reportEncodeDecodeResult] already follows.
+     */
+    fun reportStoredMedia(
+        recordCount: Int,
+        recordsWithMediaCount: Int,
+        totalMediaBytes: Long,
+        orphanFileCount: Int,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        state = state.copy(
+            storedMedia = StoredMediaState(recordCount, recordsWithMediaCount, totalMediaBytes, orphanFileCount),
+        )
+        emit()
+    }
+
     private fun emit() {
         Log.d(TAG, toJson(state))
     }
@@ -125,6 +164,8 @@ internal fun toJson(state: DebugProbe.ProbeState): String {
     appendDetector(sb, state.detector)
     sb.append(",\"screen\":")
     appendJsonString(sb, state.screen)
+    sb.append(",\"stored_media\":")
+    appendStoredMedia(sb, state.storedMedia)
     sb.append('}')
     return sb.toString()
 }
@@ -154,6 +195,19 @@ private fun appendDetector(sb: StringBuilder, detector: DebugProbe.DetectorState
     appendJsonString(sb, detector.module.name)
     sb.append(",\"confidence\":").append(detector.confidence)
     sb.append(",\"timestamp_ms\":").append(detector.timestampMs)
+    sb.append('}')
+}
+
+private fun appendStoredMedia(sb: StringBuilder, storedMedia: DebugProbe.StoredMediaState?) {
+    if (storedMedia == null) {
+        sb.append("null")
+        return
+    }
+    sb.append('{')
+    sb.append("\"record_count\":").append(storedMedia.recordCount)
+    sb.append(",\"records_with_media_count\":").append(storedMedia.recordsWithMediaCount)
+    sb.append(",\"total_media_bytes\":").append(storedMedia.totalMediaBytes)
+    sb.append(",\"orphan_file_count\":").append(storedMedia.orphanFileCount)
     sb.append('}')
 }
 

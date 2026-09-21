@@ -2,11 +2,14 @@ package dev.herakles.nightjar.modules.fireflyjar
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioManager
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,7 +23,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +35,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -43,10 +50,13 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.LsbBitPlane
 import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.WavFile
@@ -71,6 +81,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -102,14 +113,32 @@ import kotlinx.coroutines.withContext
 fun JarDetailScreen(module: Module, repository: FireflyRepository, onBack: () -> Unit) {
     val fireflyFlow = remember(repository, module) { repository.observeByModule(module.name) }
     val fireflies by fireflyFlow.collectAsState(initial = emptyList())
-    var selectedFirefly by remember(module) { mutableStateOf<FireflyRecord?>(null) }
+    // F-03 fix (dup M-07): saved by id, not the record itself -- FireflyRecord isn't Parcelable,
+    // and a Long id is directly Saveable with no custom Saver needed (unlike MainActivity.kt's
+    // Screen, see ScreenSaver there). The record is re-derived from the live [fireflies] list
+    // below every recomposition, so a firefly edited/deleted elsewhere is never stale here, and
+    // Activity recreation (rotation, or a dark-mode toggle before MainActivity's configChanges fix
+    // landed) no longer silently closes an open detail popup.
+    var selectedFireflyId by rememberSaveable(module) { mutableStateOf<Long?>(null) }
+    val selectedFirefly = fireflies.find { it.id == selectedFireflyId }
+    val coroutineScope = rememberCoroutineScope()
 
     JarDetailContent(
         module = module,
         fireflies = fireflies,
         selectedFirefly = selectedFirefly,
-        onSelectFirefly = { selectedFirefly = it },
-        onDismissDetail = { selectedFirefly = null },
+        onSelectFirefly = { selectedFireflyId = it.id },
+        onDismissDetail = { selectedFireflyId = null },
+        // G-01/F-02 (gate-20, INV-6): per-firefly delete, routed through
+        // FireflyRepository.deleteFirefly ONLY -- never a direct FireflyMediaStore/FireflyDao
+        // call, since a shared (content-addressed, dedup'd) carrier file must stay
+        // reference-counted (see FireflyRepository.kt's own KDoc). If the deleted firefly is the
+        // one currently open in the detail popup, drop back to the swarm view immediately rather
+        // than waiting for the Flow to catch up.
+        onDeleteFirefly = { id ->
+            coroutineScope.launch { repository.deleteFirefly(id) }
+            if (selectedFireflyId == id) selectedFireflyId = null
+        },
         onBack = onBack,
         moduleFlow = { catchFlowFor(module = module, repository = repository, onExit = onBack) },
         // Stage C2 (gate-18): the carrier viewer's one I/O hook. FireflyDetailContent stays a
@@ -136,11 +165,23 @@ fun JarDetailContent(
     onDismissDetail: () -> Unit,
     onBack: () -> Unit,
     moduleFlow: @Composable () -> Unit,
+    // G-01/F-02 (gate-20, INV-6): per-firefly delete. Default no-op keeps every existing
+    // @Preview call site compiling unchanged -- same "pure/previewable" reasoning this
+    // composable's own KDoc already states for [moduleFlow]/[loadMedia].
+    onDeleteFirefly: (Long) -> Unit = {},
     // Default keeps every existing @Preview call site (none of which attach media) compiling
     // unchanged -- same "pure/previewable" reasoning this composable's own KDoc already states
     // for [moduleFlow].
     loadMedia: suspend (String) -> ByteArray? = { null },
 ) {
+    // G-01/F-02: shared confirm-delete state for both entry points -- a swarm tile's long-press
+    // and the detail popup's explicit delete action. Only one of the two views below is ever
+    // visible at once, so one Long? + one AlertDialog covers both without duplicating the confirm
+    // copy/flow. Softened jar voice (design/firefly-jar-identity.md's "cute copy... permitted"),
+    // same plain-AlertDialog shape this screen's sibling ("clear history", JarShelfScreen.kt)
+    // already established for a destructive confirm.
+    var pendingDeleteId by remember { mutableStateOf<Long?>(null) }
+
     JarNightSky(modifier = Modifier.fillMaxSize()) {
         if (selectedFirefly != null) {
             FireflyDetailContent(
@@ -148,6 +189,7 @@ fun JarDetailContent(
                 firefly = selectedFirefly,
                 onBack = onDismissDetail,
                 loadMedia = loadMedia,
+                onRequestDelete = { pendingDeleteId = selectedFirefly.id },
             )
         } else {
             Column(
@@ -179,7 +221,12 @@ fun JarDetailContent(
                     JarHero(module = module, fireflies = fireflies)
 
                     if (module.jarRole == JarRole.CREATION) {
-                        FireflySwarmSection(fireflies = fireflies, onSelect = onSelectFirefly, loadMedia = loadMedia)
+                        FireflySwarmSection(
+                            fireflies = fireflies,
+                            onSelect = onSelectFirefly,
+                            onLongPressFirefly = { pendingDeleteId = it.id },
+                            loadMedia = loadMedia,
+                        )
                     }
 
                     moduleFlow()
@@ -199,6 +246,28 @@ fun JarDetailContent(
                 }
             }
         }
+    }
+
+    val confirmingDeleteId = pendingDeleteId
+    if (confirmingDeleteId != null) {
+        AlertDialog(
+            onDismissRequest = { pendingDeleteId = null },
+            title = { Text("let this firefly go?") },
+            text = { Text("it won't come back.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDeleteId = null
+                    onDeleteFirefly(confirmingDeleteId)
+                }) {
+                    Text("let it go")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) {
+                    Text("keep it")
+                }
+            },
+        )
     }
 }
 
@@ -259,6 +328,7 @@ private fun JarHero(module: Module, fireflies: List<FireflyRecord>) {
 private fun FireflySwarmSection(
     fireflies: List<FireflyRecord>,
     onSelect: (FireflyRecord) -> Unit,
+    onLongPressFirefly: (FireflyRecord) -> Unit,
     loadMedia: suspend (String) -> ByteArray?,
 ) {
     if (fireflies.isEmpty()) {
@@ -289,7 +359,15 @@ private fun FireflySwarmSection(
             // no matter where it lands in the row after a reorder.
             fireflies.forEach { firefly ->
                 key(firefly.id) {
-                    FireflySwarmTile(record = firefly, onClick = { onSelect(firefly) }, loadMedia = loadMedia)
+                    FireflySwarmTile(
+                        record = firefly,
+                        onClick = { onSelect(firefly) },
+                        // G-01 (gate-20): long-press a swarm thumbnail to request delete --
+                        // confirmed by the shared AlertDialog in JarDetailContent, never deleted
+                        // straight from a gesture.
+                        onLongClick = { onLongPressFirefly(firefly) },
+                        loadMedia = loadMedia,
+                    )
                 }
             }
         }
@@ -306,15 +384,19 @@ private fun FireflySwarmSection(
  * [FireflyRecord] with no carrier ([FireflyRecord.carrierKind] null), and [FireflySwarmTile]
  * also falls back to this exact composable for a media-bearing record whose thumbnail is still
  * decoding or failed to load.
+ *
+ * [onLongClick] (G-01, gate-20) requests the shared confirm-delete dialog in [JarDetailContent] --
+ * this composable never deletes anything itself, it only reports the gesture.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FireflyDot(record: FireflyRecord, onClick: () -> Unit) {
+private fun FireflyDot(record: FireflyRecord, onClick: () -> Unit, onLongClick: () -> Unit) {
     val color = if (record.direction == "CREATED") FireflyCreated else FireflyReceived
     val clock = rememberFireflyClock()
     Canvas(
         modifier = Modifier
             .size(28.dp)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         val alpha = fireflyAlpha(record.id.toInt(), clock.value)
         val radius = size.minDimension * 0.22f
@@ -447,18 +529,24 @@ private suspend fun decodeSwarmAudioPeaks(bytes: ByteArray): FloatArray? = withC
  * firefly whose thumbnail is still decoding or failed to load, per this task's brief ("fall back
  * to the dot rather than an error tile") — never an error glyph, never an empty gray box.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FireflySwarmTile(record: FireflyRecord, onClick: () -> Unit, loadMedia: suspend (String) -> ByteArray?) {
+private fun FireflySwarmTile(
+    record: FireflyRecord,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    loadMedia: suspend (String) -> ByteArray?,
+) {
     val kind = record.carrierKind
     if (kind == null) {
-        FireflyDot(record = record, onClick = onClick)
+        FireflyDot(record = record, onClick = onClick, onLongClick = onLongClick)
         return
     }
     val color = if (record.direction == "CREATED") FireflyCreated else FireflyReceived
     when (val thumbnail = rememberSwarmThumbnail(record = record, kind = kind, loadMedia = loadMedia)) {
-        null, SwarmThumbnail.Failed -> FireflyDot(record = record, onClick = onClick)
+        null, SwarmThumbnail.Failed -> FireflyDot(record = record, onClick = onClick, onLongClick = onLongClick)
         is SwarmThumbnail.Image -> Box(
-            modifier = swarmThumbModifier(color).clickable(onClick = onClick),
+            modifier = swarmThumbModifier(color).combinedClickable(onClick = onClick, onLongClick = onLongClick),
             contentAlignment = Alignment.Center,
         ) {
             Image(
@@ -469,7 +557,7 @@ private fun FireflySwarmTile(record: FireflyRecord, onClick: () -> Unit, loadMed
             )
         }
         is SwarmThumbnail.Audio -> Box(
-            modifier = swarmThumbModifier(color).clickable(onClick = onClick),
+            modifier = swarmThumbModifier(color).combinedClickable(onClick = onClick, onLongClick = onLongClick),
             contentAlignment = Alignment.Center,
         ) {
             FireflySwarmWaveform(
@@ -548,6 +636,10 @@ private fun FireflyDetailContent(
     firefly: FireflyRecord,
     onBack: () -> Unit,
     loadMedia: suspend (String) -> ByteArray?,
+    // G-01/F-02 (gate-20): a visible delete action, because a swarm tile's long-press
+    // ([FireflyDot]/[FireflySwarmTile]) isn't discoverable on its own -- this is the popup's own
+    // entry point into the same shared confirm-delete dialog ([JarDetailContent]).
+    onRequestDelete: () -> Unit = {},
 ) {
     val caught = firefly.direction == "CREATED"
     val accent = if (caught) FireflyCreated else FireflyReceived
@@ -625,6 +717,19 @@ private fun FireflyDetailContent(
                 valueColor = accent,
             )
         }
+
+        // G-01/F-02 (gate-20): the popup's own visible delete affordance -- long-press on the
+        // swarm thumbnail reaches the same dialog, but isn't discoverable by itself.
+        Text(
+            text = "let this firefly go",
+            style = JarType.Footer,
+            color = JarWatchingDim,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onRequestDelete)
+                .padding(top = 20.dp),
+        )
     }
 }
 
@@ -778,7 +883,12 @@ private fun FireflyCarrierBlock(
         }
     }
 
-    val player = remember(firefly.id) { FireflyPlayer() }
+    // F-04 fix: FireflyPlayer requests real audio focus (AudioManager.requestAudioFocus) before
+    // playing and abandons it on stop/release -- see FireflyPlayer.kt's own KDoc. AudioManager is
+    // resolved here (the only place in this file that touches a Context) and handed down as a
+    // constructor argument, keeping FireflyPlayer itself Context-free.
+    val audioManager = LocalContext.current.getSystemService(AudioManager::class.java)
+    val player = remember(firefly.id) { FireflyPlayer(audioManager) }
     DisposableEffect(player) {
         onDispose { player.release() }
     }
@@ -898,6 +1008,13 @@ private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle
  * [FireflyBitPlaneToggle] already follows. Playback is unaffected by which view is showing: the
  * play/stop control and [wav]/[peaks] stay the source of truth for audio either way, the
  * spectrogram is a read-only visualization, not a second player.
+ *
+ * F-04 fix: this is "the composable that owns the player" in the sense that matters -- it holds
+ * [isPlaying] and is the only place that calls [player]'s play/stop, even though the instance
+ * itself is constructed one level up in [FireflyCarrierBlock]. [LifecycleEventEffect] stops
+ * playback on `ON_STOP` (backgrounding the app) so a caught clip doesn't keep playing through the
+ * speaker after the user leaves -- before this fix, nothing did (the composable stays alive
+ * across backgrounding, so [FireflyCarrierBlock]'s own `DisposableEffect.onDispose` never fired).
  */
 @Composable
 private fun FireflyAudioCarrier(
@@ -921,6 +1038,13 @@ private fun FireflyAudioCarrier(
         while (isPlaying) {
             withFrameNanos {}
             if (player.progressFraction() >= 1f) isPlaying = false
+        }
+    }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        if (isPlaying) {
+            player.stop()
+            isPlaying = false
         }
     }
 
@@ -1088,13 +1212,19 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
  *   [SpectrogramTest] grounds the bin claim.
  * - `null` — the acoustic modem (Module 3) also writes AUDIO media with no `technique`; its own
  *   FSK tone grid (architecture.md § Acoustic Protocol) is equally genuinely visible here.
- * - `"SPECTROGRAM_LSB"` — the payload is QIM on log-magnitude at `AudioStegoCarrier.kt`'s
- *   `QUANTIZATION_STEP`=0.12. [SpectrogramTest]'s cover-vs-stego measurement (encoding a real
- *   payload, comparing rendered normalized brightness cell-by-cell) found only a vanishingly
- *   small, scattered fraction of pixels cross a meaningfully visible delta (4 of 205,200 cells,
- *   0.002%) — not a coherent band the way MFSK's is, so the caption still says the eye can't
- *   catch it as a pattern. A cover-vs-stego difference view is the honest follow-up, out of
- *   scope here (spec.md).
+ * - `"SPECTROGRAM_LSB"` — **corrected again 2026-09 (design-v5.md §3.3): the shipped caption was
+ *   false on the app's own bundled covers.** The payload is QIM on log-magnitude at
+ *   `AudioStegoCarrier.kt`'s `QUANTIZATION_STEP`=0.12, and against full-scale NOISE covers
+ *   [SpectrogramTest]'s cover-vs-stego measurement finds only a vanishingly small, scattered
+ *   fraction of pixels crossing a meaningfully visible delta (4 of 205,200 cells, 0.002%) — not a
+ *   coherent band the way MFSK's is. But both bundled covers (`AudioStegoSampleCovers.kt`) have
+ *   real digital silence (SPOKEN_WORD's burst/gap envelope, SOFT_SYNTH's fade-in), and where the
+ *   cover is silent QIM has nothing to nudge: `LOG_MAGNITUDE_FLOOR` creates fresh bins instead,
+ *   and rounding back to 16-bit fills the gap with broadband noise -- clearly, coherently visible
+ *   brightening, not sub-perceptual. [SpectrogramTest] now measures this directly against a real
+ *   bundled cover, so the caption says both things honestly: most of the payload stays below a
+ *   spectrogram's threshold, AND the silent-cover gaps genuinely show. A cover-vs-stego
+ *   difference view is the honest follow-up, out of scope here (spec.md).
  * - `"PHASE_INVERSION"` — **corrected 2026-08-05 per rev-t2's adversarial-lite HIGH finding.**
  *   The original caption here claimed a magnitude spectrogram can't show this technique's
  *   payload; that was backwards. [spectrogram]'s mono-mix (`(L+R)/channels`) is EXACTLY
@@ -1125,7 +1255,8 @@ private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption
         genuinelyVisible = true,
     )
     "SPECTROGRAM_LSB" -> AudioSpectrogramCaption(
-        text = "the payload is quantization on log-magnitude, delta 0.12, sub-perceptual. a spectrogram can't show it.",
+        text = "most of the payload is nudges under 1.6 db a spectrogram can't show. where the cover " +
+            "went silent, the codec had to add faint sound -- that part can show here.",
         genuinelyVisible = false,
     )
     "PHASE_INVERSION" -> AudioSpectrogramCaption(

@@ -1,6 +1,9 @@
 package dev.herakles.nightjar.modules.fireflyjar
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 
 /**
  * Makes a firefly's row and its attached media file inseparable (gate-20, INV-6). Every deletion
@@ -12,13 +15,18 @@ import kotlinx.coroutines.flow.Flow
  * AudioStegoScreen, AcousticModemScreen) still write through [FireflyDao] directly and move to
  * this repository in a later stage.
  *
- * Stage C (this task, gate-20) makes file deletion reference-counted via
- * [deleteMediaFileIfUnreferenced]. Today [FireflyMediaStore.write] names every file with a random
- * UUID, so exactly one row ever references a given `mediaPath` and an unconditional delete is
- * safe. Task #24 switches that filename to a content hash, at which point two fireflies with
- * byte-identical carriers share one file -- an unconditional delete would then destroy a live
- * firefly's carrier out from under it while "deleting" or "rolling back" an unrelated one. This
- * stage is a no-op today (the count is always 0) and load-bearing the moment #24 lands.
+ * Stage C (gate-20) made file deletion reference-counted via [deleteMediaFileIfUnreferenced].
+ * [FireflyMediaStore.write] names every file by content hash (SHA-256), so two fireflies with
+ * byte-identical carriers collapse onto one file -- an unconditional delete would destroy a live
+ * firefly's carrier out from under it while "deleting" or "rolling back" an unrelated one. This is
+ * load-bearing today, exercised end-to-end in [FireflyRepositoryTest]'s dedup + reference-counting
+ * coverage.
+ *
+ * Every file-I/O path here ([clearAll], [deleteFirefly], [deleteMediaFileIfUnreferenced],
+ * [insertWithMedia]'s write/rollback) runs under [Dispatchers.IO] -- fixed after a review found
+ * the shelf's "clear history" launching [clearAll] on whatever dispatcher the caller happened to
+ * be on (the composition/Main dispatcher for a plain `rememberCoroutineScope().launch { }`),
+ * which blocked the UI thread for the full duration of a multi-file delete loop.
  */
 class FireflyRepository(
     private val dao: FireflyDao,
@@ -55,15 +63,17 @@ class FireflyRepository(
      * leaves an orphan that only the next-launch sweep can reclaim.
      */
     suspend fun insertWithMedia(record: FireflyRecord, media: ByteArray, extension: String) {
-        val filename = mediaStore.write(media, extension)
-        try {
-            dao.insert(record.copy(mediaPath = filename, mediaBytes = media.size.toLong()))
-        } catch (e: Exception) {
-            // The insert failed, so there is no row -- and therefore no id -- to exclude. Pass
-            // UNASSIGNED_ID, a sentinel no real row can ever have, so every existing row that
-            // names [filename] correctly counts as "other" and blocks the delete.
-            deleteMediaFileIfUnreferenced(filename, excludingId = UNASSIGNED_ID)
-            throw e
+        withContext(Dispatchers.IO) {
+            val filename = mediaStore.write(media, extension)
+            try {
+                dao.insert(record.copy(mediaPath = filename, mediaBytes = media.size.toLong()))
+            } catch (e: Exception) {
+                // The insert failed, so there is no row -- and therefore no id -- to exclude. Pass
+                // UNASSIGNED_ID, a sentinel no real row can ever have, so every existing row that
+                // names [filename] correctly counts as "other" and blocks the delete.
+                deleteMediaFileIfUnreferenced(filename, excludingId = UNASSIGNED_ID)
+                throw e
+            }
         }
     }
 
@@ -76,7 +86,7 @@ class FireflyRepository(
 
     fun observeAll(): Flow<List<FireflyRecord>> = dao.observeAll()
 
-    fun observeTotalMediaBytes(): Flow<Long?> = dao.observeTotalMediaBytes()
+    fun observeTotalMediaBytes(): Flow<Long> = dao.observeTotalMediaBytes()
 
     /**
      * Reads a persisted carrier's raw bytes back off disk, by [FireflyRecord.mediaPath].
@@ -100,8 +110,10 @@ class FireflyRepository(
      * except by [sweepOrphans], which needs a live row set to sweep against in the first place.
      */
     suspend fun clearAll() {
-        mediaStore.deleteAll()
-        dao.clearAll()
+        withContext(Dispatchers.IO) {
+            mediaStore.deleteAll()
+            dao.clearAll()
+        }
     }
 
     /**
@@ -113,17 +125,49 @@ class FireflyRepository(
      * references it -- see [deleteMediaFileIfUnreferenced].
      */
     suspend fun deleteFirefly(id: Long) {
-        val record = dao.getById(id)
-        // [id]'s own row still exists in the table at this point (it's deleted below), so it must
-        // be excluded -- otherwise a single-reference file would always see a count of >= 1 (itself)
-        // and never be deleted.
-        record?.mediaPath?.let { deleteMediaFileIfUnreferenced(it, excludingId = id) }
-        dao.deleteById(id)
+        withContext(Dispatchers.IO) {
+            val record = dao.getById(id)
+            // [id]'s own row still exists in the table at this point (it's deleted below), so it
+            // must be excluded -- otherwise a single-reference file would always see a count of
+            // >= 1 (itself) and never be deleted.
+            record?.mediaPath?.let { deleteMediaFileIfUnreferenced(it, excludingId = id) }
+            dao.deleteById(id)
+        }
     }
 
     /** Reclaims media files on disk with no row referencing them (crash-recovery sweep, INV-6). */
     suspend fun sweepOrphans() {
-        mediaStore.sweepOrphans(dao.allMediaPaths().toSet())
+        withContext(Dispatchers.IO) {
+            mediaStore.sweepOrphans(dao.allMediaPaths().toSet())
+        }
+    }
+
+    /**
+     * One-shot snapshot of stored-media state for [dev.herakles.nightjar.DebugProbe]'s
+     * `stored_media` report (gate-20 v4 probe contract, spec.md's Runtime Verification Surface):
+     * how many fireflies exist, how many carry an attached media file, and how many bytes that
+     * media occupies on disk (deduplicated -- [observeTotalMediaBytes]'s own KDoc). All three are
+     * exact, sourced straight from [FireflyDao] under [Dispatchers.IO].
+     *
+     * [StoredMediaSnapshot.orphanFileCount] is always 0 here -- **known gap, not a live count.**
+     * A real count needs a non-destructive directory listing, and only [FireflyMediaStore] can
+     * provide one (its backing directory is a private implementation detail there, deliberately
+     * not exposed for reads outside [write]/[read]/[delete]/[sweepOrphans]). This fix's file
+     * ownership is scoped to `FireflyRepository.kt`/`FireflyLog.kt`/`FireflyPlayer.kt`/
+     * `JarDetailScreen.kt`/`JarShelfScreen.kt` (plus `MainActivity.kt`/`DebugProbe.kt`) --
+     * `FireflyMediaStore.kt` is out of that scope, so this field can't be wired for real here.
+     * [sweepOrphans] itself is unaffected by this gap and still reclaims real orphans correctly;
+     * only this probe FIELD can't see how many it found. Wiring it for real needs one small,
+     * non-destructive addition to `FireflyMediaStore.kt` (e.g. a `countOrphans(known: Set<String>):
+     * Int` mirroring [sweepOrphans] without deleting) from whichever task owns that file.
+     */
+    suspend fun probeSnapshot(): StoredMediaSnapshot = withContext(Dispatchers.IO) {
+        StoredMediaSnapshot(
+            recordCount = dao.countAll(),
+            recordsWithMediaCount = dao.countWithMedia(),
+            totalMediaBytes = dao.observeTotalMediaBytes().first(),
+            orphanFileCount = 0,
+        )
     }
 
     /**
@@ -131,11 +175,11 @@ class FireflyRepository(
      * references it.
      *
      * The single point [deleteFirefly] and the [insertWithMedia] rollback path route through --
-     * deliberately, so the two callers cannot drift into different reference-check logic. Today
-     * ([FireflyMediaStore.write] names files by random UUID) the count this checks is always 0,
-     * making this a no-op wrapper around an unconditional delete. It becomes load-bearing the
-     * moment task #24 lands content-addressed filenames and two rows can share one file: deleting
-     * unconditionally at that point would silently destroy another firefly's carrier.
+     * deliberately, so the two callers cannot drift into different reference-check logic.
+     * [FireflyMediaStore.write] names files by content hash, so two rows can genuinely share one
+     * file today: deleting unconditionally here would silently destroy another firefly's carrier
+     * the moment that happens, which is exactly what [FireflyRepositoryTest]'s dedup +
+     * reference-counting tests exercise end to end.
      */
     private suspend fun deleteMediaFileIfUnreferenced(path: String, excludingId: Long) {
         if (dao.countReferencesTo(path, excludingId) == 0) {
@@ -153,3 +197,12 @@ class FireflyRepository(
         const val UNASSIGNED_ID = 0L
     }
 }
+
+/** [FireflyRepository.probeSnapshot]'s result -- see that function's KDoc for what each field
+ *  means and how it's computed. */
+data class StoredMediaSnapshot(
+    val recordCount: Int,
+    val recordsWithMediaCount: Int,
+    val totalMediaBytes: Long,
+    val orphanFileCount: Int,
+)

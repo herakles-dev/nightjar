@@ -1,7 +1,9 @@
 package dev.herakles.nightjar.modules.fireflyjar
 
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
@@ -31,8 +33,17 @@ import dev.herakles.nightjar.PcmAudio
  * the clip playback actually is, and using it would make a progress line drift out of sync with
  * the audio. [progressFraction] derives the real position from
  * [AudioTrack.getPlaybackHeadPosition] against the clip's own frame count instead.
+ *
+ * F-04 fix: [play] requests transient audio focus (matching this class's own `USAGE_MEDIA`/
+ * `CONTENT_TYPE_MUSIC` attributes, [buildAudioTrack]'s) before starting playback, and
+ * [stopActiveTrack] always abandons it -- both the explicit [stop] path and the automatic
+ * cutover [play] does for whatever clip was already active. Before this fix nothing in the app
+ * requested focus at all, so a caught clip played through other apps' audio without ducking or
+ * stopping for/against them. [audioManager] is optional (nullable) so a caller that can't resolve
+ * one (or a future JVM-side test double) degrades to "plays without ever touching focus" rather
+ * than crashing.
  */
-class FireflyPlayer {
+class FireflyPlayer(private val audioManager: AudioManager? = null) {
 
     @Volatile
     private var activeAudioTrack: AudioTrack? = null
@@ -42,6 +53,11 @@ class FireflyPlayer {
      *  [activeAudioTrack] is null. */
     @Volatile
     private var activeFrameCount: Int = 0
+
+    /** The focus grant [play] holds, if any -- released by [stopActiveTrack] via
+     *  [AudioManager.abandonAudioFocusRequest]. Null whenever nothing is playing. */
+    @Volatile
+    private var activeFocusRequest: AudioFocusRequest? = null
 
     /**
      * True while a clip started by [play] is actually playing — i.e. [play] both received a
@@ -63,6 +79,7 @@ class FireflyPlayer {
         stopActiveTrack()
         if (pcm.isEmpty()) return
         val track = buildAudioTrack(pcm, channelCount) ?: return
+        activeFocusRequest = requestAudioFocus()
         activeAudioTrack = track
         activeFrameCount = pcm.size / channelCount
         track.write(pcm, 0, pcm.size)
@@ -104,6 +121,29 @@ class FireflyPlayer {
         }
         activeAudioTrack = null
         activeFrameCount = 0
+        activeFocusRequest?.let { audioManager?.abandonAudioFocusRequest(it) }
+        activeFocusRequest = null
+    }
+
+    /**
+     * Requests transient focus (this is a short caught-clip playback, not exclusive long-running
+     * media) with the same [AudioAttributes] [buildAudioTrack] already builds the track with.
+     * Returns null (and requests nothing) when [audioManager] wasn't resolved, or when the
+     * platform denies the request -- either way [play] still plays the clip locally; a denied/
+     * absent focus grant only means this app didn't ask the platform to duck or pause anything
+     * else, not that playback itself fails.
+     */
+    private fun requestAudioFocus(): AudioFocusRequest? {
+        val manager = audioManager ?: return null
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .build()
+        return if (manager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) request else null
     }
 
     private fun buildAudioTrack(pcm: PcmAudio, channelCount: Int): AudioTrack? {

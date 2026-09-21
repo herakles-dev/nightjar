@@ -333,6 +333,60 @@ class FireflyRepositoryTest {
         }
     }
 
+    // --- probeSnapshot() (G-05, gate-20 v4 probe contract) ---
+
+    @Test
+    fun probeSnapshotOnAnEmptyRepositoryIsAllZeros() = runBlocking {
+        val snapshot = repository.probeSnapshot()
+
+        assertEquals(0, snapshot.recordCount)
+        assertEquals(0, snapshot.recordsWithMediaCount)
+        assertEquals(0L, snapshot.totalMediaBytes)
+        assertEquals(0, snapshot.orphanFileCount)
+    }
+
+    @Test
+    fun probeSnapshotCountsRecordsAndMediaBytesTogether() = runBlocking {
+        // A media-bearing firefly (counted in recordsWithMediaCount + totalMediaBytes)...
+        repository.insertWithMedia(
+            record(timestampMillis = 1L, carrierOverride = "IMAGE"),
+            byteArrayOf(1, 2, 3),
+            "png",
+        )
+        // ...and a media-less firefly (counted only in recordCount).
+        repository.insert(record(timestampMillis = 2L))
+
+        val snapshot = repository.probeSnapshot()
+
+        assertEquals(2, snapshot.recordCount)
+        assertEquals(1, snapshot.recordsWithMediaCount)
+        assertEquals(3L, snapshot.totalMediaBytes)
+    }
+
+    /**
+     * Documents a known, deliberate gap rather than leaving it silently asserted-away:
+     * [FireflyRepository.probeSnapshot]'s own KDoc explains why `orphanFileCount` can't be a live
+     * count from within this fix's file-ownership boundary (it would need a non-destructive
+     * directory listing only `FireflyMediaStore.kt` -- out of scope here -- can provide). This
+     * test pins the current, honest behavior (always 0, never fabricated from a wrong source) so
+     * a future change to that default doesn't slip by unnoticed; it plants a real stray file to
+     * make explicit that the 0 is a known limitation, not evidence there are no orphans.
+     */
+    @Test
+    fun probeSnapshotOrphanFileCountIsAlwaysZeroAKnownGapNotALiveCount() = runBlocking {
+        directory.mkdirs() // nothing has called mediaStore.write() yet in this test to create it
+        val strayFile = File(directory, "orphan-stray.png")
+        strayFile.writeBytes(byteArrayOf(9, 9))
+        strayFile.setLastModified(
+            System.currentTimeMillis() - FireflyMediaStore.MIN_ORPHAN_AGE_MILLIS - 60_000L,
+        )
+
+        val snapshot = repository.probeSnapshot()
+
+        assertEquals(0, snapshot.orphanFileCount)
+        assertTrue("probeSnapshot must never delete anything -- it only reads", strayFile.exists())
+    }
+
     @Test
     fun deletingASoleReferenceFileStillDeletesItLikeBeforeReferenceCounting() = runBlocking {
         val filename = mediaStore.write(byteArrayOf(4, 5, 6), "png")

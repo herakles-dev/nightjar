@@ -59,11 +59,37 @@ interface FireflyDao {
     @Query("DELETE FROM firefly_records WHERE id = :id")
     suspend fun deleteById(id: Long)
 
-    @Query("SELECT SUM(mediaBytes) FROM firefly_records")
-    fun observeTotalMediaBytes(): Flow<Long?>
+    /**
+     * Physical on-disk media usage (gate-20, Stage E prerequisite). Two corrections over a naive
+     * `SELECT SUM(mediaBytes) FROM firefly_records`:
+     *
+     * 1. `COALESCE(..., 0)` -- SQL `SUM` over zero rows returns `NULL`, not `0`. An empty jar is
+     *    every new user's starting state, so an unguarded caller would show "null" there.
+     * 2. `SELECT DISTINCT mediaPath, mediaBytes` before summing -- content-addressed dedup
+     *    ([FireflyMediaStore.write]) means several rows can share one file. Summing `mediaBytes`
+     *    per ROW (the naive query) would report logical carrier size, double-counting every
+     *    shared file once per referencing row -- the exact overstatement dedup exists to remove.
+     *    Summing over the distinct `(mediaPath, mediaBytes)` pairs instead reports what's
+     *    actually sitting on disk, which is what "your jars are holding X MB" means to a user.
+     */
+    @Query(
+        "SELECT COALESCE(SUM(mediaBytes), 0) FROM " +
+            "(SELECT DISTINCT mediaPath, mediaBytes FROM firefly_records WHERE mediaPath IS NOT NULL)",
+    )
+    fun observeTotalMediaBytes(): Flow<Long>
 
     @Query("SELECT mediaPath FROM firefly_records WHERE mediaPath IS NOT NULL")
     suspend fun allMediaPaths(): List<String>
+
+    /** Total row count -- the `record_count` field of [dev.herakles.nightjar.DebugProbe]'s
+     *  stored-media report (gate-20 v4 probe contract). */
+    @Query("SELECT COUNT(*) FROM firefly_records")
+    suspend fun countAll(): Int
+
+    /** Rows carrying an attached media file -- the `records_with_media_count` field of
+     *  [dev.herakles.nightjar.DebugProbe]'s stored-media report (gate-20 v4 probe contract). */
+    @Query("SELECT COUNT(*) FROM firefly_records WHERE mediaPath IS NOT NULL")
+    suspend fun countWithMedia(): Int
 
     /**
      * Counts rows OTHER than [excludingId] whose `mediaPath` equals [path].

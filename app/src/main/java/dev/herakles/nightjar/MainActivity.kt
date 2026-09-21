@@ -13,9 +13,12 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -86,6 +89,66 @@ private object OrphanSweepGuard {
     @Volatile var hasRun = false
 }
 
+/** Reads [repository]'s stored-media snapshot and forwards it to [DebugProbe] (gate-20 v4 probe
+ *  contract) -- the one place both [NightjarApp] call sites route through so they can't drift
+ *  into reporting different fields. */
+private suspend fun reportStoredMediaProbe(repository: FireflyRepository) {
+    val snapshot = repository.probeSnapshot()
+    DebugProbe.reportStoredMedia(
+        recordCount = snapshot.recordCount,
+        recordsWithMediaCount = snapshot.recordsWithMediaCount,
+        totalMediaBytes = snapshot.totalMediaBytes,
+        orphanFileCount = snapshot.orphanFileCount,
+    )
+}
+
+/**
+ * Encodes/decodes [Screen] for [rememberSaveable] (F-03 fix, M-07 dup): `Screen` isn't directly
+ * Parcelable/primitive, so a plain `rememberSaveable { mutableStateOf(...) }` can't hold it
+ * without this. A plain `String` bundle value is enough since every case either has no payload
+ * or carries just a [Module] -- `Module.name`/[Module.valueOf] round-trips that exactly, the same
+ * way `debugLabel` below already encodes a [Screen] as a string for the probe.
+ *
+ * Without this, navigation position (and an open firefly-detail popup, see JarDetailScreen.kt's
+ * own `rememberSaveable` fix) was silently lost on any Activity recreation that wasn't a
+ * rotation -- e.g. toggling system dark mode mid-catch dumped the user back on the jar shelf even
+ * though the process and the Room DB survived intact (OrphanSweepGuard's own KDoc already
+ * documents that survival for the sweep guard; this closes the same gap for navigation).
+ */
+private val ScreenSaver: Saver<Screen, String> = Saver(
+    save = { screen ->
+        when (screen) {
+            is Screen.JarShelf -> "JarShelf"
+            is Screen.Picker -> "Picker"
+            is Screen.AcousticModem -> "AcousticModem"
+            is Screen.ImageSteganography -> "ImageSteganography"
+            is Screen.Detector -> "Detector"
+            is Screen.AudioSteganography -> "AudioSteganography"
+            is Screen.JarDetail -> "JarDetail:${screen.module.name}"
+            is Screen.ModuleStub -> "ModuleStub:${screen.module.name}"
+        }
+    },
+    restore = { encoded ->
+        when {
+            encoded == "JarShelf" -> Screen.JarShelf
+            encoded == "Picker" -> Screen.Picker
+            encoded == "AcousticModem" -> Screen.AcousticModem
+            encoded == "ImageSteganography" -> Screen.ImageSteganography
+            encoded == "Detector" -> Screen.Detector
+            encoded == "AudioSteganography" -> Screen.AudioSteganography
+            encoded.startsWith("JarDetail:") ->
+                Screen.JarDetail(Module.valueOf(encoded.removePrefix("JarDetail:")))
+            encoded.startsWith("ModuleStub:") ->
+                Screen.ModuleStub(Module.valueOf(encoded.removePrefix("ModuleStub:")))
+            // Unreachable from this Saver's own `save` above -- present anyway (this codebase's
+            // unreachable-but-present discipline, AudioStegoCarrier.kt's DecodeFailure precedent)
+            // so a future saved-state format change fails safe (back to the root) rather than
+            // crashing restore.
+            else -> Screen.JarShelf
+        }
+    },
+)
+
 /** Label the `COVERT_DEBUG` probe (task #18) reports for each [Screen] value. */
 private val Screen.debugLabel: String
     get() = when (this) {
@@ -101,7 +164,7 @@ private val Screen.debugLabel: String
 
 @Composable
 fun NightjarApp() {
-    var screen: Screen by remember { mutableStateOf<Screen>(Screen.JarShelf) }
+    var screen: Screen by rememberSaveable(stateSaver = ScreenSaver) { mutableStateOf<Screen>(Screen.JarShelf) }
 
     val context = LocalContext.current
     val fireflyDao = remember { FireflyDatabase.getInstance(context).fireflyDao() }
@@ -117,6 +180,28 @@ fun NightjarApp() {
         if (!OrphanSweepGuard.hasRun) {
             OrphanSweepGuard.hasRun = true
             withContext(Dispatchers.IO) { fireflyRepository.sweepOrphans() }
+            // Reports record_count/records_with_media_count/total_media_bytes right after the
+            // sweep -- the sweep is the one stored-media mutation that doesn't touch a row, so
+            // it's the one case the LaunchedEffect(allFireflies) below (keyed on the reactive
+            // record list) wouldn't otherwise catch. NOTE: orphan_file_count itself is currently
+            // always 0 in the report regardless of timing -- see
+            // FireflyRepository.probeSnapshot()'s KDoc for the known, documented gap (it needs a
+            // non-destructive listing method on FireflyMediaStore.kt, outside this fix's file
+            // ownership).
+            reportStoredMediaProbe(fireflyRepository)
+        }
+    }
+
+    // Gate-20 v4 probe contract (spec.md Runtime Verification Surface): record_count/
+    // records_with_media_count/total_media_bytes are queryable via COVERT_DEBUG whenever they
+    // change. Keyed on the reactive all-fireflies list, so this re-reports after every row
+    // mutation -- a catch in any of the 3 creation jars, clear-all, or a per-firefly delete --
+    // without this file needing an explicit call at each of those sites (several of which live in
+    // modules this file's owner doesn't touch).
+    val allFireflies by fireflyRepository.observeAll().collectAsState(initial = null)
+    LaunchedEffect(allFireflies) {
+        if (allFireflies != null) {
+            reportStoredMediaProbe(fireflyRepository)
         }
     }
 
