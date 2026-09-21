@@ -61,6 +61,8 @@ import dev.herakles.nightjar.R
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.ui.ExpandGlyph
+import dev.herakles.nightjar.ui.FullscreenImageViewer
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
@@ -909,13 +911,37 @@ fun ImageStegoContent(
                         color = TextSecondary,
                     )
                 }
-                Image(
-                    bitmap = workingBitmap.asImageBitmap(),
-                    contentDescription = "${coverSource.previewLabel} cover image preview",
-                    modifier = Modifier
-                        .size(96.dp)
-                        .border(width = 1.dp, color = BorderDefault),
-                )
+                // Owner request (v6 addition): tap the working image to view it fullscreen.
+                // Keyed on workingBitmap (not firefly.id -- there's no firefly here) so the
+                // fullscreen state resets if a fresh embed/extract swaps the displayed bitmap
+                // out from under an open preview.
+                var showFullscreenCover by remember(workingBitmap) { mutableStateOf(false) }
+                val coverDescription = "${coverSource.previewLabel} cover image preview"
+                Box {
+                    Image(
+                        bitmap = workingBitmap.asImageBitmap(),
+                        contentDescription = coverDescription,
+                        modifier = Modifier
+                            .size(96.dp)
+                            .border(width = 1.dp, color = BorderDefault)
+                            .clickable(onClickLabel = "view fullscreen") { showFullscreenCover = true },
+                    )
+                    // Subtle tap affordance (owner request): a quiet corner glyph -- the image
+                    // itself already carries the click target and its onClickLabel above.
+                    ExpandGlyph(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(3.dp),
+                        tint = TextSecondary,
+                    )
+                }
+                if (showFullscreenCover) {
+                    FullscreenImageViewer(
+                        bitmap = workingBitmap,
+                        contentDescription = coverDescription,
+                        onDismiss = { showFullscreenCover = false },
+                    )
+                }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -3,6 +3,8 @@ package dev.herakles.nightjar.modules.fireflyjar
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -10,6 +12,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -48,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -74,6 +79,8 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.spectrogram
 import dev.herakles.nightjar.stegoDifference
 import dev.herakles.nightjar.stereoPolarity
+import dev.herakles.nightjar.ui.ExpandGlyph
+import dev.herakles.nightjar.ui.FullscreenImageViewer
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
 import dev.herakles.nightjar.ui.theme.JarCardBorder
@@ -355,7 +362,14 @@ private fun FireflySwarmSection(
         return
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(text = "your fireflies", style = JarType.SectionLabel, color = JarTextTertiary)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(text = "your fireflies", style = JarType.SectionLabel, color = JarTextTertiary)
+            // Owner request: the swarm's long-press-to-delete gesture (G-01) had no visible
+            // affordance at all — this quiet one-line hint, in the same jar voice as the delete
+            // dialog itself ("let this firefly go"), is the discoverable counterpart to the
+            // CustomAccessibilityAction FireflyDot/FireflySwarmTile already carry.
+            Text(text = "hold one to let it go", style = JarType.Footer, color = JarWatchingDim)
+        }
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -760,7 +774,7 @@ private fun FireflyDetailContent(
             )
             MetaCard(
                 label = "channel",
-                value = module.jarChannel,
+                value = jarChannelDisplayLabel(module.jarChannel),
                 modifier = Modifier.weight(1f),
             )
             MetaCard(
@@ -823,6 +837,27 @@ private fun MetaCard(
         )
     }
 }
+
+/**
+ * P2 follow-up (owner report, on-device): the "channel" meta-tile's value overflowed its own
+ * clipped tile at 411dp/default scale for exactly one [Module] — "a recording" (11 characters,
+ * where the tile comfortably held "a picture"'s 9). [MetaCard]'s own `.clip(RoundedCornerShape
+ * (8.dp))` is what actually cuts the overflowing text off ("A RECORDIN") — `softWrap = false` +
+ * `TextOverflow.Visible` on the value `Text` only stops *ellipsis* truncation, it doesn't escape
+ * the parent's clip.
+ *
+ * [Module.jarChannel] itself is unchanged — it's still "a recording" (the enum, in
+ * `picker/ModulePicker.kt`, is outside this file's edit scope for this task, and it's also
+ * legitimately correct data: the AUDIO_STEGANOGRAPHY payload travels inside a stored audio file,
+ * distinct in meaning from the acoustic modem's real-time "sound"). This is a display-only alias,
+ * keyed on the value itself rather than a fourth per-[Module] branch point in this file
+ * (architecture.md § 6 reserves exactly two: [FireflyGlyphs.drawJarGlyph] and `catchFlowFor`) —
+ * "recording" (9 characters, same length class as "a picture") says the same true thing shorter.
+ */
+internal fun jarChannelDisplayLabel(channel: String): String =
+    JAR_CHANNEL_DISPLAY_ALIASES[channel] ?: channel
+
+private val JAR_CHANNEL_DISPLAY_ALIASES = mapOf("a recording" to "recording")
 
 private fun formatFireflyTime(timestampMillis: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestampMillis))
@@ -1066,13 +1101,37 @@ private fun FireflyCarrierBlock(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     val displayed = if (showBitPlane && currentBitPlane != null) currentBitPlane else currentBitmap
-                    Image(
-                        bitmap = displayed.asImageBitmap(),
-                        contentDescription = fireflyImageContentDescription(showBitPlane && currentBitPlane != null),
-                        modifier = Modifier
-                            .size(96.dp)
-                            .border(width = 1.dp, color = JarGlassOutline),
-                    )
+                    val displayedDescription = fireflyImageContentDescription(showBitPlane && currentBitPlane != null)
+                    // Owner request (v6 addition) — tapping the carrier image opens it fullscreen,
+                    // showing whichever of image/bit-plane is currently selected. [showFullscreen]
+                    // is keyed on the firefly's id, same discipline every other piece of state in
+                    // this block already follows, so it resets rather than leaking across fireflies.
+                    var showFullscreen by remember(firefly.id) { mutableStateOf(false) }
+                    Box {
+                        Image(
+                            bitmap = displayed.asImageBitmap(),
+                            contentDescription = displayedDescription,
+                            modifier = Modifier
+                                .size(96.dp)
+                                .border(width = 1.dp, color = JarGlassOutline)
+                                .clickable(onClickLabel = "view fullscreen") { showFullscreen = true },
+                        )
+                        // Subtle tap affordance (owner request): a quiet corner glyph, not a
+                        // button — the image itself already carries the click target/label above.
+                        ExpandGlyph(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(3.dp),
+                            tint = JarTextTertiary,
+                        )
+                    }
+                    if (showFullscreen) {
+                        FullscreenImageViewer(
+                            bitmap = displayed,
+                            contentDescription = displayedDescription,
+                            onDismiss = { showFullscreen = false },
+                        )
+                    }
                     if (currentBitPlane != null) {
                         FireflyBitPlaneToggle(
                             showBitPlane = showBitPlane,
@@ -1125,19 +1184,48 @@ private fun FireflyCarrierBlock(
 @Composable
 private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle: (Boolean) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        val (imageSource, imagePressAlpha) = rememberPressDim()
         Text(
             text = "image",
             style = JarType.Footer,
             color = if (!showBitPlane) accent else JarTextTertiary,
-            modifier = Modifier.clickable(onClick = { onToggle(false) }),
+            modifier = Modifier
+                .graphicsLayer { alpha = imagePressAlpha }
+                .clickable(interactionSource = imageSource, indication = null, onClick = { onToggle(false) }),
         )
+        val (bitPlaneSource, bitPlanePressAlpha) = rememberPressDim()
         Text(
             text = "bit-plane",
             style = JarType.Footer,
             color = if (showBitPlane) accent else JarTextTertiary,
-            modifier = Modifier.clickable(onClick = { onToggle(true) }),
+            modifier = Modifier
+                .graphicsLayer { alpha = bitPlanePressAlpha }
+                .clickable(interactionSource = bitPlaneSource, indication = null, onClick = { onToggle(true) }),
         )
     }
+}
+
+/**
+ * Subtle pressed-state feedback (owner request, on-device tap-affordance pass) for the jar
+ * surface's small text toggles and the play button — a brief brightness dip rather than the
+ * stock Material ripple, which nothing in this codebase used before this task (no
+ * `MutableInteractionSource`/`indication` anywhere else) and which reads as generic Material,
+ * not this app's own drawn/pixel grammar. firefly-jar-identity.md's own doctrine explicitly
+ * allows "concrete, bounded motion" on this surface (§ Motion) — 120ms is well inside that.
+ * Callers wire the returned [MutableInteractionSource] into their own `clickable`/
+ * `combinedClickable` with `indication = null` (dropping the default ripple) and apply the
+ * returned alpha via `Modifier.graphicsLayer { alpha = ... }`.
+ */
+@Composable
+private fun rememberPressDim(): Pair<MutableInteractionSource, Float> {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val alpha by animateFloatAsState(
+        targetValue = if (pressed) 0.6f else 1f,
+        animationSpec = tween(durationMillis = 120),
+        label = "jarPressDim",
+    )
+    return interactionSource to alpha
 }
 
 /**
@@ -1415,12 +1503,17 @@ private fun FireflyAudioViewToggle(
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         available.forEach { view ->
-            Text(
-                text = view.label,
-                style = JarType.Footer,
-                color = if (view == current) accent else JarTextTertiary,
-                modifier = Modifier.clickable(onClick = { onSelect(view) }),
-            )
+            key(view) {
+                val (interactionSource, pressAlpha) = rememberPressDim()
+                Text(
+                    text = view.label,
+                    style = JarType.Footer,
+                    color = if (view == current) accent else JarTextTertiary,
+                    modifier = Modifier
+                        .graphicsLayer { alpha = pressAlpha }
+                        .clickable(interactionSource = interactionSource, indication = null, onClick = { onSelect(view) }),
+                )
+            }
         }
     }
 }
@@ -1626,12 +1719,24 @@ private fun FireflyWaveform(
  */
 @Composable
 private fun FireflyPlayButton(playing: Boolean, accent: Color, onClick: () -> Unit) {
+    // Owner request: a brief scale dip on press, in place of the stock Material ripple, matching
+    // rememberPressDim's toggle treatment just above but as a scale (this is a filled button-
+    // shaped chip, not inline text, so a scale reads as a press the way a brightness dip alone
+    // wouldn't).
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = tween(durationMillis = 120),
+        label = "playButtonPress",
+    )
     Box(
         modifier = Modifier
+            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
             .clip(RoundedCornerShape(10.dp))
             .background(accent.copy(alpha = 0.12f))
             .border(width = 1.dp, color = accent.copy(alpha = 0.22f), shape = RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
+            .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = 22.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center,
     ) {
