@@ -59,10 +59,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.LsbBitPlane
 import dev.herakles.nightjar.SpectrogramData
+import dev.herakles.nightjar.StereoPolarity
 import dev.herakles.nightjar.WavFile
-import dev.herakles.nightjar.spectrogram
+import dev.herakles.nightjar.matchCover
+import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
+import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.spectrogram
+import dev.herakles.nightjar.stegoDifference
+import dev.herakles.nightjar.stereoPolarity
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
 import dev.herakles.nightjar.ui.theme.JarCardBorder
@@ -813,6 +819,14 @@ internal fun fireflyCapacityLine(payloadBytes: Int, mediaBytes: Long): String {
  * finding) PHASE_INVERSION are all genuinely visible once mono-mixed; only SPECTROGRAM_LSB's
  * sub-perceptual QIM nudge stays below a coherent visibility threshold. See that function's
  * KDoc for the measured basis of each case.
+ *
+ * v5 addition (design-v5.md §3.5/§4.3, gate-24/25) extends the AUDIO case once more: right after
+ * `spectrogramImage`, this same [LaunchedEffect] also precomputes the two honest carrier views
+ * design-v5.md added — a re-derived-cover difference map for
+ * [dev.herakles.nightjar.AudioStegoTechnique.SPECTROGRAM_LSB] mono clips and an L/R polarity
+ * readout for [dev.herakles.nightjar.AudioStegoTechnique.PHASE_INVERSION] stereo clips — gated
+ * by [audioCarrierViewOptions], never by a new per-[Module] `when`. See [FireflyAudioCarrier]'s
+ * own KDoc for how the toggle offers and renders them.
  */
 @Composable
 private fun FireflyCarrierBlock(
@@ -834,9 +848,22 @@ private fun FireflyCarrierBlock(
     // Stage D/3 (gate-19): the AUDIO carrier's spectrogram, precomputed and tinted into an
     // ImageBitmap alongside `wav`/`peaks` (same LaunchedEffect, same Default hop) -- same
     // "precompute once, never on toggle-tap" reasoning `bitPlaneBitmap` above already documents.
-    // Null until ready; `showSpectrogram` only ever has something to show once it is.
+    // Null until ready; the view toggle only ever has something to show once it is.
     var spectrogramImage by remember(firefly.id) { mutableStateOf<ImageBitmap?>(null) }
-    var showSpectrogram by remember(firefly.id) { mutableStateOf(false) }
+    var carrierView by remember(firefly.id) { mutableStateOf(AudioCarrierView.WAVEFORM) }
+    // v5 addition (design-v5.md §3.5/§4.3, gate-24/25): the two "honest carrier view" insights,
+    // precomputed alongside `spectrogramImage` above in the same LaunchedEffect/Default hop --
+    // same discipline, one step further. [differenceReady]/[polarityReady] separate "still
+    // computing" from "computed, nothing to show": `differenceInsight == null` once
+    // [differenceReady] is true is gate-24's own withheld case (INV-8) -- [StegoDifferenceView]
+    // renders that reason itself, this file never guesses one. [stereoPolarity] never returns
+    // null, so [polarity] only needs [polarityReady] to gate the toggle's "working" fallback
+    // while it's mid-flight. Both stay null/false for every firefly whose technique/channel
+    // count doesn't earn a new option (gate-25) -- see [audioCarrierViewOptions].
+    var differenceInsight by remember(firefly.id) { mutableStateOf<StegoDifferenceInsight?>(null) }
+    var differenceReady by remember(firefly.id) { mutableStateOf(false) }
+    var polarity by remember(firefly.id) { mutableStateOf<StereoPolarity?>(null) }
+    var polarityReady by remember(firefly.id) { mutableStateOf(false) }
     var failed by remember(firefly.id) { mutableStateOf(false) }
 
     LaunchedEffect(firefly.id) {
@@ -876,6 +903,30 @@ private fun FireflyCarrierBlock(
                     spectrogramImage = withContext(Dispatchers.Default) {
                         val data = spectrogram(parsedWav.samples, channels = parsedWav.numChannels)
                         spectrogramImageBitmap(data, accent)
+                    }
+                    // v5 addition (design-v5.md §3.5, gate-24): re-derive the cover and diff
+                    // against it, gated to exactly the technique/channel combo matchCover's
+                    // energy-ratio statistic is valid for (design-v5.md §3.1 -- MFSK's tones
+                    // outweigh the cover, so this never runs for that technique). Both matchCover
+                    // and stegoDifference run inside the same Default hop -- the ~480 KB
+                    // re-derived cover a CoverMatch carries never survives past this block, only
+                    // the reduced StegoDifferenceInsight reaches Compose state.
+                    if (firefly.technique == "SPECTROGRAM_LSB" && parsedWav.numChannels == 1) {
+                        differenceInsight = withContext(Dispatchers.Default) {
+                            val match = matchCover(
+                                parsedWav.samples,
+                                AudioSampleCover.entries.map { it.label to { synthesizeSampleCover(it) } },
+                            )
+                            match?.let { StegoDifferenceInsight(stegoDifference(it.cover, parsedWav.samples), it.label) }
+                        }
+                        differenceReady = true
+                    }
+                    // v5 addition (design-v5.md §4.3, gate-25): the persisted PHASE_INVERSION
+                    // clip is already stereo end-to-end (design-v5.md §4.1), so this needs no
+                    // re-derivation step -- just the same off-main compute discipline.
+                    if (firefly.technique == "PHASE_INVERSION" && parsedWav.numChannels == 2) {
+                        polarity = withContext(Dispatchers.Default) { stereoPolarity(parsedWav.samples) }
+                        polarityReady = true
                     }
                 }
             }
@@ -949,14 +1000,30 @@ private fun FireflyCarrierBlock(
                             accent = accent,
                             onToggle = { showBitPlane = it },
                         )
+                        // U-02: the bit-plane toggle's own honesty caption -- see
+                        // imageBitPlaneCaption's KDoc for what it claims and how that's grounded.
+                        if (showBitPlane) {
+                            Text(
+                                text = imageBitPlaneCaption(),
+                                style = JarType.Footer,
+                                color = JarWatchingDim,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                 }
                 currentWav != null && currentPeaks != null -> FireflyAudioCarrier(
                     wav = currentWav,
                     peaks = currentPeaks,
                     spectrogramImage = spectrogramImage,
-                    showSpectrogram = showSpectrogram,
-                    onToggleSpectrogram = { showSpectrogram = it },
+                    carrierView = carrierView,
+                    onSelectView = { carrierView = it },
+                    availableViews = audioCarrierViewOptions(firefly.technique, currentWav.numChannels),
+                    differenceInsight = differenceInsight,
+                    differenceReady = differenceReady,
+                    polarity = polarity,
+                    polarityReady = polarityReady,
                     technique = firefly.technique,
                     accent = accent,
                     player = player,
@@ -995,19 +1062,115 @@ private fun FireflyBitPlaneToggle(showBitPlane: Boolean, accent: Color, onToggle
 }
 
 /**
- * Waveform/spectrogram + play/stop control (gate-18, gate-19) — this app's first Canvas
- * waveform, plus Stage D/3's spectrogram toggle alongside it. The waveform bars use [accent] at
- * two alphas (played vs. not-yet-played) plus a drawn playhead line, the same "dim track, bright
- * fill" grammar the acoustic modem's jar-mode glow-strength meter already established
- * (AcousticModemScreen.kt's `JarListeningCard`) rather than a new visual language. The play/stop
- * pill reuses [JarType.ButtonLabel], the same style "send"/"stop"/"watch" already use there.
+ * U-02 — the bit-plane toggle's own caption, the IMAGE carrier's missing counterpart to
+ * [audioSpectrogramCaption]. Static, not per-firefly: every IMAGE carrier's bit-plane looks the
+ * same way for the same reason, whether the cover was one of the two bundled
+ * [dev.herakles.nightjar.modules.imagestego.SampleCover]s or a photo picked from the device
+ * (task #33).
+ *
+ * The honest claim, not the flattering one: an *untouched* photo's least-significant bits
+ * already read as static, not as a smooth picture — real sensor noise (and, for a re-encoded
+ * picked photo, lossy compression) leaves the bottom bit close to a coin flip from one pixel to
+ * the next, long before any payload touches it. So the bit-plane can't be read as a treasure
+ * map ("the fuzzy patch is where the message is"): a payload region and an untouched region
+ * both look like fuzz, and this caption says that instead of implying otherwise.
+ *
+ * States nothing per-firefly and no specific figure, so there's no number here for a pure
+ * function to compute — but the underlying claim is still grounded in real measurement, not
+ * asserted on faith: [ImageBitPlaneCaptionTest] decodes both bundled
+ * [dev.herakles.nightjar.modules.imagestego.SampleCover] PNGs (the exact resources
+ * [dev.herakles.nightjar.ImageStegoCarrier] embeds into) and confirms [LsbBitPlane.compute]'s
+ * output on each never holds a same-color run longer than a handful of pixels, in any row or
+ * column — measured max 6 of 100 on both bundled covers — so neither one's own bit-plane has a
+ * smooth patch to point at.
+ */
+internal fun imageBitPlaneCaption(): String =
+    "even an untouched photo's bit-plane already looks like static, not a picture. fuzz here doesn't mean a message is hiding here."
+
+/**
+ * v5 addition (design-v5.md §5, gate-24/25) — the AUDIO carrier's view switch, generalized from
+ * Stage D/3's original two-way `Boolean showSpectrogram` to the up-to-four views this file can
+ * now show for one firefly. [label] is the toggle's own tappable text
+ * ([FireflyAudioViewToggle]). Which of the four apply to a given firefly is decided by
+ * [audioCarrierViewOptions], never by a `when` over [dev.herakles.nightjar.picker.Module]
+ * (architecture.md § 6).
+ */
+internal enum class AudioCarrierView(val label: String) {
+    WAVEFORM("waveform"),
+    SPECTROGRAM("spectrogram"),
+    DIFFERENCE("difference"),
+    POLARITY("polarity"),
+}
+
+/**
+ * v5 addition (design-v5.md §5, gate-24/25) — which [AudioCarrierView]s a firefly's audio
+ * carrier offers, always starting from the two Stage D/3 (gate-19) baseline views. "difference"
+ * is added only for [dev.herakles.nightjar.AudioStegoTechnique.SPECTROGRAM_LSB] mono clips —
+ * matching exactly the technique/channel combination [dev.herakles.nightjar.matchCover]'s
+ * energy-ratio statistic is valid for (design-v5.md §3.1: MFSK's additive tones outweigh the
+ * cover, so this never offers "difference" there). "polarity" is added only for
+ * [dev.herakles.nightjar.AudioStegoTechnique.PHASE_INVERSION] stereo clips — there is nothing to
+ * show against a single channel. Every other combination — MFSK, the acoustic modem's `null`
+ * technique, a mono clip, a mono/pre-migration firefly with no [technique] at all — gets no new
+ * option (gate-25): a firefly this doesn't apply to looks exactly as it did before this task.
+ *
+ * Pure and `internal` so [AudioCarrierViewOptionsTest] can drive it directly with plain JVM
+ * values, no Compose/Robolectric needed — the same split every other caption/readout builder in
+ * this package already follows ([CarrierInsightViews.kt]).
+ */
+internal fun audioCarrierViewOptions(technique: String?, numChannels: Int): List<AudioCarrierView> {
+    val views = mutableListOf(AudioCarrierView.WAVEFORM, AudioCarrierView.SPECTROGRAM)
+    if (technique == "SPECTROGRAM_LSB" && numChannels == 1) views += AudioCarrierView.DIFFERENCE
+    if (technique == "PHASE_INVERSION" && numChannels == 2) views += AudioCarrierView.POLARITY
+    return views
+}
+
+/**
+ * v5 addition (design-v5.md §3/§4) — the "difference"/"polarity" toggle's own lightweight
+ * loading state. Both insights are precomputed off the composition thread alongside the
+ * spectrogram ([FireflyCarrierBlock]'s `LaunchedEffect`), but that precompute can still be
+ * mid-flight the instant the user taps over to either option — the toggle itself only waits on
+ * `spectrogramImage` being ready, not on these two (see [FireflyAudioCarrier]'s own KDoc). One
+ * lowercase status word in the jar's voice, the same idiom every other in-progress state in this
+ * app already uses ("catching"/"peeking"/"analyzing"/"listening" — `AudioStegoScreen.kt`,
+ * `ImageStegoScreen.kt`, `AcousticModemScreen.kt`), not a spinner and not a percentage.
+ */
+@Composable
+private fun CarrierInsightWorking() {
+    Text(
+        text = "working this one out",
+        style = JarType.Footer,
+        color = JarWatchingDim,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+    )
+}
+
+/**
+ * Waveform/spectrogram/difference/polarity + play/stop control (gate-18, gate-19, v5 addition
+ * gate-24/25) — this app's first Canvas waveform, plus Stage D/3's spectrogram toggle, plus
+ * (this task, V5-7) the two honest carrier views design-v5.md §3/§4 added:
+ * [dev.herakles.nightjar.modules.fireflyjar.StegoDifferenceView] for
+ * [dev.herakles.nightjar.AudioStegoTechnique.SPECTROGRAM_LSB] and
+ * [dev.herakles.nightjar.modules.fireflyjar.StereoPolarityView] for
+ * [dev.herakles.nightjar.AudioStegoTechnique.PHASE_INVERSION]. [availableViews]
+ * ([audioCarrierViewOptions]) is the option set the toggle actually offers; [carrierView] is
+ * which one is currently selected, owned one level up in [FireflyCarrierBlock] (keyed on the
+ * firefly's id, same as every other piece of this block's state) so it resets whenever a
+ * different firefly is opened.
  *
  * [spectrogramImage] is null until [FireflyCarrierBlock]'s `LaunchedEffect` finishes computing
- * it — the "waveform" / "spectrogram" [FireflyAudioViewToggle] and [audioSpectrogramCaption] only
- * render once it isn't, same "toggle absent until ready" rule the IMAGE case's
- * [FireflyBitPlaneToggle] already follows. Playback is unaffected by which view is showing: the
- * play/stop control and [wav]/[peaks] stay the source of truth for audio either way, the
- * spectrogram is a read-only visualization, not a second player.
+ * it — the whole toggle row and [audioSpectrogramCaption] only render once it isn't, same
+ * "toggle absent until ready" rule the IMAGE case's [FireflyBitPlaneToggle] already follows.
+ * [differenceInsight]/[polarity] follow a different rule once the toggle itself is showing:
+ * they're each gated by their own `Ready` flag rather than by nullability alone (`differenceInsight
+ * == null` after `differenceReady` is gate-24's genuine "cover unmatched" withheld case, not
+ * "still computing" — collapsing the two would either flash a false withheld message or drop
+ * the honest one), rendering [CarrierInsightWorking] until then. Playback is unaffected by which
+ * view is showing: the play/stop control and [wav]/[peaks] stay the source of truth for audio
+ * either way; every carrier view here is read-only, never a second player.
  *
  * F-04 fix: this is "the composable that owns the player" in the sense that matters -- it holds
  * [isPlaying] and is the only place that calls [player]'s play/stop, even though the instance
@@ -1021,8 +1184,13 @@ private fun FireflyAudioCarrier(
     wav: WavFile.ParsedWav,
     peaks: FloatArray,
     spectrogramImage: ImageBitmap?,
-    showSpectrogram: Boolean,
-    onToggleSpectrogram: (Boolean) -> Unit,
+    carrierView: AudioCarrierView,
+    onSelectView: (AudioCarrierView) -> Unit,
+    availableViews: List<AudioCarrierView>,
+    differenceInsight: StegoDifferenceInsight?,
+    differenceReady: Boolean,
+    polarity: StereoPolarity?,
+    polarityReady: Boolean,
     technique: String?,
     accent: Color,
     player: FireflyPlayer,
@@ -1053,15 +1221,41 @@ private fun FireflyAudioCarrier(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (showSpectrogram && spectrogramImage != null) {
-            FireflySpectrogramCanvas(
-                image = spectrogramImage,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-            )
-        } else {
-            FireflyWaveform(
+        when (carrierView) {
+            AudioCarrierView.SPECTROGRAM -> if (spectrogramImage != null) {
+                FireflySpectrogramCanvas(
+                    image = spectrogramImage,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                )
+            } else {
+                // Unreachable in practice -- see this function's KDoc -- but present anyway,
+                // same "unreachable-but-present" discipline `AudioStegoCarrier.kt`'s own
+                // `DecodeFailure` handling documents: fall back to the waveform rather than
+                // rendering nothing.
+                FireflyWaveform(
+                    peaks = peaks,
+                    isPlaying = isPlaying,
+                    player = player,
+                    clock = clock,
+                    accent = accent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                )
+            }
+            AudioCarrierView.DIFFERENCE -> if (differenceReady) {
+                StegoDifferenceView(insight = differenceInsight, accent = accent, modifier = Modifier.fillMaxWidth())
+            } else {
+                CarrierInsightWorking()
+            }
+            AudioCarrierView.POLARITY -> if (polarityReady && polarity != null) {
+                StereoPolarityView(polarity = polarity, accent = accent, modifier = Modifier.fillMaxWidth())
+            } else {
+                CarrierInsightWorking()
+            }
+            AudioCarrierView.WAVEFORM -> FireflyWaveform(
                 peaks = peaks,
                 isPlaying = isPlaying,
                 player = player,
@@ -1074,11 +1268,12 @@ private fun FireflyAudioCarrier(
         }
         if (spectrogramImage != null) {
             FireflyAudioViewToggle(
-                showSpectrogram = showSpectrogram,
+                current = carrierView,
+                available = availableViews,
                 accent = accent,
-                onToggle = onToggleSpectrogram,
+                onSelect = onSelectView,
             )
-            if (showSpectrogram) {
+            if (carrierView == AudioCarrierView.SPECTROGRAM) {
                 val caption = audioSpectrogramCaption(technique)
                 Text(
                     text = caption.text,
@@ -1106,26 +1301,31 @@ private fun FireflyAudioCarrier(
 }
 
 /**
- * Stage D/3 (gate-19) — the "waveform" / "spectrogram" switch under an AUDIO carrier, mirroring
- * [FireflyBitPlaneToggle]'s exact grammar: two tappable [JarType.Footer] labels, selected takes
- * the firefly's own [accent], unselected drops to [JarTextTertiary] — not a new control shape
- * for what is still this app's one two-option carrier-view pick.
+ * Stage D/3 (gate-19), extended v5 (design-v5.md §5, gate-24/25) — the carrier-view switch under
+ * an AUDIO carrier, generalized from its original two-label "waveform"/"spectrogram" pair to up
+ * to four: [available] is [audioCarrierViewOptions]'s own output, so "difference"/"polarity"
+ * only ever appear for the one technique + channel-count combination each is honest for
+ * (gate-25: MFSK, mono, and pre-migration fireflies never see a new label here). Same
+ * selected/unselected grammar as [FireflyBitPlaneToggle]: the selected label takes the firefly's
+ * own [accent], an unselected one drops to [JarTextTertiary] — still not a new control shape,
+ * just more of the same one.
  */
 @Composable
-private fun FireflyAudioViewToggle(showSpectrogram: Boolean, accent: Color, onToggle: (Boolean) -> Unit) {
+private fun FireflyAudioViewToggle(
+    current: AudioCarrierView,
+    available: List<AudioCarrierView>,
+    accent: Color,
+    onSelect: (AudioCarrierView) -> Unit,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text(
-            text = "waveform",
-            style = JarType.Footer,
-            color = if (!showSpectrogram) accent else JarTextTertiary,
-            modifier = Modifier.clickable(onClick = { onToggle(false) }),
-        )
-        Text(
-            text = "spectrogram",
-            style = JarType.Footer,
-            color = if (showSpectrogram) accent else JarTextTertiary,
-            modifier = Modifier.clickable(onClick = { onToggle(true) }),
-        )
+        available.forEach { view ->
+            Text(
+                text = view.label,
+                style = JarType.Footer,
+                color = if (view == current) accent else JarTextTertiary,
+                modifier = Modifier.clickable(onClick = { onSelect(view) }),
+            )
+        }
     }
 }
 
