@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.audiofx.AudioEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +27,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -47,8 +51,15 @@ import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
+import dev.herakles.nightjar.R
+import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import androidx.compose.material3.HorizontalDivider
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
@@ -71,6 +82,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -194,12 +207,26 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
  * `CovertCarrier` construction (architecture.md § Firefly Jar § 6).
  */
 @Composable
-fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
+fun jarWatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onExit: () -> Unit) {
     val context = LocalContext.current
     val detector = remember { AcousticDetector() }
     val controller = remember(detector) { DetectorController(detector, context.applicationContext) }
-    DisposableEffect(controller) {
-        onDispose { controller.dispose() }
+
+    // W2-3 riddle trail (design/riddle-trail.md § Step 4, gate-36): the meadow holds no
+    // fireflies, so its own step has no decode to catch -- it completes on a real flagged
+    // detection while watching (Branch A) during this trail-watch session, or on an honest,
+    // bounded timeout (Branch B). [practicePlayer] plays the singing jar's own practice WAV back
+    // through the speaker ~1.5s after "watch" starts, stopped whenever the watch session ends --
+    // the same shared `AudioTrack` transport (`FireflyPlayer.kt`) every other clip in this app
+    // already plays through, rather than a second, `MediaPlayer`-based one.
+    val audioManager = context.getSystemService(AudioManager::class.java)
+    val practicePlayer = remember { FireflyPlayer(audioManager) }
+
+    DisposableEffect(controller, practicePlayer) {
+        onDispose {
+            controller.dispose()
+            practicePlayer.release()
+        }
     }
     // mic-4: stop the passive listen loop when the app is backgrounded, rather than leaving the
     // mic capturing behind a closed/minimized app. No time bound is needed on the loop itself
@@ -218,6 +245,57 @@ fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
             controller.startListening()
         } else {
             micPermissionDenied = true
+        }
+    }
+
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.MEADOW
+
+    var showHonestFallback by remember { mutableStateOf(false) }
+    var trailAdvancePending by remember { mutableStateOf(false) }
+
+    // Branch A: a real flagged rising edge during an active trail-watch session advances the
+    // step immediately (gate-38's "stops on tap" -- here, stops on the detection itself).
+    // [trailAdvancePending] is a same-session latch, not a persisted flag: it only ever needs to
+    // stop a *second* advance() call within the same watch session (the window between this
+    // effect relaunching on the next ~85ms analysis frame and trailState/trailActive catching up
+    // to the first call's own advance()), and is reset at the top of every fresh watch session
+    // below.
+    LaunchedEffect(trailActive, controller.isListening, controller.lastResult) {
+        if (trailActive && controller.isListening && !trailAdvancePending && controller.lastResult?.flagged == true) {
+            trailAdvancePending = true
+            practicePlayer.stop()
+            trailStore.advance(TrailStep.MEADOW)
+        }
+    }
+
+    // The auto-play + Branch B honest-fallback timer. Cancelled outright (via the LaunchedEffect
+    // key change) the instant watching stops or the trail step is no longer active -- including
+    // by Branch A's own advance() above, which flips trailState.currentStep away from MEADOW.
+    LaunchedEffect(controller.isListening, trailActive) {
+        if (!trailActive || !controller.isListening) {
+            showHonestFallback = false
+            practicePlayer.stop()
+            return@LaunchedEffect
+        }
+        trailAdvancePending = false
+        showHonestFallback = false
+        val startedAtMillis = System.currentTimeMillis()
+        delay(MEADOW_PRACTICE_PLAYBACK_DELAY_MS)
+        val practicePcm = withContext(Dispatchers.IO) {
+            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.SINGING)
+            if (practiceFile.exists()) WavFile.decodePcm16(practiceFile.readBytes()) else null
+        }
+        if (practicePcm != null) {
+            practicePlayer.play(practicePcm.samples, practicePcm.numChannels)
+        }
+        while (isActive && !trailAdvancePending) {
+            val elapsedMillis = System.currentTimeMillis() - startedAtMillis
+            if (meadowHonestFallbackDue(elapsedMillis)) {
+                showHonestFallback = true
+                break
+            }
+            delay(MEADOW_FALLBACK_POLL_INTERVAL_MS)
         }
     }
 
@@ -241,8 +319,34 @@ fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
                 }
             }
         },
+        watchHighlighted = trailActive,
+        honestFallbackVisible = showHonestFallback,
     )
 }
+
+/** Delay between "watch" starting and the singing jar's practice WAV playing back through the
+ *  speaker (design/riddle-trail.md § Step 4: "on the order of 1-2s after watch starts"). */
+internal const val MEADOW_PRACTICE_PLAYBACK_DELAY_MS = 1_500L
+
+/** Branch B's bounded watch window (design/riddle-trail.md § Step 4 Branch B: "candidate: 20s,
+ *  matching the acoustic modem's own MAX_LISTEN_SECONDS precedent" --
+ *  `AcousticModemScreen.kt`'s `MAX_LISTEN_SECONDS = 20.0`). */
+internal const val MEADOW_HONEST_FALLBACK_TIMEOUT_MS = 20_000L
+
+/** How often the watch-session coroutine re-checks [meadowHonestFallbackDue] while waiting.
+ *  Coarse enough not to matter for battery/CPU, fine enough that the fallback copy appears
+ *  promptly once the window closes. */
+private const val MEADOW_FALLBACK_POLL_INTERVAL_MS = 500L
+
+/**
+ * True once Branch B's honest-fallback copy should show: [elapsedMillisSinceWatchStarted] (since
+ * this trail-watch session's own "watch" tap) has reached [MEADOW_HONEST_FALLBACK_TIMEOUT_MS]
+ * with no flagged detection. A plain, `internal` pure function -- factored out of the coroutine
+ * loop above purely so `MeadowTrailTest` can exercise the threshold arithmetic directly, the same
+ * reasoning `AudioStegoScreen.kt`'s `isFireflyCatchEvent` is pulled out of its own composable.
+ */
+internal fun meadowHonestFallbackDue(elapsedMillisSinceWatchStarted: Long): Boolean =
+    elapsedMillisSinceWatchStarted >= MEADOW_HONEST_FALLBACK_TIMEOUT_MS
 
 /**
  * Pure/previewable content for [jarWatchFlow] — no [FireflyDao], no [AcousticDetector],
@@ -263,6 +367,13 @@ private fun JarWatchContent(
     micPermissionDenied: Boolean,
     micError: String?,
     onToggleWatch: () -> Unit,
+    // W2-3 (gate-36/gate-38): true while the meadow's trail step is the active one -- glows the
+    // watch/stop row. Default keeps every existing @Preview call site compiling unchanged.
+    watchHighlighted: Boolean = false,
+    // W2-3 (gate-36 Branch B): shown once a trail-watch session has run
+    // MEADOW_HONEST_FALLBACK_TIMEOUT_MS with nothing flagged -- design/riddle-trail.md's honest
+    // copy plus a pointer to skip or try the singing jar for real.
+    honestFallbackVisible: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -275,6 +386,7 @@ private fun JarWatchContent(
                     .background(JarWatchingDim.copy(alpha = 0.1f))
                     .border(width = 1.dp, color = JarWatchingDim.copy(alpha = 0.2f), shape = RoundedCornerShape(12.dp))
                     .clickable(onClick = onToggleWatch)
+                    .trailHighlight(active = watchHighlighted, description = if (isListening) "stop" else "watch")
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
@@ -294,6 +406,13 @@ private fun JarWatchContent(
             // mic-1: visible instead of crashing when every AudioSource tier fails to initialize.
             if (micError != null) {
                 Text(text = micError, style = JarType.Body, color = JarTextSecondary)
+            }
+            if (honestFallbackVisible) {
+                Text(
+                    text = stringResource(R.string.trail_meadow_honest_fallback),
+                    style = JarType.Body,
+                    color = JarTextSecondary,
+                )
             }
         }
 

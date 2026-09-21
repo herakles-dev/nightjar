@@ -9,22 +9,18 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -34,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import dev.herakles.nightjar.incoming.IncomingOutcome
 import dev.herakles.nightjar.incoming.IncomingPipeline
-import dev.herakles.nightjar.incoming.SqueezedContainer
+import dev.herakles.nightjar.incoming.IncomingScreen
 import dev.herakles.nightjar.incoming.probeOutcomeName
 import dev.herakles.nightjar.modules.ModuleStubScreen
 import dev.herakles.nightjar.modules.acoustic.AcousticModemScreen
@@ -50,6 +46,8 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
 import dev.herakles.nightjar.share.FireflyShare
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
 import kotlinx.coroutines.Dispatchers
@@ -146,8 +144,10 @@ private sealed interface Screen {
 
     /**
      * Landed after routing a share/open-with/"catch from a photo or file" `Intent` through
-     * [IncomingPipeline] (v6 receive plumbing, gate-31/32). [IncomingPlaceholderScreen] renders
-     * [outcome] as plain text for now -- task W2-1 replaces this with the real jar-voice copy.
+     * [IncomingPipeline] (v6 receive plumbing, gate-31/32). Rendered by
+     * [dev.herakles.nightjar.incoming.IncomingScreen] (task W2-1) with the real jar-voice copy
+     * from design/screen-flow.md's "five outcomes" table -- replaces task W1-2's MINIMAL
+     * plain-text placeholder.
      */
     data class Incoming(val outcome: IncomingOutcome) : Screen
 }
@@ -258,6 +258,26 @@ fun NightjarApp(incomingIntent: Intent? = null) {
     // three catch flows) now threads FireflyRepository throughout -- see FireflyRepository.kt's
     // file KDoc for the write-then-insert path.
     val fireflyRepository = remember { FireflyRepository(fireflyDao, FireflyMediaStore(context)) }
+    // W2-3 riddle trail (gate-36): one store for the whole app, constructed alongside the
+    // repository it releases practice fireflies through -- see TrailStateStore.kt's own KDoc.
+    val trailStore = remember { TrailStateStore(context, fireflyRepository) }
+    val trailState by trailStore.state.collectAsState()
+    val trailCoroutineScope = rememberCoroutineScope()
+
+    // Probe contract (v6 addition, spec.md's Runtime Verification Surface): "the trail state
+    // (current step, steps done, skipped)". TrailStep.ORDER.filter{}.map{} (not
+    // trailState.completedSteps.map{} directly) so the reported list has a stable, deterministic
+    // order regardless of Set iteration order -- gate-39's "nothing persists an enum ordinal"
+    // rule doesn't forbid reporting steps in trail order, only persisting a raw ordinal.
+    LaunchedEffect(trailState) {
+        DebugProbe.reportTrail(
+            currentStep = trailState.currentStep?.id,
+            completedSteps = TrailStep.ORDER
+                .filter { it in trailState.completedSteps }
+                .map { it.id },
+            skipped = trailState.skipped,
+        )
+    }
 
     // Task #5 (gate-20, INV-6): reclaim orphaned media files once per process, at start-up,
     // before the jar UI is reachable. Guarded by OrphanSweepGuard so activity recreation
@@ -334,13 +354,19 @@ fun NightjarApp(incomingIntent: Intent? = null) {
         when (val current = screen) {
             is Screen.JarShelf -> JarShelfScreen(
                 repository = fireflyRepository,
+                trailStore = trailStore,
                 onSelectModule = { module -> screen = Screen.JarDetail(module) },
                 onRevealTechnicalMode = { screen = Screen.Picker },
             )
             is Screen.JarDetail -> JarDetailScreen(
                 module = current.module,
                 repository = fireflyRepository,
+                trailStore = trailStore,
                 onBack = { screen = Screen.JarShelf },
+                // v6 (task W2-1, gate-31): "catch from a photo or file" routes through
+                // IncomingPipeline from inside the jar's own catch flow, then lands here on the
+                // same Screen.Incoming outcome screen a share-sheet/open-with Intent would.
+                onIncomingOutcome = { outcome -> screen = Screen.Incoming(outcome) },
             )
             is Screen.Picker -> ModulePicker(
                 onSelect = { module ->
@@ -354,6 +380,10 @@ fun NightjarApp(incomingIntent: Intent? = null) {
                 // U-01 (gate-12): the picker's own visible "back to the jar" link -- same
                 // destination the BackHandler above already sends Screen.Picker to.
                 onBack = { screen = Screen.JarShelf },
+                // W2-3 (design/riddle-trail.md § Start the trail again): re-seeds one fresh
+                // practice firefly per creating jar and resets progress to step 1 -- lives here,
+                // not on the shelf, per the design doc's own placement reasoning.
+                onRestartTrail = { trailCoroutineScope.launch { trailStore.restart() } },
             )
             is Screen.AcousticModem -> AcousticModemScreen(
                 // Task #30: protocol/symbol-rate selector on the screen rebuilds the carrier
@@ -382,9 +412,10 @@ fun NightjarApp(incomingIntent: Intent? = null) {
                 module = current.module,
                 onBack = { screen = Screen.Picker },
             )
-            is Screen.Incoming -> IncomingPlaceholderScreen(
+            is Screen.Incoming -> IncomingScreen(
                 outcome = current.outcome,
                 onBack = { screen = Screen.JarShelf },
+                onOpenJar = { module -> screen = Screen.JarDetail(module) },
             )
         }
     }
@@ -411,37 +442,3 @@ private fun incomingStreamUri(intent: Intent): Uri? = when (intent.action) {
     else -> null
 }
 
-/**
- * MINIMAL placeholder for the v6 receive outcome screen (spec.md v6 receive-plumbing task W1-2:
- * "Render it with a MINIMAL placeholder composable (plain text of the outcome plus 'back to the
- * jar')"). Task W2-1 replaces this with the real jar-voice copy from
- * design/screen-flow.md's "five outcomes" table -- deliberately no styling work happens here.
- */
-@Composable
-private fun IncomingPlaceholderScreen(outcome: IncomingOutcome, onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(text = incomingPlaceholderText(outcome))
-        TextButton(onClick = onBack) {
-            Text(text = "back to the jar")
-        }
-    }
-}
-
-/** Plain-text rendering of [outcome] for [IncomingPlaceholderScreen] -- not jar-voice copy
- *  (task W2-1's job), just enough to verify each of INV-12's five outcomes on screen/logcat. */
-private fun incomingPlaceholderText(outcome: IncomingOutcome): String = when (outcome) {
-    is IncomingOutcome.Caught ->
-        "caught: ${outcome.technique} in ${outcome.module.jarName} -- ${outcome.payload.size} bytes"
-    is IncomingOutcome.Squeezed -> when (outcome.container) {
-        SqueezedContainer.LOSSY_IMAGE -> "squeezed: lossy image container, nothing decoded"
-        SqueezedContainer.COMPRESSED_AUDIO -> "squeezed: compressed audio container, nothing decoded"
-    }
-    is IncomingOutcome.Damaged -> "damaged" + (outcome.detail?.let { ": $it" } ?: "")
-    is IncomingOutcome.NoFirefly -> "no firefly"
-    is IncomingOutcome.Unsupported -> "unsupported" + (outcome.reason?.let { ": $it" } ?: "")
-}

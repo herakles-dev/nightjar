@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -58,9 +60,15 @@ import dev.herakles.nightjar.ImageSteganalysis
 import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.R
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.ui.ExpandGlyph
 import dev.herakles.nightjar.ui.FullscreenImageViewer
 import dev.herakles.nightjar.ui.theme.AccentSignal
@@ -395,10 +403,24 @@ fun ImageStegoScreen(
  * `JarDetailScreen` already owns the one "back to the shelf" row that leaves this screen. Left
  * as a deliberate, documented decision rather than inventing a second, redundant back
  * affordance — worth a second look if that reading turns out wrong.
+ *
+ * v6 addition (task W2-1, gate-31): a fourth row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the Android Photo Picker
+ * (`ActivityResultContracts.PickVisualMedia`, image MIME types only -- no permission added,
+ * INV-10) and routes the picked `Uri` through [IncomingPipeline.route] -- the exact same
+ * routing `MainActivity.kt` uses for a share-sheet/open-with `Intent`, never duplicated here.
+ * [onIncomingOutcome] hands the resulting [IncomingOutcome] back up to `MainActivity.kt` (via
+ * `JarDetailScreen`/`catchFlowFor`) to navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val controller = remember {
         ImageStegoController(
             carrierFactory = { cover -> ImageStegoCarrier(cover) },
@@ -407,10 +429,38 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
 
+    // v6 (task W2-1, gate-31): "catch from a photo or file" -- Photo Picker, image MIME types
+    // only, matching the art jar's own carrier (this module never handles audio). A null Uri
+    // means the operator backed out of the picker -- no-op, same as every other picker launcher
+    // in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
+    }
+
     var coverChoice by remember { mutableStateOf(SampleCover.GRADIENT) }
     var payloadText by remember { mutableStateOf("") }
     var catchExpanded by remember { mutableStateOf(false) }
     var pendingCatchPreview by remember { mutableStateOf("") }
+
+    // W2-3 riddle trail (design/riddle-trail.md § Step 1, gate-36): while this jar's step is the
+    // active one, "look for fireflies" decodes the practice carrier PracticeFireflies wrote
+    // instead of the normal working/cover bitmap. [pendingLookBitmap] carries that practice
+    // bitmap from dispatch time through to the ExtractedSuccess handler below -- ImageStegoController
+    // .extract() doesn't update [ImageStegoController.workingBitmap] itself (only [embed] does),
+    // so this is the only way the persisted carrier and the "was this a practice catch" signal
+    // both reach the insert path correctly. Reset on every dispatch (practice or not), never left
+    // stale from a previous tap.
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.ART
+    var pendingLookBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     // Task #19 fix, layer 2: live testing showed encode()/decode() for this codec's tiny
     // sample images complete fast enough (sub-frame) that `status` can cycle all the way back
@@ -467,14 +517,13 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     // happen in practice -- coverBitmap is always a decoded bundled resource here -- but keeps
     // this path crash-free and zero-byte-file-free either way). Called from inside the two
     // transition-guarded `when` arms below, never outside them.
-    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
-        val bitmap = controller.workingBitmap ?: coverBitmap
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord, bitmapOverride: Bitmap? = null): Long {
+        val bitmap = bitmapOverride ?: controller.workingBitmap ?: coverBitmap
         if (bitmap == null) {
-            repository.insert(record)
-            return
+            return repository.insert(record)
         }
         val pngBytes = withContext(Dispatchers.Default) { encodePngBytes(bitmap) }
-        repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
+        return repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
     }
 
     LaunchedEffect(status) {
@@ -489,16 +538,29 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
                     payloadPreview = pendingCatchPreview.take(40),
                 ),
             )
-            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
-                FireflyRecord(
-                    moduleId = Module.IMAGE_STEGANOGRAPHY.name,
-                    direction = "RECEIVED",
-                    timestampMillis = System.currentTimeMillis(),
-                    payloadSizeBytes = status.text.encodeToByteArray().size,
-                    technique = null,
-                    payloadPreview = status.text.take(40),
-                ),
-            )
+            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> {
+                val practiceBitmap = pendingLookBitmap
+                val id = insertFireflyWithCarrier(
+                    FireflyRecord(
+                        moduleId = Module.IMAGE_STEGANOGRAPHY.name,
+                        direction = "RECEIVED",
+                        timestampMillis = System.currentTimeMillis(),
+                        payloadSizeBytes = status.text.encodeToByteArray().size,
+                        technique = null,
+                        payloadPreview = status.text.take(40),
+                    ),
+                    bitmapOverride = practiceBitmap,
+                )
+                // W2-3 (gate-36): a practice catch marks itself and advances the trail the
+                // instant its own decode succeeds -- see this file's jarCatchFlow KDoc and
+                // pendingLookBitmap's own comment above for why practiceBitmap != null is exactly
+                // "this ExtractedSuccess came from the trail's own practice dispatch."
+                if (practiceBitmap != null) {
+                    trailStore.markPractice(id)
+                    trailStore.advance(TrailStep.ART)
+                }
+                pendingLookBitmap = null
+            }
             else -> Unit // Idle/Embedding/Extracting/Analyzing/ExtractedFailure/Analyzed/repeat: no catch/spot event
         }
         previousStatus = status
@@ -520,9 +582,37 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
             }
         },
         onLookForFireflies = {
-            debounceCatchDispatch { controller.extract(controller.workingBitmap ?: coverBitmap) }
+            debounceCatchDispatch {
+                if (trailActive) {
+                    val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.ART)
+                    val practiceBitmap = if (practiceFile.exists()) {
+                        BitmapFactory.decodeFile(practiceFile.path)
+                    } else {
+                        null
+                    }
+                    if (practiceBitmap != null) {
+                        pendingLookBitmap = practiceBitmap
+                        controller.extract(practiceBitmap)
+                    } else {
+                        // Practice file not generated yet (a race with PracticeFireflies
+                        // .ensureGenerated's background job) -- degrade to the normal decode
+                        // rather than doing nothing; the trail step simply doesn't complete yet.
+                        pendingLookBitmap = null
+                        controller.extract(controller.workingBitmap ?: coverBitmap)
+                    }
+                } else {
+                    pendingLookBitmap = null
+                    controller.extract(controller.workingBitmap ?: coverBitmap)
+                }
+            }
         },
         onPeekInside = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+        lookForFirefliesHighlighted = trailActive,
+        onCatchFromFile = {
+            catchFromFileLauncher.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
     )
 }
 
@@ -550,6 +640,11 @@ private fun JarImageStegoContent(
     onCatch: () -> Unit,
     onLookForFireflies: () -> Unit,
     onPeekInside: () -> Unit,
+    // W2-3 (gate-36/gate-38): true while this jar's trail step is the active one -- glows the
+    // "look for fireflies" row. Default keeps every existing @Preview call site compiling
+    // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
+    lookForFirefliesHighlighted: Boolean = false,
+    onCatchFromFile: () -> Unit,
 ) {
     val idleEquivalent = status is StegoStatus.Idle ||
         status is StegoStatus.Embedded ||
@@ -635,6 +730,7 @@ private fun JarImageStegoContent(
                 fill = JarActionLookFill,
                 border = JarActionLookBorder,
                 onClick = onLookForFireflies,
+                highlighted = lookForFirefliesHighlighted,
             )
             JarActionRow(
                 label = "peek inside",
@@ -642,6 +738,17 @@ private fun JarImageStegoContent(
                 fill = JarActionCheckFill,
                 border = JarActionCheckBorder,
                 onClick = onPeekInside,
+            )
+            // v6 (task W2-1, gate-31): "catch from a photo or file" -- last in the action group,
+            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint (identity.md: "cyan
+            // = received"), same as "look for fireflies" -- this row can land a firefly in ANY
+            // jar, not necessarily this one, so it shares that verb's tint rather than "catch"'s.
+            JarActionRow(
+                label = stringResource(R.string.receive_catch_from_file_row),
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onCatchFromFile,
             )
         }
 
@@ -660,6 +767,9 @@ private fun JarActionRow(
     border: Color,
     onClick: () -> Unit,
     radius: Dp = 8.dp,
+    // W2-3: glows this row as the trail's current target (trail/TrailHighlight.kt) -- a no-op
+    // Modifier when false, so every existing call site keeps its default styling untouched.
+    highlighted: Boolean = false,
 ) {
     Box(
         modifier = Modifier
@@ -668,6 +778,7 @@ private fun JarActionRow(
             .background(fill)
             .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .trailHighlight(active = highlighted, description = label)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
