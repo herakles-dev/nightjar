@@ -249,8 +249,11 @@ anywhere in the covert-data research base.
   MIME type, detected technique, outcome from INV-12's five), the last send
   (technique, cache file bytes, authority used), cache-dir file count, and the
   trail state (current step, steps done, skipped). Receiving is driven from the
-  bridge by `adb shell am start` with `ACTION_SEND`/`ACTION_VIEW` against pushed,
-  media-scanned fixtures. INV-5's "no shared-storage write" is asserted by
+  bridge by `adb shell am start -a ACTION_VIEW -d <content-uri> --grant-read-uri-permission`
+  against pushed, media-scanned fixtures. The shell cannot grant read access for
+  `ACTION_SEND` + `EXTRA_STREAM` (it attaches no `ClipData`, so MediaProvider refuses
+  the read: measured 2026-09-22), so `ACTION_SEND` is covered by real shares from
+  other apps, whose share sheets attach `ClipData` automatically. INV-5's "no shared-storage write" is asserted by
   MediaStore row counts (`adb shell content query`) before and after a send
 - Waiver: N/A — probe required and defined above
 
