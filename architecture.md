@@ -409,7 +409,9 @@ class AudioStegoCarrier(
 - New `ModuleId.AUDIO_STEGO_CODEC` entry in `CovertModule.kt` — one ID for the whole module
   (technique + cover selection are in-screen state, not separate module identities), same
   pattern `IMAGE_LSB_CODEC` already uses for its two bundled covers.
-- **No `CovertDetector<PcmAudio>` binding ships with this addition.** A real audio-steganalysis
+- **No audio-steganalysis detector ships with this addition.** *(Superseded by v5: the
+  detector binds as `CovertDetector<WavFile.ParsedWav>`, not `CovertDetector<PcmAudio>` —
+  see § 7.1 below.)* A real audio-steganalysis
   detector (phase-correlation for the Gen 1 technique, cepstral/spectral-anomaly for Gen 2 —
   see `covert-data/library/06_detection_and_countermeasures.md`) is deferred until this
   addition's codecs exist to validate against, per covert-data's own Module 5 sequencing note.
@@ -441,6 +443,106 @@ review of this task:
 Gate-8 (fidelity — cover vs. stego indistinguishable by ear) and gate-9 (safety-scope +
 anti-AI-tell close-out) remain open; both need a human listening pass, not something an agent can
 self-certify.
+
+### 7.1 v5 addition — `AudioStegDetector : CovertDetector<WavFile.ParsedWav>`
+
+**Status: specified, not built** (spec.md gates 22–23). The binding deviates from the
+`CovertDetector<PcmAudio>` shape the other audio detector uses, for one reason: `PcmAudio` is
+mono by contract (§1), but phase-inversion output is interleaved stereo, and for that technique
+the channel layout *is* the signal. A detector over a bare `ShortArray` would have to guess it.
+`WavFile.ParsedWav(sampleRateHz, numChannels, samples)` already carries exactly the needed
+triple, so no new type is introduced:
+
+```kotlin
+// app/src/main/java/dev/herakles/nightjar/AudioStegDetector.kt — pure JVM, no Android imports
+class AudioStegDetector : CovertDetector<WavFile.ParsedWav> {
+    override val descriptor = ModuleDescriptor(
+        id = ModuleId.AUDIO_STEGANALYSIS,          // new enum entry, the only CovertModule.kt change
+        displayName = "Audio Steganalysis (polarity / lattice / tone-band)",
+        domain = CarrierDomain.AUDIO,
+        role = ModuleRole.DETECTOR,
+    )
+    override val flagThreshold: Float = 0.85f
+    override fun analyze(sample: WavFile.ParsedWav): DetectionResult
+}
+```
+
+- **Posture: blind (stego-only) and targeted.** `analyze` sees only the clip under test. It knows
+  the three codecs' public parameters (Kerckhoffs) but never the cover, a key, or the payload,
+  and it never constructs a `CovertCarrier`, calls `decode`, or reads the frame header (INV-7).
+  A cover-referenced detector was rejected: the app synthesizes both covers, so it would just
+  re-synthesize and subtract — a known-cover attack only the embedder can mount.
+- **Three statistics on the codec's own grid** (1024-sample frames from sample 0, rectangular
+  window, the shared `fft()`): phase-inversion = inter-channel anti-correlation × a surviving
+  L+R residual (runs only when `numChannels == 2`); spectrogram-LSB = QIM lattice snapping of
+  `ln|X|` in bins 32–39; MFSK = keyed tones in bins 420–427 over the guard-band median.
+  `confidence = max(applicable scores)`; `flagged = confidence >= flagThreshold`.
+- `estimatedPayloadBytes` comes from the winning technique when flagged; it is always `null`
+  for MFSK (inferring length there is one step from demodulating).
+- Anti-phase stereo with anything added to one side is structurally the phase-inversion
+  technique and scores as such. That is a documented false-positive class, and the UI copy says
+  a polarity-flipped recording looks the same.
+- The detector keeps private copies of the codec constants (Δ, magnitude floor, bin ranges)
+  while `AudioStegoCarrier.kt`'s own are `private`. The § 5 drift hazard is closed by a
+  calibration test that encodes through the real codec and fails with a named drift assertion.
+- It reads ρ and the residual windows from `StereoPolarity` (§ 7.3), so the number the detector
+  scores and the number the polarity view shows cannot disagree.
+- Wiring: `AudioStegoScreen(carrierFactory, detector: CovertDetector<WavFile.ParsedWav>, onBack)`
+  with the detector injected from `MainActivity`, mirroring `ImageStegoScreen`. The technical
+  screen gains only a "check for hidden data" verb; the humming jar gains "peek inside". Both
+  report through `DebugProbe.reportDetectorConfidence(ModuleId.AUDIO_STEGANALYSIS, …)` and
+  write no `FireflyRecord` (same contract as the picture jar's peek, gate-13).
+
+### 7.2 v5 addition — cover-vs-stego difference view (spectrogram-LSB)
+
+**Status: specified, not built** (spec.md gate 24). Data flow, with no schema change (INV-8):
+
+1. `JarDetailScreen` already reads the firefly's WAV (`repository.readMedia` →
+   `WavFile.decodePcm16`). When `technique == "SPECTROGRAM_LSB"` and `numChannels == 1`, it
+   continues off-main (`Dispatchers.Default`).
+2. `matchCover(stegoMono, candidates)` re-synthesizes each bundled cover
+   (`synthesizeSampleCover`, lazily) and accepts the unique candidate whose residual energy
+   `E[(stego − c)²] / E[c²]` is below 1e-2 (−20 dB). A size mismatch is a non-match, never a
+   throw. The threshold is deliberately not "exact": seeded `kotlin.random.Random` sequences
+   and `Math.sin` ulps are not guaranteed stable across runtimes, so ±1-LSB jitter must still
+   match while a changed algorithm must not.
+3. On a match, `stegoDifference(cover, stego)` compares on the codec's own grid: a frame is
+   changed iff `max|stego − cover| > 1 LSB`; in changed frames each bin 0–127 is NUDGED (cover
+   had energy, `|Δ ln|X||` ≤ 1.5Δ), CREATED (cover was below the codec's magnitude floor and the
+   codec had to add sound), or UNCHANGED.
+4. Only the reduced `StegoDifferenceMap` is kept in state; the synthesized cover is dropped when
+   the coroutine returns.
+5. No match → the view is withheld with a stated reason, never approximated. Energy-ratio
+   matching is not valid for MFSK (its tones outweigh the cover), so the view is offered for
+   spectrogram-LSB only.
+
+Rejected: a `Migration(2,3)` storing a cover id (it still needs the same re-derive-and-verify
+step, so it adds brick risk for nothing), and storing cover WAVs (needs the migration plus
+`allMediaPaths()` / reference-count changes, or the orphan sweep deletes live covers — INV-6).
+
+### 7.3 v5 addition — L/R polarity view (phase-inversion)
+
+**Status: specified, not built** (spec.md gate 25). No data-path change is needed: the
+persisted phase-inversion WAV is already stereo end to end.
+`AudioStegoCarrier.encodePhaseInversion` returns interleaved stereo →
+`AudioStegoController.embed` sets `workingChannelCount = 2` → `jarCatchFlow`'s
+`insertFireflyWithCarrier` writes `WavFile.encodePcm16Stereo` → `FireflyMediaStore` stores bytes
+as-is → `WavFile.decodePcm16` returns `numChannels = 2` → `FireflyPlayer` plays
+`CHANNEL_OUT_STEREO`. The gap is only visual: `spectrogram()` mono-mixes and `waveformPeaks()`
+takes max-abs across channels, so no current view shows L and R apart.
+
+`stereoPolarity(interleaved)` (pure JVM, `StereoPolarity.kt`) computes Pearson r(L, R), the
+sum-to-difference energy ratio, per-10 ms-window rms and signed mean of L+R, and a normalized
+20 ms zoom window of the loudest region. The view draws the L/R overlay (mirror-image cycles),
+the L+R residual strip (the payload's ±steps, flat zero after it), and the correlation to 4
+decimals. It is offered only when `technique == "PHASE_INVERSION"` and `numChannels == 2`.
+
+**Placement (both views):** pure math in the root package beside `Spectrogram`/`LsbBitPlane`;
+composables and caption builders in `modules/fireflyjar/CarrierInsightViews.kt`.
+`JarDetailScreen`'s audio view toggle is keyed on `FireflyRecord.technique` and the WAV's
+channel count — data fields, not `Module` — so the views add no per-`Module` branch
+(Firefly Jar § 6). They live in the firefly detail only; technical Screen 5 keeps its
+no-waveform restraint.
 
 ---
 
@@ -500,6 +602,10 @@ Room type converters for enums — one fewer moving part for a 4-column table th
 itself an extensibility decision** — see § 6: a new module's `Module` entry is the *only*
 place its identity is declared, and this table inherits it for free.
 
+**v4 (schema version 2):** the entity above is the v1 shape. v4 added three carrier columns
+(`carrierKind`, `mediaPath`, `mediaBytes`) and five DAO queries through `MIGRATION_1_2`; see
+§ 3.1 for the persistence design.
+
 ### 2. Dependency choices — favoring managed libraries over hand-rolling
 
 Every prior module in this app deliberately hand-rolled its own infrastructure (own FFT
@@ -530,16 +636,52 @@ generic, not less, even with the anti-AI-tell doctrine relaxed for this surface.
 ### 3. Where records get written — one shared log, two skins
 
 Logging does **not** live inside any `CovertCarrier` implementation (keeps the interface
-family untouched, same restraint §7 exercises). One `fireflyDao.insert(...)` call sits in
-each screen's controller, right after a successful encode/decode:
-`AudioStegoController`, the acoustic modem's controller, and the image steganography
-controller each gain one line in their success paths (embed → `CREATED`, extract/decode
-→ `RECEIVED`; the acoustic modem's transmit → `CREATED`, listen-and-decode → `RECEIVED`).
+family untouched, same restraint §7 exercises).
 
-**The log is shared, not per-surface.** Both the new jar-mode screens *and* the existing
-four technical screens write to the same `FireflyDatabase` — a message embedded from the
-plain technical picker still shows up as a firefly the next time jar mode is opened. One
-history, two skins on top of it, not two parallel bookkeeping systems.
+*Reconciled with the code (gate-21):* the original v3 plan put one insert in every screen's
+controller, technical screens included. That is not what shipped. Records are written only
+by each creating module's jar flow — `jarCatchFlow` in `AcousticModemScreen.kt`,
+`ImageStegoScreen.kt` and `AudioStegoScreen.kt` — through `FireflyRepository`, from a
+status-keyed `LaunchedEffect` on the controller's terminal success state (embed/transmit →
+`CREATED`, extract/decode → `RECEIVED`). The technical screens take no repository and write
+no `FireflyRecord`; a message embedded from the technical picker does not appear as a
+firefly. There is still one `FireflyDatabase`, so jar mode has a single history, but only
+jar mode adds to it.
+
+### 3.1 Carrier media persistence (v4)
+
+- **Schema v2.** `FireflyRecord` gained `carrierKind: String?` (`"IMAGE"` | `"AUDIO"`, set by
+  the catch site, never inferred), `mediaPath: String?` and `mediaBytes: Long` (default 0).
+  `MIGRATION_1_2` adds the three columns with `ALTER TABLE`; no destructive fallback is
+  registered. Schema export is on (`app/schemas/.../FireflyDatabase/1.json`, `2.json`).
+  Pre-migration rows keep null carrier fields and render text-only.
+- **What is stored.** Image jar: the stego PNG. Audio-stego jar: the working clip as a WAV
+  (mono, or stereo for phase-inversion via `encodePcm16Stereo`). Acoustic modem jar: the
+  transmitted PCM (`CREATED`) or the decoded capture (`RECEIVED`) as a mono WAV. Encoding runs on `Dispatchers.Default`. When there is
+  no artifact to attach, the catch site falls back to a media-less `repository.insert`.
+  The detector writes nothing (INV-4).
+- **Where.** `FireflyMediaStore` writes to `filesDir/fireflies/`, never `MediaStore` or shared
+  storage (INV-5). Files are **content-addressed** (SHA-256 of the bytes + extension), so an
+  embed and its extract of the same clip share one file. The row stores the bare filename,
+  re-resolved against `filesDir` on every access, because `filesDir` can move between installs.
+- **Row/file coupling (INV-6)** lives in `FireflyRepository`, the only path that touches both
+  stores:
+  - `insertWithMedia` writes the file, then inserts the row, so a row can only name a file
+    that finished writing. If the insert throws, the file is deleted unless another row
+    references it.
+  - `clearAll` and `deleteFirefly` delete files before rows. A crash then leaves rows
+    pointing at missing files, which the UI tolerates, rather than files no row can name.
+  - Because files are shared, every single-file delete is reference-counted
+    (`countReferencesTo`). An unconditional delete would destroy another firefly's carrier.
+  - `sweepOrphans` runs once per process at start-up (`MainActivity`, guarded against
+    activity recreation). It deletes unreferenced files older than 5 minutes; the age floor
+    keeps it from deleting an in-flight catch's file.
+- **Read path.** `JarDetailScreen` receives `repository.readMedia` as a loader and decodes off
+  the main thread (`BitmapFactory` / `WavFile.decodePcm16`). A missing file degrades to the
+  text-only layout.
+- **Retention surface — open.** The repository exposes `observeTotalMediaBytes()` and
+  `deleteFirefly(id)`, but as of this revision no UI calls either. The shelf wires only
+  clear-all. The usage readout, advisory warning and per-firefly delete remain gate-20 work.
 
 **The detector is the deliberate exception.** Module 5 stays a `CovertDetector` — it
 never creates or receives a payload (INV-4) — so it never writes a `FireflyRecord`. The
@@ -641,11 +783,40 @@ one function in one file, so a missed case is a build error, not a silent gap:**
   shape (zero selectors for the modem, one for image, two for audio today; a future
   module can have any shape without `JarDetailScreen` changing).
 
-**Concrete recipe for adding a new module's jar, once its `CovertCarrier` exists:** (1)
-add one `Module` entry with its `jarName`/`jarRole`; (2) add one `when` branch in
-`FireflyGlyphs.kt`; (3) add one `when` branch in `JarCatchFlows.kt` wiring its real
-carrier. `JarShelfScreen`, `JarDetailScreen`, the `FireflyLog` schema, the mode-switch
-mechanism, and the `DecodeFailure` → copy mapping (screen-flow.md § Screen 7, already
-module-agnostic) all need zero changes.
+**Reconciled with the code (gate-21, re-checked for v5): the "exactly two" rule above does
+not hold as written.** `grep -rn "when (module)" app/src/main/java` finds **five** exhaustive
+per-`Module` `when`s. All five are compiler-enforced, so a new `Module` entry is still a build
+error at every one of them, never a silent gap. But there are five sites to touch, not two,
+and one of them sits in `JarShelfScreen`, which the design above said would never need touching.
+
+| Site | Layer | Status |
+|------|-------|--------|
+| `JarCatchFlows.kt` `catchFlowFor` | jar | as designed |
+| `FireflyGlyphs.kt` `defaultFireflies` | jar | as designed, relocated. `drawJarGlyph` itself is not a `when`; it special-cases `DETECTOR` with an `if` and delegates the per-module part to `defaultFireflies` |
+| `JarShelfScreen.kt` `tileTint` | jar | **added past the budget** (per-jar tile colors) |
+| `MainActivity.kt` picker routing (`Module` → `Screen`) | technical | predates jar mode; outside the rule's original scope |
+| `picker/ModulePicker.kt` `ModuleGlyph` | technical | predates jar mode; outside the rule's original scope |
+
+There are also **non-exhaustive** `Module` checks that the compiler will not flag when a module
+is added:
+- `module == Module.DETECTOR` in `FireflyGlyphs.kt` (both `drawJarGlyph` overloads) and
+  `JarShelfScreen.kt` (`tileFireflies`, the count caption).
+- `module == Module.ACOUSTIC_MODEM` in `JarDetailScreen.kt` (hero size, one layout branch).
+
+The `DETECTOR` checks would be safer keyed on `jarRole == JarRole.WATCHING`, which
+`JarDetailScreen` already does elsewhere.
+
+What *does* hold: v4 added no per-`Module` branch (carrier kind is a record field), and the v5
+views and detector add none either (they key on `FireflyRecord.technique` and channel count).
+So the count is five before and after v5.
+
+**Concrete recipe for adding a new module's jar, once its `CovertCarrier` exists** (corrected
+to match the code):
+1. Add one `Module` entry with its `jarName`/`jarRole`.
+2. Add one branch in each of the five exhaustive `when`s above. The compiler lists them.
+3. Review the non-exhaustive `DETECTOR`/`ACOUSTIC_MODEM` checks.
+
+The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → copy mapping
+(screen-flow.md § Screen 7, already module-agnostic) need zero changes.
 
 ---

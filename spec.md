@@ -51,11 +51,32 @@ anywhere in the covert-data research base.
   record, not a per-`Module` branch — `architecture.md` § 6 still permits exactly
   two exhaustive per-module `when`s and this adds none. The detector is untouched:
   it creates no fireflies and therefore gains no media (INV-4).
+- **In scope (v5 addition, this spec revision):** Module 2's "check for hidden
+  data" counterpart, plus the two honest carrier views v4 deferred.
+  - An `AudioStegDetector` (`CovertDetector<WavFile.ParsedWav>`, stego-only):
+    blind in that it never sees the cover, a key or a decode, and targeted at the
+    app's own three techniques — channel-polarity anti-correlation with a
+    surviving L+R residual, QIM lattice snapping on the codec's own grid, and
+    keyed tones at 19.7–20.0 kHz. Reachable from the audio technical screen
+    ("check for hidden data") and the humming jar ("peek inside"). Any anti-phase
+    stereo with something added to one side reads as consistent with
+    phase-inversion, and the copy says a polarity-flipped recording looks the same.
+  - A cover-vs-stego difference view for spectrogram-LSB fireflies, drawn
+    against a cover re-derived from the bundled synthesizers — no stored cover,
+    no schema change; withheld with a stated reason when no cover re-derives.
+  - An L/R polarity view for phase-inversion fireflies (the persisted WAV is
+    already stereo end-to-end).
+
+  Both views live in the firefly detail only; the technical audio screen gains
+  the detector verb and nothing else (Screen 5 keeps its no-waveform/no-meter
+  restraint). View options key off `FireflyRecord.technique` and the WAV's channel
+  count, never `Module` — the addition introduces no per-`Module` branch
+  (`architecture.md` § Firefly Jar § 6). The spectrogram-LSB embedding format is
+  unchanged: caught fireflies depend on it.
 - **Out of scope:** Module 4 video steganography (needs a non-mobile ML
-  watermarking component) — deferred; an `AudioStegDetector` counterpart for
-  Module 2 (phase-correlation / cepstral-anomaly analysis) — deferred until
-  this addition's codecs exist to validate against, per covert-data's Module 5
-  sequencing note; any real exploit/malware payload; upload to any third-party
+  watermarking component) — deferred, and still out of scope under v5; the
+  `AudioStegDetector` counterpart for Module 2 is now in scope under the v5
+  addition above; any real exploit/malware payload; upload to any third-party
   platform; free-space RF retransmission of any kind; real disguise/anti-
   forensics hardening for the Firefly Jar addition (launcher-icon swapping,
   app-name spoofing in the OS app list, PIN/decoy-content vault behavior) —
@@ -70,8 +91,18 @@ anywhere in the covert-data research base.
   clear controls, not silently enforced (explicit user direction); export or
   share of carrier media *from jar mode* — writing to `Pictures/Nightjar` and
   `Music/Nightjar` stays the technical screens' deliberate save/share gesture;
-  a cover-vs-stego difference view and an L/R polarity view — the honest
-  follow-ups for the two techniques a spectrogram cannot show, deferred
+  the cover-vs-stego difference view and L/R polarity view v4 deferred are now
+  in scope under the v5 addition above.
+  v5 addition, out of scope: universal steganalysis of arbitrary audio (other
+  tools, keyed or dithered QIM, re-compressed, trimmed or re-levelled files) —
+  the detector is targeted and its copy says so; running the audio-stego
+  detector on the acoustic modem's clips (`AcousticDetector` owns Module 3);
+  persisting cover audio or a cover id — a `Migration(2,3)` was evaluated and
+  rejected, since re-derivation plus verification is strictly cheaper; a "check
+  this firefly" verb in the firefly detail; difference/polarity views on the
+  technical screen; changing the spectrogram-LSB embedding format (including the
+  silent-frame click train it produces — that is a gate-8 headphone-check item,
+  not a codec change)
 - **Crosses:** device speaker/mic (AudioRecord/AudioTrack); local
   filesystem/MediaStore for sample images; the existing `hek` ADB bridge for
   install + debug-state verification (not a runtime dependency); no
@@ -92,6 +123,14 @@ anywhere in the covert-data research base.
 - INV-6: No firefly media outlives its record and no record outlives its media —
   clearing (all, or one) removes rows and files together, and an orphan sweep
   reclaims any file a crash stranded between the two writes
+- INV-7: Every Module 2 technique is self-detectable from the stego clip alone —
+  `AudioStegDetector` flags the app's own output for all three codecs at every
+  strength without the cover, a key, or a decode, and a check never writes a
+  `FireflyRecord`. Module 2's counterpart to INV-4
+- INV-8: Known-cover views never guess — a difference view is drawn only against
+  a cover that re-derives to within −20 dB residual energy of the stego;
+  otherwise it is withheld with a stated reason, never approximated. The v5
+  addition leaves the Room schema at version 2
 
 ## Non-goals
 - Not a Bluetooth/WiFi file-transfer replacement — throughput is
@@ -113,6 +152,10 @@ anywhere in the covert-data research base.
   count, count carrying media, total media bytes, and orphan-file count — so
   retention, clear-all, per-firefly delete and the orphan sweep are all assertable
   as queryable state rather than judged from a screenshot
+- Probe contract (v5 addition): the technical screen's check and the humming
+  jar's peek report detector confidence under `ModuleId.AUDIO_STEGANALYSIS`, so
+  flagged/clear is assertable from `COVERT_DEBUG`, and a peek leaves the stored
+  record count unchanged
 - Waiver: N/A — probe required and defined above
 
 ## Agents
@@ -123,6 +166,7 @@ anywhere in the covert-data research base.
 | visual/UX | android-designer | already scoped to this pixel6a workspace |
 | testing | spec-tester-v11 | round-trip + detector accuracy verification on both physical devices |
 | persistence (v4) | database-engineer | the Room v1→v2 migration is the one change that can brick launch for existing installs |
+| steganalysis calibration (v5) | spec-tester-v11 | thresholds are measured against the real codec, not asserted |
 
 ## Gates
 - gate-1: scaffolded, builds, module-picker navigates 3 empty stubs
@@ -197,3 +241,43 @@ anywhere in the covert-data research base.
   both superseded), `design/firefly-jar-identity.md` (waveform/spectrogram/
   bit-plane are data visualizations, not decoration — confirm against the
   mascot/carousel/Discover ban); covert-data cross-referenced; session closed
+
+## Gates — v5 addition (audio steganalysis + honest carrier views)
+- gate-22: `AudioStegDetector` lands as a pure-JVM
+  `CovertDetector<WavFile.ParsedWav>` that never constructs a `CovertCarrier`,
+  calls `decode`, or reads nightjar's frame header (INV-7). Its calibration test
+  encodes through the real `AudioStegoCarrier`, so a drifted detector constant
+  fails loudly. At the shipped `flagThreshold`: flagged for all three techniques ×
+  both bundled covers × spectrogram-LSB strengths 1–4 × payloads {0, 1, 5, 20,
+  max}; not flagged for both clean covers and their stereo variants, digital
+  silence, a steady 19.7 kHz tone, and 40 seeded noise covers; each documented
+  evasion asserted missed, so the UI's "can't detect" copy stays true; anti-phase
+  stereo with an added residual asserted flagged, so the "a polarity-flipped
+  recording looks the same" copy stays true. Measured margins recorded in the
+  test KDoc
+- gate-23: "check for hidden data" on the audio technical screen (detector
+  injected from `MainActivity`) and "peek inside" on the humming jar are wired;
+  a check or peek writes no firefly; `COVERT_DEBUG` reports `AUDIO_STEGANALYSIS`
+  confidence. On Hek, a clean cover reads clear and each technique's stego reads
+  flagged with the right technique leading the detail — verified from the probe,
+  not a screenshot
+- gate-24: the difference view ships for spectrogram-LSB fireflies with no
+  schema change (database stays at version 2; no `3.json` exists); the cover is
+  re-derived and accepted only below −20 dB residual (INV-8). JVM tests prove
+  changed frames equal embedded frames exactly, untouched frames are exactly
+  unchanged, nudges are ≤ 1.5Δ, silent-cover cells are classified as created,
+  and a drifted or wrong cover is rejected with the view withheld and its reason
+  shown
+- gate-25: the L/R polarity view ships for phase-inversion fireflies; the
+  persisted WAV is proven stereo from catch through the media store to
+  `decodePcm16`. JVM tests prove correlation ≤ −0.999, residual steps equal the
+  embedded bit count exactly, and the zoom window shows L ≈ −R. Mono, MFSK and
+  pre-migration fireflies gain no new option
+- gate-26: honesty reconciled — the spectrogram-LSB caption no longer claims a
+  spectrogram can't show it, with the silent-cover case measured and tested on
+  both bundled covers; every v5 caption backed by a test; the spectrogram-LSB
+  silent-frame click train (~−60 dBFS, 47 Hz) added to gate-8's headphone
+  listening pass; `architecture.md` § 7 and `design/screen-flow.md` Screens 5/7
+  updated, and `design/firefly-jar-identity.md`'s data-visualization allowance
+  confirmed for the two new views; covert-data module-2 and library §06
+  cross-referenced; session closed
