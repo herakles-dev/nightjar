@@ -914,6 +914,47 @@ authoritative libjpeg-turbo path (what Android/Facebook use, via `convert -sampl
 covers ≥ 640 px (real phone-photo territory) FB-like is clean. **FEC margin** stayed large (RS
 corrected 0 bytes on the surviving cases — the R=8 soft-combine clears the bits alone).
 
+### Full-resolution gate-28 re-run (task W1-1, supersedes the 500 px Kodak caveat below)
+The 500 px Kodak-crop caveat below predicted *better* survival at full resolution. Re-measured
+offline (per `offline-kotlin-calibration.md`, driving the actual shipped `SturdyImageCarrier`
+class, not a re-implementation) against **24 real, full-resolution Kodak photos (768×512/512×768,
+`msdkhairi/kodak` on Hugging Face — a different reachable mirror; r0k.us still 401s)** — the honest
+result is **mixed, not uniformly better**:
+
+| Pipeline (long side × JPEG q, 4:2:0) | javax.imageio | libjpeg-turbo (`convert`) |
+|--------------------------------------|:---:|:---:|
+| orig × q95 / q80 / q70 / q50          | 24/24 each | — |
+| 1600 px × q85(bicubic)                | 24/24 | — |
+| 1080 px × q80(bicubic) / q70(bilinear) | 24/24 / 24/24 | — |
+| 640 px × q70(bicubic) / q60(bilinear)  | **20/24** / **20/24** | — |
+| **Facebook-like** (2048→q85→1080→q75)  | **24/24** | **24/24** |
+| **MMS-like** (640 px, q50)             | **19/24** | **19/24** |
+
+PSNR mean 39.7 dB (min 39.5) — matches the 500 px-crop measurement's 39.6/39.4 closely, confirming
+visibility is stable across cover sets. Crop-10%/rotate-90° failure envelope: 24/24 NoFirefly, 0
+Damaged, **0 wrong payloads** — that invariant holds exactly as before.
+
+**The genuinely new finding:** the previous 500 px-crop matrix's "640 px" and "MMS-like" columns
+never actually downscaled the Kodak covers at all — `resizeLong` is a no-op once an image is
+already under its target long side, and 500 < 640. That matrix's 45/45 on those rows was really
+measuring "JPEG-recompress a 500 px image at native size," not "downscale a real photo to 640 px
+then recompress" — the exact scenario a phone photo sent by MMS goes through. At true full
+resolution, the **640 px-long-side pipelines and MMS-like now show real, non-zero misses (17-21%
+across 24 covers)**, both encoders agreeing exactly (19/24 each on MMS-like) — libjpeg-turbo is not
+more forgiving here. Failures cluster in landscape (768×512) covers; none of the 6 portrait
+(512×768) covers failed on any pipeline in this run. 1080 px and above remain fully clean (24/24).
+This is a real, measured regression versus the prior table's optimistic 640/MMS numbers, not a
+port bug — the shipped Δ=10/R=8 parameters were tuned against the smaller/cropped set; gate-29's
+real-channel sends are the next, authoritative check, and a future retune (larger Δ, higher REP,
+or the dark/bright-skip refinement) is the likely next step if gate-29 confirms this gap on real
+sends. Reported here, not hidden, per this doc's own standard.
+
+JPEG file size at 1600 px long side (send-quality justification, task W1-1's `STURDY_JPEG_QUALITY`
+adapter constant) on these 24 covers (native ≤768 px, so no resize applied — these are native-size
+JPEG bytes, a lower bound on what a true 1600 px photo would weigh): q85 mean 91 KB, q88 103 KB,
+**q90 114 KB**, q92 126 KB, q95 165 KB. q92 costs ~11% more than q90 for no measured survival or
+visibility gain; q90 is the better trade.
+
 ### Visibility (round 2)
 Δ=10: **PSNR mean 39.6 dB (min 39.4), SSIM 0.964, max per-pixel luma delta 5, and max luma delta in
 flat (std<3) 12×12 blocks = 5.** Eyeballed at 1:1 and 4×: the cup, saucer, wood, skin and fabric are
@@ -966,9 +1007,12 @@ re-checked under every DC hypothesis, is what keeps a clean image reading as *no
 - **Simulation ≠ the real apps.** Two library encoders (javax.imageio, libjpeg-turbo/`convert`) with
   plausible chains. Facebook/Messenger/Telegram pipelines are undisclosed and change. Gate-29 (owner
   sends from real accounts) is the only ground truth; the matrix is a strong prior, not a guarantee.
-- **Kodak served at 500 px.** The reachable mirror center-crops to 500×500 (below the ~640 px
-  robustness floor). Re-run gate-28 against full-resolution Kodak (or the owner's own photos) on a
-  networked host; expect *better* survival at real sizes (see the ≥640 px column).
+- **Kodak served at 500 px — re-run complete (task W1-1).** Re-measured against 24 real,
+  full-resolution (768×512) Kodak photos; see "Full-resolution gate-28 re-run" above. Result was
+  *not* uniformly better as predicted — 1080 px and above stayed fully clean, but the 640 px-long-
+  side pipelines and MMS-like dropped to ~79-83% survival (from an apparent 45/45 that, on the 500
+  px crops, had secretly never triggered an actual downscale). A real, measured gap for gate-29 to
+  confirm or refute on real channels; a future retune is the likely next step if it holds.
 - **Deep-shadow residual at Δ=10.** Faint mottling in large dark flats; gate-30 decides if it needs
   the brightness dark-skip refinement (which then can't embed in dark-dominated images without the
   fallback).
@@ -981,5 +1025,10 @@ re-checked under every DC hypothesis, is what keeps a clean image reading as *no
   `dev.herakles.nightjar.ReedSolomon`/`GF256` (same GF, prim poly 0x11d) — do not add a second RS;
   map decode outcomes onto the existing `DecodeResult`/`DecodeFailure`. The fixed LCG interleave ports
   as-is.
-- **No detector this round.** A steganalysis detector for SFLY is a follow-up (spec out-of-scope); the
-  existing image chi-square check is not tuned for it, and the copy must say so.
+- **No SFLY-specific detector this round.** A steganalysis detector purpose-built for SFLY is a
+  follow-up (spec out-of-scope). Measured instead (task W1-1, gate-30): the *existing* image
+  chi-square/PoV check (tuned for raw-pixel LSB) **does** flag sturdy output — 0.997/0.915
+  confidence, both bundled covers, both a sustained whole-image run. Dither QIM's per-pixel
+  rounding of a continuous shift is value-dependent in the same statistical way LSB replacement
+  is, even though it never touches an LSB directly. The in-app copy must say sturdy *can* be
+  flagged by the existing check, not that it evades detection.

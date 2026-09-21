@@ -63,6 +63,11 @@ enum class ModuleId {
     AUDIO_STEGO_CODEC,
     /** Module 2 — blind audio steganalysis (v5 addition, `AudioStegDetector`, spec.md INV-7). */
     AUDIO_STEGANALYSIS,
+    /** Module 1 — sturdy image firefly codec (v6 addition, task W1-1, `SturdyImageCarrier`):
+     *  dither-QIM on a logical luminance grid, survives JPEG recompression/resize where the
+     *  exact-LSB codec cannot (architecture.md "Sturdy image technique (v6)"). Its own technique,
+     *  sibling to [IMAGE_LSB_CODEC], not a replacement (INV-9). */
+    STURDY_IMAGE_CODEC,
 }
 
 /**
