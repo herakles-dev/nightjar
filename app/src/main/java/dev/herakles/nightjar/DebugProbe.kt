@@ -18,6 +18,8 @@ import android.util.Log
  *    current file count ([reportOutgoingFileCount]) -- spec.md's v6 Runtime Verification
  *    Surface addition, gate-33. Sourced from
  *    [dev.herakles.nightjar.share.FireflyShare.prepareOutgoing]/`sweepOutgoing`.
+ *  - the last incoming file the receive pipeline handled (v6 addition, gate-31/32): action,
+ *    sniffed type, detected technique, and outcome ([reportIncoming])
  *
  * Deliberately small and injectable: any screen/controller can call a `report*` method
  * opportunistically as its own state changes, with no shared mutable coupling beyond this
@@ -85,6 +87,25 @@ object DebugProbe {
         val timestampMs: Long,
     )
 
+    /**
+     * Snapshot of the most recent incoming file the receive pipeline handled (v6 addition,
+     * gate-31/32's probe contract -- spec.md's Runtime Verification Surface: "the dump gains the
+     * last incoming file (action, MIME type, detected technique, outcome from INV-12's five)").
+     * Sourced from [dev.herakles.nightjar.incoming.IncomingPipeline.route], so `hek shell am
+     * start ... ACTION_SEND`/`ACTION_VIEW` bridge-intent injection is assertable as queryable
+     * state rather than judged from a screenshot. [sniffedType] is the magic-byte-sniffed
+     * container (`dev.herakles.nightjar.incoming.SniffedType.name`, or `"UNREADABLE"` if the file
+     * couldn't even be read), not the caller-declared MIME type. [technique] is non-null only for
+     * a `caught` [outcome].
+     */
+    data class IncomingState(
+        val action: String,
+        val sniffedType: String,
+        val technique: String?,
+        val outcome: String,
+        val timestampMs: Long,
+    )
+
     /** Everything the `COVERT_DEBUG` dump reports, per spec.md's Runtime Verification Surface. */
     data class ProbeState(
         val lastEncodeDecode: EncodeDecodeResult? = null,
@@ -93,6 +114,7 @@ object DebugProbe {
         val storedMedia: StoredMediaState? = null,
         val lastSend: OutgoingSendState? = null,
         val outgoingFileCount: Int? = null,
+        val incoming: IncomingState? = null,
     )
 
     @Volatile
@@ -191,6 +213,25 @@ object DebugProbe {
         emit()
     }
 
+    /**
+     * Record the receive pipeline's most recent incoming-file outcome and log the updated state
+     * dump. No-op in release builds. Callers (
+     * [dev.herakles.nightjar.incoming.IncomingPipeline.route]) pass the outcome they already
+     * computed -- this never re-derives it itself, same discipline [reportEncodeDecodeResult]
+     * and [reportStoredMedia] already follow.
+     */
+    fun reportIncoming(
+        action: String,
+        sniffedType: String,
+        technique: String?,
+        outcome: String,
+        timestampMs: Long = System.currentTimeMillis(),
+    ) {
+        if (!BuildConfig.DEBUG) return
+        state = state.copy(incoming = IncomingState(action, sniffedType, technique, outcome, timestampMs))
+        emit()
+    }
+
     private fun emit() {
         Log.d(TAG, toJson(state))
     }
@@ -220,6 +261,8 @@ internal fun toJson(state: DebugProbe.ProbeState): String {
     appendOutgoingSend(sb, state.lastSend)
     sb.append(",\"outgoing_file_count\":")
     appendNullableInt(sb, state.outgoingFileCount)
+    sb.append(",\"incoming\":")
+    appendIncoming(sb, state.incoming)
     sb.append('}')
     return sb.toString()
 }
@@ -282,6 +325,24 @@ private fun appendOutgoingSend(sb: StringBuilder, send: DebugProbe.OutgoingSendS
 
 private fun appendNullableInt(sb: StringBuilder, value: Int?) {
     if (value == null) sb.append("null") else sb.append(value)
+}
+
+private fun appendIncoming(sb: StringBuilder, incoming: DebugProbe.IncomingState?) {
+    if (incoming == null) {
+        sb.append("null")
+        return
+    }
+    sb.append('{')
+    sb.append("\"action\":")
+    appendJsonString(sb, incoming.action)
+    sb.append(",\"sniffed_type\":")
+    appendJsonString(sb, incoming.sniffedType)
+    sb.append(",\"technique\":")
+    appendJsonString(sb, incoming.technique)
+    sb.append(",\"outcome\":")
+    appendJsonString(sb, incoming.outcome)
+    sb.append(",\"timestamp_ms\":").append(incoming.timestampMs)
+    sb.append('}')
 }
 
 private fun appendJsonString(sb: StringBuilder, value: String?) {
