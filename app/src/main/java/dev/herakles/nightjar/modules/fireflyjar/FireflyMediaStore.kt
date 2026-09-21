@@ -107,6 +107,36 @@ class FireflyMediaStore(private val context: Context) {
         }
     }
 
+    /**
+     * Counts files in the fireflies directory that are NOT in [known] — how many carrier files
+     * nothing in the database currently references. Purely a read: never deletes anything,
+     * unlike [sweepOrphans]. Backs [dev.herakles.nightjar.DebugProbe]'s `orphan_file_count`
+     * (gate-20 v4 probe contract) via [FireflyRepository.probeSnapshot].
+     *
+     * **Deliberately NOT age-gated the way [sweepOrphans] is**, and that's a real difference in
+     * what the two report, not an oversight: [sweepOrphans]' [MIN_ORPHAN_AGE_MILLIS] floor exists
+     * to protect a file that's moments from gaining its row -- the write-then-insert gap
+     * [FireflyRepository.insertWithMedia]'s own KDoc documents. A file inside that gap has no
+     * referencing row *yet*, so this method counts it, even though [sweepOrphans] would correctly
+     * leave it alone if run at that same instant. That means a probe snapshot taken mid-catch can
+     * read one higher than what the sweep would actually reclaim right then -- a real, possible
+     * value, not a bug.
+     *
+     * That tradeoff is intentional: this is a read-only diagnostic, not a deletion decision, and
+     * the two failure directions aren't symmetric. Silently under-reporting a genuine crash orphan
+     * because it happens to be a few seconds younger than [MIN_ORPHAN_AGE_MILLIS] would let a real
+     * "no orphans" assertion pass falsely, which defeats the entire point of exposing this as
+     * queryable state (spec.md's Runtime Verification Surface). An occasional +1 during a normal
+     * catch's sub-millisecond write-then-insert window is the far cheaper cost. A caller that
+     * specifically wants "how many would the sweep reclaim if it ran right now" would need to
+     * apply the same age filter itself; nothing here currently needs that narrower question
+     * answered.
+     */
+    fun countUnreferenced(known: Set<String>): Int {
+        val candidates = directory.listFiles() ?: return 0
+        return candidates.count { it.name !in known }
+    }
+
     companion object {
         /**
          * How old an unreferenced file must be before the sweep will reclaim it. Comfortably

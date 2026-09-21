@@ -363,28 +363,48 @@ class FireflyRepositoryTest {
         assertEquals(3L, snapshot.totalMediaBytes)
     }
 
-    /**
-     * Documents a known, deliberate gap rather than leaving it silently asserted-away:
-     * [FireflyRepository.probeSnapshot]'s own KDoc explains why `orphanFileCount` can't be a live
-     * count from within this fix's file-ownership boundary (it would need a non-destructive
-     * directory listing only `FireflyMediaStore.kt` -- out of scope here -- can provide). This
-     * test pins the current, honest behavior (always 0, never fabricated from a wrong source) so
-     * a future change to that default doesn't slip by unnoticed; it plants a real stray file to
-     * make explicit that the 0 is a known limitation, not evidence there are no orphans.
-     */
+    // --- probeSnapshot().orphanFileCount (G-05 follow-up: real count via
+    // FireflyMediaStore.countUnreferenced, not a fabricated/hardcoded 0) ---
+
     @Test
-    fun probeSnapshotOrphanFileCountIsAlwaysZeroAKnownGapNotALiveCount() = runBlocking {
-        directory.mkdirs() // nothing has called mediaStore.write() yet in this test to create it
-        val strayFile = File(directory, "orphan-stray.png")
-        strayFile.writeBytes(byteArrayOf(9, 9))
-        strayFile.setLastModified(
-            System.currentTimeMillis() - FireflyMediaStore.MIN_ORPHAN_AGE_MILLIS - 60_000L,
+    fun probeSnapshotOrphanFileCountIsZeroAfterClearAll() = runBlocking {
+        repository.insertWithMedia(
+            record(timestampMillis = 1L, carrierOverride = "IMAGE"),
+            byteArrayOf(1, 2, 3),
+            "png",
         )
 
-        val snapshot = repository.probeSnapshot()
+        repository.clearAll()
 
-        assertEquals(0, snapshot.orphanFileCount)
-        assertTrue("probeSnapshot must never delete anything -- it only reads", strayFile.exists())
+        assertEquals(0, repository.probeSnapshot().orphanFileCount)
+    }
+
+    @Test
+    fun probeSnapshotOrphanFileCountIsZeroAfterDeletingOneOfTwoSharersOfAStillReferencedFile() = runBlocking {
+        val bytes = byteArrayOf(5, 5, 5)
+        // Content-addressed write: both inserts collapse onto the same on-disk file.
+        repository.insertWithMedia(record(timestampMillis = 1L, carrierOverride = "IMAGE"), bytes, "png")
+        repository.insertWithMedia(record(timestampMillis = 2L, carrierOverride = "IMAGE"), bytes, "png")
+        val doomedId = dao.observeAll().first().first().id
+
+        repository.deleteFirefly(doomedId)
+
+        // The shared file must survive (the surviving row still references it), so it must NOT
+        // count as unreferenced -- this is exactly the reference-counted-delete guarantee
+        // (FireflyRepository.deleteMediaFileIfUnreferenced) reflected in the probe.
+        assertEquals(0, repository.probeSnapshot().orphanFileCount)
+    }
+
+    @Test
+    fun probeSnapshotOrphanFileCountIsNAfterNFilesAreWrittenWithNoRows() = runBlocking {
+        mediaStore.write(byteArrayOf(1), "png")
+        mediaStore.write(byteArrayOf(2), "png")
+        mediaStore.write(byteArrayOf(3), "png")
+        // No dao.insert()/repository.insert() call for any of the three above -- genuine
+        // unreferenced files, the exact shape a crash between a media write and its row insert
+        // leaves behind (FireflyRepository.insertWithMedia's own KDoc).
+
+        assertEquals(3, repository.probeSnapshot().orphanFileCount)
     }
 
     @Test

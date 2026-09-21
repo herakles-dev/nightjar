@@ -180,24 +180,19 @@ fun NightjarApp() {
         if (!OrphanSweepGuard.hasRun) {
             OrphanSweepGuard.hasRun = true
             withContext(Dispatchers.IO) { fireflyRepository.sweepOrphans() }
-            // Reports record_count/records_with_media_count/total_media_bytes right after the
-            // sweep -- the sweep is the one stored-media mutation that doesn't touch a row, so
-            // it's the one case the LaunchedEffect(allFireflies) below (keyed on the reactive
-            // record list) wouldn't otherwise catch. NOTE: orphan_file_count itself is currently
-            // always 0 in the report regardless of timing -- see
-            // FireflyRepository.probeSnapshot()'s KDoc for the known, documented gap (it needs a
-            // non-destructive listing method on FireflyMediaStore.kt, outside this fix's file
-            // ownership).
+            // Reports the freshest possible orphan_file_count right after the sweep -- the sweep
+            // is the one stored-media mutation that doesn't touch a row, so it's the one case the
+            // LaunchedEffect(allFireflies) below (keyed on the reactive record list) wouldn't
+            // otherwise catch.
             reportStoredMediaProbe(fireflyRepository)
         }
     }
 
-    // Gate-20 v4 probe contract (spec.md Runtime Verification Surface): record_count/
-    // records_with_media_count/total_media_bytes are queryable via COVERT_DEBUG whenever they
-    // change. Keyed on the reactive all-fireflies list, so this re-reports after every row
-    // mutation -- a catch in any of the 3 creation jars, clear-all, or a per-firefly delete --
-    // without this file needing an explicit call at each of those sites (several of which live in
-    // modules this file's owner doesn't touch).
+    // Gate-20 v4 probe contract (spec.md Runtime Verification Surface): stored-media state is
+    // queryable via COVERT_DEBUG whenever it changes. Keyed on the reactive all-fireflies list, so
+    // this re-reports after every row mutation -- a catch in any of the 3 creation jars, clear-all,
+    // or a per-firefly delete -- without this file needing an explicit call at each of those sites
+    // (several of which live in modules this file's owner doesn't touch).
     val allFireflies by fireflyRepository.observeAll().collectAsState(initial = null)
     LaunchedEffect(allFireflies) {
         if (allFireflies != null) {

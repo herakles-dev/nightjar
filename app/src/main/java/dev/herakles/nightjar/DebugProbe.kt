@@ -53,10 +53,10 @@ object DebugProbe {
      * spec.md's Runtime Verification Surface: "the same dump gains stored-media state -- record
      * count, count carrying media, total media bytes, and orphan-file count"). Sourced from
      * [dev.herakles.nightjar.modules.fireflyjar.FireflyRepository.probeSnapshot], so retention,
-     * clear-all and per-firefly delete are all assertable as queryable state rather than judged
-     * from a screenshot. [orphanFileCount] is currently always 0 -- see `probeSnapshot`'s own
-     * KDoc for the known, documented gap; the orphan sweep itself still runs and reclaims files
-     * correctly, only this field can't yet report how many it found.
+     * clear-all, per-firefly delete and the orphan sweep are all assertable as queryable state
+     * rather than judged from a screenshot. [orphanFileCount] counts every currently-unreferenced
+     * file (`FireflyMediaStore.countUnreferenced`), not only what the age-gated sweep would
+     * reclaim if run at that instant -- see that function's KDoc for why.
      */
     data class StoredMediaState(
         val recordCount: Int,

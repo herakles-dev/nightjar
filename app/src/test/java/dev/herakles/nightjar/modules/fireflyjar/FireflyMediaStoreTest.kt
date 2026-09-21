@@ -207,6 +207,53 @@ class FireflyMediaStoreTest {
         assertArrayEquals(byteArrayOf(9, 9, 9), store.read(justWritten))
     }
 
+    // --- countUnreferenced(known) (G-05 follow-up, gate-20 v4 probe contract) ---
+
+    @Test
+    fun countUnreferencedIsZeroWhenEveryFileIsKnown() {
+        val filename = store.write(byteArrayOf(1, 2, 3), "png")
+
+        assertEquals(0, store.countUnreferenced(known = setOf(filename)))
+    }
+
+    @Test
+    fun countUnreferencedCountsFilesNotInTheKnownSet() {
+        val known = store.write(byteArrayOf(1), "png")
+        store.write(byteArrayOf(2), "png")
+        store.write(byteArrayOf(3), "png")
+
+        assertEquals(2, store.countUnreferenced(known = setOf(known)))
+    }
+
+    @Test
+    fun countUnreferencedNeverDeletesAnything() {
+        val strayFilename = store.write(byteArrayOf(7, 7), "png")
+
+        val count = store.countUnreferenced(known = emptySet())
+
+        assertEquals(1, count)
+        assertTrue("countUnreferenced must never delete what it counted", File(directory, strayFilename).exists())
+        assertArrayEquals(byteArrayOf(7, 7), store.read(strayFilename))
+    }
+
+    /**
+     * The one deliberate difference from [FireflyMediaStore.sweepOrphans]: this is NOT age-gated.
+     * A file written moments ago with no known row yet still counts, unlike a sweep run at that
+     * same instant (which [writeInFlightIsNotSweptEvenWhenAbsentFromTheKnownSet] above proves
+     * leaves it alone). See [FireflyMediaStore.countUnreferenced]'s own KDoc for why a probe
+     * undercounting a real stray file is worse than this occasional +1.
+     */
+    @Test
+    fun countUnreferencedCountsAFreshlyWrittenFileEvenThoughSweepOrphansWouldNotReclaimItYet() {
+        val justWritten = store.write(byteArrayOf(9, 9, 9), "wav")
+
+        assertEquals(1, store.countUnreferenced(known = emptySet()))
+
+        // Confirms the two methods really do disagree on this exact file, not just in theory.
+        store.sweepOrphans(known = emptySet())
+        assertTrue("sweepOrphans must still protect the same fresh file", File(directory, justWritten).exists())
+    }
+
     /**
      * The directory is resolved and re-ensured on every access rather than cached once per
      * instance, so a store that has already written can survive its directory being removed

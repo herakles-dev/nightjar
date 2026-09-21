@@ -145,28 +145,25 @@ class FireflyRepository(
     /**
      * One-shot snapshot of stored-media state for [dev.herakles.nightjar.DebugProbe]'s
      * `stored_media` report (gate-20 v4 probe contract, spec.md's Runtime Verification Surface):
-     * how many fireflies exist, how many carry an attached media file, and how many bytes that
-     * media occupies on disk (deduplicated -- [observeTotalMediaBytes]'s own KDoc). All three are
-     * exact, sourced straight from [FireflyDao] under [Dispatchers.IO].
+     * how many fireflies exist, how many carry an attached media file, how many bytes that media
+     * occupies on disk (deduplicated -- [observeTotalMediaBytes]'s own KDoc), and how many files
+     * on disk no row currently references. Gathers all four under [Dispatchers.IO], the same
+     * dispatcher [sweepOrphans] uses for its own directory listing.
      *
-     * [StoredMediaSnapshot.orphanFileCount] is always 0 here -- **known gap, not a live count.**
-     * A real count needs a non-destructive directory listing, and only [FireflyMediaStore] can
-     * provide one (its backing directory is a private implementation detail there, deliberately
-     * not exposed for reads outside [write]/[read]/[delete]/[sweepOrphans]). This fix's file
-     * ownership is scoped to `FireflyRepository.kt`/`FireflyLog.kt`/`FireflyPlayer.kt`/
-     * `JarDetailScreen.kt`/`JarShelfScreen.kt` (plus `MainActivity.kt`/`DebugProbe.kt`) --
-     * `FireflyMediaStore.kt` is out of that scope, so this field can't be wired for real here.
-     * [sweepOrphans] itself is unaffected by this gap and still reclaims real orphans correctly;
-     * only this probe FIELD can't see how many it found. Wiring it for real needs one small,
-     * non-destructive addition to `FireflyMediaStore.kt` (e.g. a `countOrphans(known: Set<String>):
-     * Int` mirroring [sweepOrphans] without deleting) from whichever task owns that file.
+     * [StoredMediaSnapshot.orphanFileCount] comes from [FireflyMediaStore.countUnreferenced],
+     * which counts EVERY unreferenced file, not only the ones [sweepOrphans] would reclaim if run
+     * at that instant -- see [FireflyMediaStore.countUnreferenced]'s own KDoc for why that's the
+     * deliberate choice (a probe snapshot taken inside the write-then-insert gap can therefore
+     * read one higher than the sweep would actually reclaim right then; that's a real, possible
+     * value, not a bug).
      */
     suspend fun probeSnapshot(): StoredMediaSnapshot = withContext(Dispatchers.IO) {
+        val knownPaths = dao.allMediaPaths().toSet()
         StoredMediaSnapshot(
             recordCount = dao.countAll(),
             recordsWithMediaCount = dao.countWithMedia(),
             totalMediaBytes = dao.observeTotalMediaBytes().first(),
-            orphanFileCount = 0,
+            orphanFileCount = mediaStore.countUnreferenced(knownPaths),
         )
     }
 
