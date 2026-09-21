@@ -122,9 +122,12 @@ class AcousticCarrier(
      *         frame), requiring the protocol's two edge tones (bins `baseBin` and `topBin`) to be
      *         simultaneously present, [NightjarAcoustics.DETECTOR_TONE_MARGIN_DB] dB above the
      *         median of the rest of the tone-grid band, for [NightjarAcoustics.MARKER_FRAMES]
-     *         consecutive frames starting at the candidate. Bounded to [MAX_START_SEARCH_SECONDS]
-     *         seconds in, so a transmission-free capture fails fast. No match anywhere in that
-     *         range -> [DecodeFailure.NO_PAYLOAD_FOUND].
+     *         consecutive frames starting at the candidate. Bounded by the carrier buffer's own
+     *         length (leaving room for the END marker), not a fixed time constant (codec-M03: an
+     *         earlier fixed `MAX_START_SEARCH_SECONDS = 8.0` cap silently fell out of sync with
+     *         the transport's actual up-to-20s listen window, rejecting a genuine transmission
+     *         that started later than the cap even though it was still within the buffer). No
+     *         match anywhere in that range -> [DecodeFailure.NO_PAYLOAD_FOUND].
      *     1b. *Sample-accurate refinement* (task #29) — [refineMarkerOnsetSample] takes that
      *         frame-quantized candidate (which is only guaranteed accurate to within one
      *         [NightjarAcoustics.FRAME_SAMPLES], since the receiver's frame grid has no relationship
@@ -187,12 +190,14 @@ class AcousticCarrier(
         // 1a. Locate a coarse, frame-quantized START marker candidate via a bounded sliding-window
         // search (task #25). See this method's KDoc step 1a for why: a real capture has arbitrary
         // leading silence/offset that encode()'s own frame-0-aligned round-trip tests never exercise.
-        // searchLimit leaves room for at least the END marker after any candidate; the loop itself
-        // takes the first (i.e. earliest) matching frame, exactly mirroring the old "assume frame 0"
-        // behavior when the marker genuinely is at frame 0.
-        val maxStartSearchFrames = ((MAX_START_SEARCH_SECONDS * NightjarAcoustics.SAMPLE_RATE_HZ) / frameSamplesCount)
-            .roundToInt()
-        val searchLimit = minOf(maxStartSearchFrames, totalFrames - 2 * markerFrames)
+        // searchLimit is derived purely from the carrier buffer's own length (codec-M03) -- not a
+        // fixed time constant, which drifted out of sync with the transport's actual capture window
+        // (AcousticModemController's listen window can run up to MAX_LISTEN_SECONDS = 20s, but this
+        // search used to give up after a hardcoded 8s regardless of how much buffer was left). It
+        // leaves room for at least the END marker after any candidate; the loop itself takes the
+        // first (i.e. earliest) matching frame, exactly mirroring the old "assume frame 0" behavior
+        // when the marker genuinely is at frame 0.
+        val searchLimit = totalFrames - 2 * markerFrames
         var startFrame = -1
         for (candidate in 0..searchLimit) {
             val isStart = (candidate until candidate + markerFrames).all { frame ->
@@ -622,18 +627,6 @@ class AcousticCarrier(
 
         /** Floor under log10 to avoid -Infinity dB for a silent/near-silent bin (task #6 demod). */
         private const val MIN_MAGNITUDE: Double = 1e-9
-
-        /**
-         * Bound on [decode]'s START-marker sliding-window search (task #25). A real `AudioRecord`
-         * capture ([dev.herakles.nightjar.modules.acoustic.AcousticModemController.capturePcm],
-         * `MAX_LISTEN_SECONDS = 20.0` in AcousticModemScreen.kt) may have arbitrary leading
-         * silence/noise before the transmitted signal starts — the delay between the listener
-         * starting capture and the sender starting transmission. Bounding the search to a few
-         * seconds, well short of the full 20s capture window, keeps a transmission-free or
-         * badly-clipped capture failing fast (NO_PAYLOAD_FOUND) instead of scanning the whole
-         * buffer, while still covering realistic leading-silence offsets.
-         */
-        private const val MAX_START_SEARCH_SECONDS: Double = 8.0
 
         /**
          * Search radius, in frames either side of the coarse frame-quantized candidate, for
