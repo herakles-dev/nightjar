@@ -110,6 +110,14 @@ between the shelf and each creation-capable module's actual carrier logic.
   flat monochrome shape in `TextSecondary`, not a Material icon-pack glyph and not a
   literal pictogram (see `ModulePicker.kt` KDoc) — secondary to the label, which
   still carries all the actual information.
+- **U-01 update (spec.md gate-12):** since Firefly Jar became the default launch screen
+  (Screen 6), this screen is only reached via the jar shelf wordmark's long-press reveal —
+  and until this update, the only way back out was the system/predictive back gesture, unlike
+  every screen underneath it (each already has its own visible "back" link to here). A
+  48dp-tall "back to the jar" link (`ModulePicker.kt`, same `labelLarge`/`TextSecondary`
+  styling every technical screen's own "back" link uses) now sits above the wordmark,
+  crossing back over the disguise boundary the same plain way stepping up one level within it
+  already worked.
 - Fixed 4-row list (v2 addition adds row 3). Order: Module 3 (acoustic modem — the
   primary gate-2 phone-to-phone demo) first, then Module 1 (image steganography),
   then Module 2 (audio steganography — grouped next to image stego since both are
@@ -313,6 +321,17 @@ round-trip envelope (speaker→mic ≤1.0m, ambient noise <45 dBA), not an inven
 Deliberately separate from `ListeningBlock` (Task #27) — it's setup guidance true before,
 during, and after any listen window, not a live reading, so it doesn't duplicate or clutter
 the level/countdown rows.
+
+**Tasks #31/#32/#36 (drift note, docs close-out):** the wireframe above predates three later
+additions the wireframe never caught up to. A `ChannelSettingsBlock` (protocol/symbol-rate
+selectors, same tap-to-switch row shape as Screen 4/5's cover selectors) now sits between the
+payload field and the action rows. The action list grew from `transmit`/`listen` to five rows
+— `transmit`, `save`, `share`, `import`, `listen`/`stop` — grouped into three clusters by
+spacing alone (12dp between, 0dp within, no dividers/cards): transmit alone; save+share (both
+write `encode()`'s output to a WAV file); import+listen (both feed a captured signal to
+`decode()`, live mic capture vs. an existing file). `fileActionBusyLabel` gives save/share the
+same plain status-word feedback (`saving`/`sharing`) transmit/import already had. See
+`AcousticModemScreen.kt`'s `AcousticModemContent` KDoc for the full task-by-task rationale.
 
 ---
 
@@ -533,6 +552,15 @@ no way to guess what the three buttons meant before tapping one. One shared capt
 three rather than a line per row, since the three actions operate on the same working image
 and read as one group.
 
+**Owner-requested update (UX-IMAGES):** the 96×96 working-image preview now carries a subtle
+tap affordance (a quiet corner glyph, not a button) — tapping it opens `FullscreenImageViewer`
+(`app/src/main/java/dev/herakles/nightjar/ui/FullscreenImageViewer.kt`), a reusable modal
+shared with the jar surface's own image carrier viewer (Screen 7). Pinch-to-zoom, pan
+(bounds-constrained), double-tap to toggle fit/zoomed, and three dismiss paths (system back, a
+tap on the image or scrim, or a small close glyph). Palette-neutral (near-black scrim) rather
+than bound to either identity.md's or firefly-jar-identity.md's tokens, since a modal photo
+viewer reads the same regardless of which surface opened it.
+
 ---
 
 ## Screen 5 (planned): Audio steganography (Module 2)
@@ -652,6 +680,19 @@ of which applies here); no motion beyond default recomposition (same restraint e
 screen settled at Task #17); no waveform/scrubber/level-meter on the playback rows (matches
 the "no meter/gauge" restraint every other screen already established).
 
+**v5 addition — built (design-v5.md §2, gate-22/23): the scoping decision above no longer
+holds.** `AudioStegDetector : CovertDetector<WavFile.ParsedWav>` now exists (blind, stego-only,
+targeted at this app's own three techniques — channel-polarity anti-correlation,
+spectrogram-LSB's QIM lattice snapping, and MFSK's keyed 19.7–20.0 kHz tones; INV-7: it never
+constructs a `CovertCarrier`, calls `decode`, or reads nightjar's frame header). A third action
+row, `check for hidden data`, is wired on `MainActivity`'s injected detector — same three-verb
+shape Screen 4 already established, same `Analyzed`-style readout (confidence percentage,
+`flagged`/`clear`, the leading technique named in the detail line), plus a static honesty line
+about the detector's own documented blind spots (`AudioStegoScreen.kt`'s
+`DETECTOR_CAVEAT`/`JAR_PEEK_CAVEAT`). A check writes no `FireflyRecord`. The humming jar
+(Screen 7) gets the same capability re-skinned as "peek inside," with a shorter version of the
+same honesty line.
+
 ---
 
 ## Screen 6 (planned): Jar shelf (home, v3 addition — Firefly Jar)
@@ -680,7 +721,7 @@ dimmer no-dots treatment:
 │   [jar]  the singing jar         │  ← acoustic modem. Jar silhouette with
 │          •• •                    │     firefly dots inside: amber = CREATED
 │                                   │     (transmitted), cyan = RECEIVED (decoded)
-│   [jar]  the picture jar         │  ← image steganography
+│   [jar]  the framed jar          │  ← image steganography
 │          •                       │
 │                                   │
 │   [jar]  the humming jar         │  ← audio steganography
@@ -705,7 +746,7 @@ dimmer no-dots treatment:
   doesn't surprise-reveal technical mode) transitions to `Screen.Picker`
   (architecture.md §5). Foundation's `combinedClickable(onLongClick = ...)`, platform-
   default hold duration — no custom timer.
-- Thematic jar names ("the singing jar" / "the picture jar" / "the humming jar" / "the
+- Thematic jar names ("the singing jar" / "the framed jar" / "the humming jar" / "the
   watching jar") are the primary label on this surface; the technical module names stay
   reachable only inside `Screen.Picker`, matching the "full disguise" depth the user
   chose over a lighter re-skin-only option.
@@ -828,5 +869,31 @@ logic (calls the exact same `encode`/`decode`/`analyze` methods Screens 2/4/5 al
 call); no per-firefly delete (only the shelf-level "clear jar history" action from gate-14
 exists — deleting one firefly at a time is a real feature with its own edge cases, not
 something this pass needs to invent).
+
+**v4 addition — built (gate-18/19/20): a carrier viewer.** Tapping a firefly's detail popup now
+also shows what it actually looked or sounded like — an IMAGE firefly renders its stego bitmap
+(with the same tap-to-fullscreen affordance below) plus a two-way "image"/"bit-plane" toggle;
+an AUDIO firefly gets play/stop on its stego clip plus a spectrogram, both honestly captioned
+per technique (gate-19, see spec.md). A usage readout, an advisory threshold warning,
+clear-all, and per-firefly delete round out storage governance — the per-firefly delete gap
+the paragraph above once called out is now closed. Pre-migration or media-less records degrade
+to the original text-only popup instead of erroring.
+
+**v5 addition — built (design-v5.md §3/§4, gate-24/25/26): two more honest carrier views,**
+placed beside the bit-plane/spectrogram toggle as one more instance of the same
+"data-visualization" allowance (`design/firefly-jar-identity.md`). For spectrogram-LSB
+fireflies, a cover-vs-stego **difference view** re-derives the app's own bundled cover
+(no stored cover, no schema change) and shows exactly which cells the codec nudged vs. created
+— withheld with a stated reason when no cover re-derives. For phase-inversion fireflies, an
+**L/R polarity view** shows the stereo channels overlaid, L ≈ −R where the payload sits. Both
+are gated on `FireflyRecord.technique` and the WAV's channel count, never on `Module` — no new
+per-`Module` branch (architecture.md § 6). The watching jar also gains "peek inside" — the
+humming jar's re-skin of the audio technical screen's new "check for hidden data" (see Screen 5
+above); a peek writes no firefly.
+
+**Owner-requested update (UX-IMAGES):** the carrier viewer's image render now carries the same
+subtle tap-to-fullscreen affordance Screen 4 gained (see that section) — tapping it opens the
+shared `FullscreenImageViewer`, palette-neutral rather than themed to either surface's own
+identity doc, since a modal photo viewer should read the same however it was reached.
 
 ---

@@ -158,10 +158,12 @@ enum class DiffCell { UNCHANGED, NUDGED, CREATED }
  * @property nudgedCells total [NUDGED] cell count across the whole map.
  * @property createdCells total [CREATED] cell count across the whole map — `0` whenever the cover
  *   had real energy everywhere the codec touched (e.g. SOFT_SYNTH past its fade-in).
- * @property maxNudgeNats the largest `|deltaNats|` seen at any [NUDGED] cell — bounded by QIM's own
- *   construction at `1.5 * QUANTIZATION_STEP` = 0.18 nats (design-v5.md §3.2, confirmed against
- *   the real codec: measured max 0.180-0.181 nats across every strength/payload/cover combination
- *   tried).
+ * @property maxNudgeNats the largest `|deltaNats|` seen at any [NUDGED] cell — bounded in theory by
+ *   QIM's own construction at `1.5 * QUANTIZATION_STEP` = 0.18 nats (design-v5.md §3.2), but the
+ *   real 16-bit-rounded codec measures slightly past it: worst case 0.18752 nats / ~1.5627×
+ *   QUANTIZATION_STEP (SOFT_SYNTH, strength=3, at its own max payload — `SpectrogramTest`'s
+ *   encoder-level sweep across every strength/payload/cover combination), from `ifft`-then-
+ *   `roundToShort` overshoot on top of `embedBitInBin`'s exact continuous math, not a QIM bug.
  */
 class StegoDifferenceMap(
     val frameSize: Int,

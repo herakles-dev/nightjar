@@ -107,11 +107,11 @@ import kotlinx.coroutines.withContext
  * architecture.md § Firefly Jar § 6). One composable serves every [Module]: the shared shell
  * (wordmark, hero jar, firefly swarm or watching-jar readout, the module's own catch/look flow)
  * is identical for all of them, driven only by [Module.jarName]/[Module.jarRole] — this file
- * never `when`s on which specific module it is. Architecture.md § 6 reserves that exhaustive
- * per-module branch to exactly two places, [FireflyGlyphs.drawJarGlyph] and [catchFlowFor]
- * (`JarCatchFlows.kt`, task #9); this screen only hosts what [catchFlowFor] hands it — it
- * never reimplements embed/extract/transmit/listen logic itself (screen-flow.md § Screen 7
- * "what this addition deliberately does not build").
+ * never `when`s on which specific module it is. Architecture.md § 6 reconciles the exhaustive
+ * per-module branch points at five, not the two this design originally budgeted for — this
+ * screen isn't one of the five; it only hosts what [catchFlowFor] (`JarCatchFlows.kt`, task #9)
+ * hands it — it never reimplements embed/extract/transmit/listen logic itself (screen-flow.md
+ * § Screen 7 "what this addition deliberately does not build").
  *
  * Task #14 (design refresh, "Cozy Pixel Night") re-skins this shell against
  * `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md` §5 (screens 1b/1f/1g/1h): the
@@ -664,9 +664,10 @@ private fun FireflySwarmWaveform(peaks: FloatArray, color: Color, modifier: Modi
  * .payloadPreview]/[FireflyRecord.payloadSizeBytes] are shown verbatim — the same "real data,
  * not smoothed" discipline the technical screens apply to FEC counts and analyzer detail
  * strings. Doesn't name the module's specific channel (e.g. "sent through sound") since that
- * string doesn't exist as a [Module] field and adding one would mean a third per-module branch
- * point this file is built to avoid (architecture.md § 6) — [module]'s [Module.jarName] already
- * ties the record back to its jar without one.
+ * string doesn't exist as a [Module] field and adding one would give this file its own
+ * per-module branch — architecture.md § 6 counts five exhaustive per-module `when`s elsewhere,
+ * none of them in this file — [module]'s [Module.jarName] already ties the record back to its
+ * jar without one.
  *
  * Task #16 brings this popup onto the refreshed surface too (DESIGN_SPEC.md §5 1c): the tapped
  * firefly gets a [HeroFirefly] out of its jar, and the payload sits in a gold-tinted box above
@@ -850,8 +851,8 @@ private fun MetaCard(
  * `picker/ModulePicker.kt`, is outside this file's edit scope for this task, and it's also
  * legitimately correct data: the AUDIO_STEGANOGRAPHY payload travels inside a stored audio file,
  * distinct in meaning from the acoustic modem's real-time "sound"). This is a display-only alias,
- * keyed on the value itself rather than a fourth per-[Module] branch point in this file
- * (architecture.md § 6 reserves exactly two: [FireflyGlyphs.drawJarGlyph] and `catchFlowFor`) —
+ * keyed on the value itself rather than a per-[Module] branch point in this file (architecture.md
+ * § 6 counts five exhaustive per-module `when`s elsewhere, none in this file) —
  * "recording" (9 characters, same length class as "a picture") says the same true thing shorter.
  */
 internal fun jarChannelDisplayLabel(channel: String): String =
@@ -909,9 +910,9 @@ internal fun fireflyCapacityLine(payloadBytes: Int, mediaBytes: Long): String {
  * 34/35/36.
  *
  * Branches on [kind] ("IMAGE"/"AUDIO"), a plain `String` field on the record — never on
- * [Module]. That's deliberate: architecture.md § 6 permits exactly two exhaustive per-[Module]
- * `when`s ([FireflyGlyphs.drawJarGlyph] and [catchFlowFor]), and [FireflyRecord.carrierKind]
- * exists precisely so this file doesn't need a third.
+ * [Module]. That's deliberate: architecture.md § 6 counts five exhaustive per-[Module]
+ * `when`s elsewhere (none in this file), and [FireflyRecord.carrierKind] exists precisely so
+ * this file doesn't need one of its own.
  *
  * Decoding (PNG via [BitmapFactory], WAV via [WavFile.decodePcm16]) is real work, so both run
  * inside [LaunchedEffect] keyed on [firefly]'s id — re-decoding only when the selected firefly
@@ -1589,8 +1590,8 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
 
 /**
  * Stage D/3 (gate-19) — the honesty labels this stage exists to ship. Branches on
- * [FireflyRecord.technique] (a plain `String?`, never on [Module] — architecture.md § 6 reserves
- * the per-[Module] `when` budget to [FireflyGlyphs.drawJarGlyph] and [catchFlowFor]; this is a
+ * [FireflyRecord.technique] (a plain `String?`, never on [Module] — architecture.md § 6 counts
+ * five exhaustive per-[Module] `when`s elsewhere, none in this file; this is a
  * per-technique branch on a data field, the same axis [FireflyBitPlaneToggle]'s neighbor
  * `FireflyCarrierBlock` already draws on [kind] rather than [Module]).
  *

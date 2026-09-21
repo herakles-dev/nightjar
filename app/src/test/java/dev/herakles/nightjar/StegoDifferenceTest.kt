@@ -222,7 +222,18 @@ class StegoDifferenceTest {
             for (strength in 1..4) {
                 val carrier = AudioStegoCarrier(pcm, AudioStegoTechnique.SPECTROGRAM_LSB, strength)
                 val b = binsPerFrame(strength)
-                for (len in listOf(0, 5, 40, 200)) {
+                // strength=3 also sweeps its own max payload: SpectrogramTest's independent,
+                // codec-level measurement across every strength/cover/max-payload combination
+                // found the global worst-case NUDGED delta at SOFT_SYNTH strength=3 (frame=227,
+                // bin=47) -- a frame {0,5,40,200} bytes never reaches with this file's own
+                // fillerPayload. Not added for every strength, since that same sweep found
+                // nowhere else comes as close.
+                val lengths = if (strength == 3) {
+                    listOf(0, 5, 40, 200, carrier.maxPayloadBytes)
+                } else {
+                    listOf(0, 5, 40, 200)
+                }
+                for (len in lengths) {
                     val stego = carrier.encode(fillerPayload(len))
                     val map = stegoDifference(pcm, stego)
 
@@ -276,19 +287,29 @@ class StegoDifferenceTest {
                         )
                     }
 
-                    // 1.5 * QUANTIZATION_STEP (0.12) = 0.18 nats is QIM's own theoretical bound;
-                    // 0.185 keeps a small margin over the measured max (0.180-0.181).
+                    // 1.5 * QUANTIZATION_STEP (0.12) = 0.18 nats is QIM's own theoretical bound.
+                    // The real, 16-bit-rounded codec measures slightly past it -- `ifft`-then-
+                    // `roundToShort` overshoot on top of `embedBitInBin`'s exact continuous math.
+                    // `SpectrogramTest`'s own encoder-level sweep (every strength x cover x max
+                    // payload, its own fillerPayload) found the global worst case: 0.18752 nats,
+                    // SOFT_SYNTH strength=3. This sweep uses a different payload, so it lands
+                    // lower here (measured up to ~0.184, still with strength=3 at max payload
+                    // among the closest) -- exactly the kind of payload-content-dependent
+                    // variance you'd expect this close to a rounding edge. 0.19 stays grounded in
+                    // the higher, independently-measured ceiling rather than this run's own
+                    // narrower sample, so a different payload here in the future can't silently
+                    // exceed it.
                     assertTrue(
                         "$cover strength=$strength len=$len: maxNudgeNats ${map.maxNudgeNats} " +
-                            "exceeded the QIM bound",
-                        map.maxNudgeNats <= 0.185,
+                            "exceeded the measured QIM bound",
+                        map.maxNudgeNats <= 0.19,
                     )
                     for (row in map.deltaNats) {
                         for (delta in row) {
                             assertTrue(
                                 "$cover strength=$strength len=$len: a per-cell delta exceeded the " +
-                                    "QIM bound",
-                                abs(delta) <= 0.185f,
+                                    "measured QIM bound",
+                                abs(delta) <= 0.19f,
                             )
                         }
                     }

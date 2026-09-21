@@ -491,7 +491,7 @@ class AudioStegDetector : CovertDetector<WavFile.ParsedWav> {
   with the detector injected from `MainActivity`, mirroring `ImageStegoScreen`. The technical
   screen gains only a "check for hidden data" verb; the humming jar gains "peek inside". Both
   report through `DebugProbe.reportDetectorConfidence(ModuleId.AUDIO_STEGANALYSIS, …)` and
-  write no `FireflyRecord` (same contract as the picture jar's peek, gate-13).
+  write no `FireflyRecord` (same contract as the framed jar's peek, gate-13).
 
 ### 7.2 v5 addition — cover-vs-stego difference view (spectrogram-LSB)
 
@@ -745,7 +745,7 @@ enum class Module(
     ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone",
         "the singing jar", JarRole.CREATION),
     IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image",
-        "the picture jar", JarRole.CREATION),
+        "the framed jar", JarRole.CREATION),
     DETECTOR("detector", "continuously listens for the modem's signal",
         "the watching jar", JarRole.WATCHING),
     AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio",

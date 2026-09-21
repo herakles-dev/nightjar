@@ -619,11 +619,11 @@ private fun JarStatusBlock(status: AudioStegoStatus) {
     }
 }
 
-/** "peek inside"'s readout — same shape as the picture jar's `JarAnalyzedBlock`
+/** "peek inside"'s readout — same shape as the framed jar's `JarAnalyzedBlock`
  *  ([dev.herakles.nightjar.modules.imagestego.ImageStegoScreen]): confidence percentage,
  *  flagged/clear word, and the byte estimate when one exists ("about N bytes, near as we can
  *  tell" — [AudioStegDetector]'s measured ±4-byte worst case, design-v5.md §2.6's KDoc). One
- *  addition the picture jar's block doesn't carry: [JAR_PEEK_CAVEAT], design-v5.md §2.7's
+ *  addition the framed jar's block doesn't carry: [JAR_PEEK_CAVEAT], design-v5.md §2.7's
  *  honesty line for this jar — this detector's blind posture (INV-7) only knows the app's own
  *  three techniques, so "all quiet" never means "nothing hidden." */
 @Composable

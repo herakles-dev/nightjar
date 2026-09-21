@@ -48,8 +48,9 @@ anywhere in the covert-data research base.
   "where it hid" visualization, and a capacity readout. Storage is user-governed,
   not silently unbounded: a total-usage readout, an advisory warning above a
   threshold, clear-all, and per-firefly delete. Carrier kind is a field on the
-  record, not a per-`Module` branch — `architecture.md` § 6 still permits exactly
-  two exhaustive per-module `when`s and this adds none. The detector is untouched:
+  record, not a per-`Module` branch — `architecture.md` § 6 reconciles the real
+  count at five exhaustive per-module `when`s (not the two this design originally
+  budgeted for) and this addition adds none. The detector is untouched:
   it creates no fireflies and therefore gains no media (INV-4).
 - **In scope (v5 addition, this spec revision):** Module 2's "check for hidden
   data" counterpart, plus the two honest carrier views v4 deferred.
@@ -181,10 +182,17 @@ anywhere in the covert-data research base.
 - gate-7: audio-steganography screen wired into `MainActivity`; technique + cover
   selectors and embed/extract verbs functional against bundled sample clips,
   verified on Hek
-- gate-8: playback (`play cover` / `play working`) confirms cover and stego clips
-  are audibly indistinguishable at default strength for phase-inversion and
-  spectrogram-LSB — the fidelity leg of the triangle, verified by ear on real
-  hardware, not asserted
+- gate-8: playback (`play cover` / `play working`) verifies the fidelity leg of
+  the triangle by ear on real hardware, not asserted — the owner's own listening
+  pass found the honest result differs by technique, not the uniform
+  "indistinguishable" this gate originally predicted: spectrogram-LSB and MFSK
+  are effectively transparent at default strength (MFSK only after round 4's
+  fix for an audible tone-edge click artifact — the near-ultrasonic tones
+  themselves were never the audible signature, see `AudioStegoCarrier.kt`'s
+  click-fix KDoc), while phase-inversion reads clearly wider/hollow by design,
+  not a bug (the same mono-mix cancellation that makes it detectable, gate-22).
+  The screen's own copy was corrected to say so rather than promise "sounds
+  unchanged" for a technique where that wasn't true
 - gate-9: safety-scope compliance check passed (synthetic payloads only, no
   exploit content); anti-AI-tell checklist re-run against the new screen
 - gate-10: covert-data's `module_2_audio_steganography/README.md` updated to
@@ -228,8 +236,12 @@ anywhere in the covert-data research base.
   with one clip at a time and stops on dispose, and pre-migration records with
   no media degrade to the existing text-only layout instead of erroring
 - gate-19: the channel is legible, honestly — LSB bit-plane for images and a
-  spectrogram for audio, with the two cases a spectrogram genuinely cannot show
-  (spectrogram-LSB's sub-perceptual QIM, phase-inversion's stereo polarity)
+  spectrogram for audio, captioned per technique rather than with one blanket
+  claim: MFSK, the acoustic modem, and phase-inversion (whose mono-mix exposure
+  *is* this technique's own decode step) are genuinely visible; spectrogram-LSB's
+  QIM nudges are sub-perceptual except where the cover is silent, where the codec
+  creates real, visible brightening instead (measured, not asserted). What no
+  magnitude spectrogram shows at all — phase-inversion's actual L/R polarity — is
   labeled as such rather than shipped with a visualization that implies the eye
   should catch something it cannot
 - gate-20: retention is governed and honest — usage readout, advisory warning
@@ -265,16 +277,20 @@ anywhere in the covert-data research base.
   schema change (database stays at version 2; no `3.json` exists); the cover is
   re-derived and accepted only below −20 dB residual (INV-8). JVM tests prove
   changed frames equal embedded frames exactly, untouched frames are exactly
-  unchanged, nudges are ≤ 1.5Δ, silent-cover cells are classified as created,
-  and a drifted or wrong cover is rejected with the view withheld and its reason
-  shown
+  unchanged, nudges are ≤ 1.5Δ in theory and measured ≤ 0.1876 nats (~1.56Δ) on
+  the real 16-bit-rounded codec (the extra ~0.007 nats over the theoretical bound
+  is `ifft`-then-`roundToShort` overshoot; worst case found at SOFT_SYNTH,
+  strength 3, near its own max payload — `SpectrogramTest`'s own encoder-level
+  sweep), silent-cover cells are classified as created, and a drifted or wrong
+  cover is rejected with the view withheld and its reason shown
 - gate-25: the L/R polarity view ships for phase-inversion fireflies; the
   persisted WAV is proven stereo from catch through the media store to
   `decodePcm16`. JVM tests prove correlation ≤ −0.999, residual steps equal the
   embedded bit count exactly, and the zoom window shows L ≈ −R. Mono, MFSK and
   pre-migration fireflies gain no new option
-- gate-26: honesty reconciled — the spectrogram-LSB caption no longer claims a
-  spectrogram can't show it, with the silent-cover case measured and tested on
+- gate-26: honesty reconciled — the spectrogram-LSB caption no longer claims
+  blanket invisibility: it still says the sub-perceptual nudges themselves don't
+  show, but now adds that the silent-cover case does, measured and tested on
   both bundled covers; every v5 caption backed by a test; the spectrogram-LSB
   silent-frame click train (~−60 dBFS, 47 Hz) added to gate-8's headphone
   listening pass; `architecture.md` § 7 and `design/screen-flow.md` Screens 5/7

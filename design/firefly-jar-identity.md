@@ -214,6 +214,13 @@ check:
 - **Shimmer/glow/bloom** — the entire point of this surface; every firefly dot is a
   glow.
 - **Motion** — permitted, bounded (§ Motion above).
+- **Data visualizations — always permitted, not a reversal at all.** The image bit-plane
+  toggle, the audio spectrogram, and the v5 cover-vs-stego difference and L/R polarity views
+  (`JarDetailScreen.kt`, `CarrierInsightViews.kt`, gate-19/24/25) render a real measurement
+  of the actual firefly's carrier, not themed chrome — a different category from every
+  reversal above, licensed by what this surface already does rather than by anything relaxed
+  here: showing someone what a carrier's data literally contains was never what identity.md's
+  checklist was written to prevent.
 - **Success-affirmation copy** — softened, cute copy ("you caught one — N bytes") is
   permitted where identity.md would require a bare fact statement; still no
   exclamation points or checkmark glyphs (screen-flow.md § Screen 7 copy table) — warmth
@@ -242,3 +249,4 @@ itself should shift with the disguise, not stay a fixed color across both surfac
 |---|---|---|
 | 2026-08-04 | Initial `firefly-jar-identity.md` — spec addition, Task #12 | New disguise-themed surface needs its own doctrine; identity.md stays authoritative for the technical screens underneath the long-press reveal. All values above are proposed starting points for the implementer/android-designer pass, same "placeholder pick pending user override" spirit `identity.md`'s own icon.md precedent uses — not locked. |
 | 2026-08-04 | **"Cozy Pixel Night" design package integrated** — sprint-09, tasks #10–#15 | The user-supplied design-team package (`firefly-app-design-refresh`, v1 explored three directions, v2 committed to "Cozy Pixel Night" across nine screens) is the "user override" the row above anticipated. Four reversals, each recorded in place: **(1) Typography** — Silkscreen replaces system Roboto on this surface only; § Typography. **(2) Palette** — two-stop sky becomes four-stop, `JarTextTertiary` added; § Palette. **(3) Motion** — bounded keyframe blink becomes a continuous parametric frame clock that also moves the fireflies; § Motion. **(4) Contrast** — two dim text tiers failed the AA bar this doc sets; confirmed on device, then corrected by lightness alone with the package's hue/saturation held. Extracted spec: `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md`. Notably the package stayed on-palette: `#FFC857`, `#39C5CF`, `#F5E6C8`, `#9B8FBF`, `#6B6690` and `#D9C9A3` were already this doc's tokens. |
+| 2026-09-21 | Data-visualization allowance made explicit — docs close-out (v5 review) | `JarDetailScreen.kt`/`CarrierInsightViews.kt` code comments had been citing a "data visualization, not decoration" framing as if quoted from this doc; the phrase was never actually here. Added a bullet to § Anti-AI-tell status saying so directly, so the citation is now true rather than paraphrase. |
