@@ -1,13 +1,15 @@
 package dev.herakles.nightjar.modules.detector
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
+import android.media.audiofx.AudioEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -29,28 +32,37 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.AcousticDetector
 import dev.herakles.nightjar.CovertDetector
 import dev.herakles.nightjar.DebugProbe
 import dev.herakles.nightjar.DetectionResult
+import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import androidx.compose.material3.HorizontalDivider
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
+import dev.herakles.nightjar.ui.theme.JarHistoryRowFill
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import androidx.compose.ui.text.font.FontWeight
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -106,9 +118,15 @@ private const val MAX_HISTORY_ENTRIES = 50
 @Composable
 fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
     val context = LocalContext.current
-    val controller = remember(detector) { DetectorController(detector) }
+    val controller = remember(detector) { DetectorController(detector, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-4: stop the passive listen loop when the app is backgrounded, rather than leaving the
+    // mic capturing (and the live confidence readout burning battery) behind a closed/minimized
+    // app. No time bound is needed on the loop itself once it reliably stops here.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopListening()
     }
 
     var micPermissionDenied by remember { mutableStateOf(false) }
@@ -130,6 +148,7 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
         history = controller.history,
         flagThreshold = detector.flagThreshold,
         micPermissionDenied = micPermissionDenied,
+        micError = controller.micError,
         onToggleListen = {
             if (controller.isListening) {
                 controller.stopListening()
@@ -159,7 +178,7 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
  * Re-skins [DetectorContent]'s existing live confidence readout + flagged-history list
  * (design/screen-flow.md § Screen 7 "the watching jar" wireframe) rather than showing
  * firefly dots — this module never creates or receives a payload (architecture.md § 3,
- * spec.md INV-4), so it never calls [FireflyDao.insert]; [dao] is accepted only for
+ * spec.md INV-4), so it never calls [FireflyRepository.insert]; [repository] is accepted only for
  * signature symmetry with the other three modules' jar flows and is otherwise unused
  * here. [onExit] is likewise unused — there's no "catch completed" moment for a passive
  * watcher to fire it from; `JarDetailScreen`'s own "back to the shelf" row already
@@ -175,12 +194,18 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
  * `CovertCarrier` construction (architecture.md § Firefly Jar § 6).
  */
 @Composable
-fun jarWatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
     val detector = remember { AcousticDetector() }
-    val controller = remember(detector) { DetectorController(detector) }
+    val controller = remember(detector) { DetectorController(detector, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-4: stop the passive listen loop when the app is backgrounded, rather than leaving the
+    // mic capturing behind a closed/minimized app. No time bound is needed on the loop itself
+    // once it reliably stops here.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopListening()
     }
 
     var micPermissionDenied by remember { mutableStateOf(false) }
@@ -201,6 +226,7 @@ fun jarWatchFlow(dao: FireflyDao, onExit: () -> Unit) {
         result = controller.lastResult,
         history = controller.history,
         micPermissionDenied = micPermissionDenied,
+        micError = controller.micError,
         onToggleWatch = {
             if (controller.isListening) {
                 controller.stopListening()
@@ -235,29 +261,39 @@ private fun JarWatchContent(
     result: DetectionResult?,
     history: List<DetectionHistoryEntry>,
     micPermissionDenied: Boolean,
+    micError: String?,
     onToggleWatch: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // DESIGN_SPEC.md §5 1h "watch button" — purple-tinted, 12dp radius, the
+            // primary-button tier (the watching jar has one action, not a catch/look pair).
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
-                    .clickable(onClick = onToggleWatch),
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(JarWatchingDim.copy(alpha = 0.1f))
+                    .border(width = 1.dp, color = JarWatchingDim.copy(alpha = 0.2f), shape = RoundedCornerShape(12.dp))
+                    .clickable(onClick = onToggleWatch)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
                 contentAlignment = Alignment.CenterStart,
             ) {
                 Text(
                     text = if (isListening) "stop" else "watch",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = JarTextPrimary,
+                    style = JarType.ButtonLabel,
+                    color = JarTextSecondary,
                 )
             }
             if (micPermissionDenied) {
                 Text(
                     text = "the jar needs microphone access to watch.",
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = JarType.Body,
                     color = JarTextSecondary,
                 )
+            }
+            // mic-1: visible instead of crashing when every AudioSource tier fails to initialize.
+            if (micError != null) {
+                Text(text = micError, style = JarType.Body, color = JarTextSecondary)
             }
         }
 
@@ -267,30 +303,41 @@ private fun JarWatchContent(
     }
 }
 
+/** DESIGN_SPEC.md §5 1h "confidence readout card" — cyan-tinted, 10dp radius. Reuses the
+ *  look/spot cyan tokens: this readout is the same "did a signal arrive" concept the other
+ *  three jars' spot/look treatment already colors cyan. */
 @Composable
 private fun JarGlowReadout(result: DetectionResult?) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = "glow strength",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextSecondary,
-        )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(JarActionLookFill)
+            .border(width = 1.dp, color = JarActionLookBorder, shape = RoundedCornerShape(10.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(text = "glow strength", style = JarType.Footer, color = JarTextTertiary)
         if (result == null) {
             Text(
                 text = "glow strength appears once you start watching",
-                style = MaterialTheme.typography.bodyLarge,
+                style = JarType.Body,
                 color = JarTextSecondary,
             )
         } else {
             Text(
                 text = "${(result.confidence * 100).roundToInt()}%",
-                style = MaterialTheme.typography.displayLarge.copy(fontWeight = FontWeight.Light),
+                style = JarType.Numeral,
                 color = JarTextPrimary,
             )
             Text(
                 text = if (result.flagged) "something's out there" else "all quiet",
-                style = MaterialTheme.typography.labelLarge,
-                color = if (result.flagged) FireflyReceived else JarTextSecondary,
+                style = JarType.TileTitle,
+                // DESIGN_SPEC.md §7 item 1: the mockup hardcodes this label to cyan regardless
+                // of value — a documented bug. The history-row convention below (cyan when
+                // flagged, cream otherwise) is the intended semantic; implemented here instead
+                // of reproduced.
+                color = if (result.flagged) FireflyReceived else JarTextPrimary,
             )
         }
     }
@@ -299,19 +346,11 @@ private fun JarGlowReadout(result: DetectionResult?) {
 @Composable
 private fun JarSpottedHistory(history: List<DetectionHistoryEntry>) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = "spotted",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextSecondary,
-        )
+        Text(text = "spotted", style = JarType.SectionLabel, color = JarTextTertiary)
         if (history.isEmpty()) {
-            Text(
-                text = "nothing spotted yet",
-                style = MaterialTheme.typography.bodyLarge,
-                color = JarTextSecondary,
-            )
+            Text(text = "nothing spotted yet", style = JarType.Footer, color = JarWatchingDim)
         } else {
-            Column {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 history.forEach { entry -> JarSpottedRow(entry) }
             }
         }
@@ -320,24 +359,31 @@ private fun JarSpottedHistory(history: List<DetectionHistoryEntry>) {
 
 private val jarSpottedTimeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
-/** Timestamp-only mono use, matching [HistoryRow]'s precedent on the technical screen. */
+/** DESIGN_SPEC.md §5 1h "history row" — a faint neutral fill, no border, 6dp radius (the
+ *  technique-chip/history-row shape tier). Timestamp-only mono use, matching [HistoryRow]'s
+ *  precedent on the technical screen. */
 @Composable
 private fun JarSpottedRow(entry: DetectionHistoryEntry) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .clip(RoundedCornerShape(6.dp))
+            .background(JarHistoryRowFill)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
             text = jarSpottedTimeFormat.format(entry.timestampMillis),
-            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            style = JarType.Timestamp,
             color = JarTextSecondary,
         )
         Text(
             text = glowLabel(entry.confidence),
-            style = MaterialTheme.typography.labelSmall,
-            color = JarTextPrimary,
+            style = JarType.TileCaption,
+            // Every entry here is already a rising-edge-into-flagged event (see this file's
+            // own DetectorController.onResult doc) — always the "flagged" branch of
+            // DESIGN_SPEC.md §5 1h's conditional history-percentage color, never "clear".
+            color = FireflyReceived,
         )
     }
 }
@@ -365,6 +411,7 @@ private fun PreviewJarWatchNeverWatched() {
         result = null,
         history = emptyList(),
         micPermissionDenied = false,
+        micError = null,
         onToggleWatch = {},
     )
 }
@@ -380,6 +427,7 @@ private fun PreviewJarWatchSomethingOutThere() {
             DetectionHistoryEntry(timestampMillis = System.currentTimeMillis() - 60_000, confidence = 0.4f),
         ),
         micPermissionDenied = false,
+        micError = null,
         onToggleWatch = {},
     )
 }
@@ -414,6 +462,7 @@ fun DetectorContent(
     history: List<DetectionHistoryEntry>,
     flagThreshold: Float,
     micPermissionDenied: Boolean,
+    micError: String?,
     onToggleListen: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -461,6 +510,16 @@ fun DetectorContent(
                 if (micPermissionDenied) {
                     Text(
                         text = "microphone permission needed to listen.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = TextSecondary,
+                    )
+                }
+
+                // mic-1: visible instead of crashing when every AudioSource tier fails to
+                // initialize (mic held by a call or another app).
+                if (micError != null) {
+                    Text(
+                        text = micError,
                         style = MaterialTheme.typography.bodyLarge,
                         color = TextSecondary,
                     )
@@ -619,7 +678,7 @@ private fun HistoryRow(entry: DetectionHistoryEntry) {
  * analysis frame. The live confidence/flagged readout updates continuously regardless;
  * only the history list is edge-triggered.
  */
-class DetectorController(private val detector: CovertDetector<PcmAudio>) {
+class DetectorController(private val detector: CovertDetector<PcmAudio>, private val appContext: Context) {
 
     var isListening: Boolean by mutableStateOf(false)
         private set
@@ -628,6 +687,17 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         private set
 
     var history: List<DetectionHistoryEntry> by mutableStateOf(emptyList())
+        private set
+
+    /**
+     * mic-1 fix: set when [captureLoop] can't get a working [android.media.AudioRecord] — every
+     * [MicCapture.openBestAudioRecord] tier busy/unavailable, or `startRecording()` itself
+     * throwing once initialized — instead of the uncaught `IllegalStateException` this used to
+     * crash on (this controller previously built a bare `AudioSource.MIC` record directly, with
+     * no state check and only a `SecurityException` catch). Cleared at the start of every
+     * [startListening] call.
+     */
+    var micError: String? by mutableStateOf(null)
         private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -639,12 +709,19 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         if (isListening) return
         listening.set(true)
         isListening = true
+        micError = null
         scope.launch {
             try {
                 captureLoop()
             } catch (permissionRevoked: SecurityException) {
                 // Falls through to the finally block; the live readout just stops
                 // updating, same silent-stop treatment as a manual "stop" tap.
+            } catch (micBusy: IllegalStateException) {
+                // mic-1 fix: startRecording() threw once the record was already initialized —
+                // surface a visible reason instead of crashing. (The "returns null" half of this
+                // finding is handled directly inside captureLoop() below, with no exception at
+                // all.)
+                micError = "the microphone is busy — a call or another app is using it."
             } finally {
                 listening.set(false)
                 isListening = false
@@ -670,17 +747,17 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
             AudioFormat.ENCODING_PCM_16BIT,
         )
         val recordBufferBytes = if (minBufBytes > 0) minBufBytes * 4 else NightjarAcoustics.FRAME_SAMPLES * 8
-        val audioRecord = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.MIC)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(NightjarAcoustics.SAMPLE_RATE_HZ)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(recordBufferBytes)
-            .build()
+
+        // mic-1/mic-3 fix: shares AcousticModemController's UNPROCESSED -> VOICE_RECOGNITION ->
+        // MIC AudioSource fallback (avoids platform speech DSP distorting the tone-grid energy
+        // this detector measures — spec.md INV-4) and its NoiseSuppressor/AGC/AEC suppression,
+        // instead of the bare `AudioSource.MIC` AudioRecord this loop used to build directly with
+        // neither and no STATE_INITIALIZED check.
+        val audioRecord = MicCapture.openBestAudioRecord(appContext, recordBufferBytes)
+        if (audioRecord == null) {
+            micError = "the microphone is busy — a call or another app is using it."
+            return@withContext
+        }
 
         // Read a few frames at a time (~85ms of audio) rather than one FRAME_SAMPLES chunk
         // (~21ms) per read: detector.analyze() internally re-slices into FRAME_SAMPLES-sized
@@ -688,7 +765,12 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         // only throttles how often the live readout recomposes — smooth enough to read
         // without writing Compose state every ~21ms.
         val chunk = ShortArray(NightjarAcoustics.FRAME_SAMPLES * 4)
+        // mic-8 precedent applied here too: effects are disabled from inside this try, right
+        // after the AudioRecord they operate on is already in hand, so a throwing OEM effect
+        // factory can't skip past the record's own release() below.
+        var disabledEffects: List<AudioEffect> = emptyList()
         try {
+            disabledEffects = MicCapture.disablePlatformAudioEffects(audioRecord.audioSessionId)
             audioRecord.startRecording()
             while (listening.get()) {
                 val n = audioRecord.read(chunk, 0, chunk.size)
@@ -698,8 +780,14 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
                 onResult(result)
             }
         } finally {
-            audioRecord.stop()
+            // mic-1 fix: only call stop() if the record actually reached RECORDSTATE_RECORDING —
+            // calling it otherwise (e.g. startRecording() itself threw) throws its own
+            // IllegalStateException and would mask whatever failure got us here.
+            if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord.stop()
+            }
             audioRecord.release()
+            disabledEffects.forEach { it.release() }
         }
     }
 
@@ -729,6 +817,7 @@ private fun PreviewNeverListened() {
             history = emptyList(),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )
@@ -745,6 +834,7 @@ private fun PreviewClear() {
             history = emptyList(),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )
@@ -769,6 +859,7 @@ private fun PreviewFlagged() {
             ),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )

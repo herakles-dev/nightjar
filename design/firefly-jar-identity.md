@@ -39,6 +39,54 @@ clears WCAG AA (4.5:1) with margin, the bar this doc's own § Responsibilities t
 Both computed via the standard relative-luminance formula, same method `identity.md`'s
 `AccentSignal` decision used.
 
+### Sky gradient, revised 2026-08-04 (design package)
+
+The two-stop `bg-dusk` → `bg-horizon` fill is superseded on the jar surface by a
+four-stop sky, deeper at the zenith and warmer at the horizon:
+
+| Stop | Hex | Compose name |
+|---|---|---|
+| 0% | `#060610` | `JarSkyZenith` |
+| 40% | `#0A0A22` | `JarSkyUpper` |
+| 70% | `#141035` | `JarSkyLower` |
+| 100% | `#1E1548` | `JarSkyHorizon` |
+
+`JarBgDusk`/`JarBgHorizon` are retained as constants but are no longer the jar
+background. A third text tier arrives with the package:
+
+| Token | Hex | Compose name | Role |
+|---|---|---|---|
+| text-tertiary | `#897FAA` | `JarTextTertiary` | Subtitles under titles, section labels, tile status captions, byte counters |
+
+**Contrast re-verified against the new sky, and two tiers were corrected.** Worst case is
+the `#1E1548` horizon stop at the bottom of the screen:
+
+| Token | On `#060610` | On `#1E1548` | Verdict |
+|---|---|---|---|
+| `JarTextPrimary` `#F5E6C8` | 16.4:1 | 13.6:1 | clears AAA |
+| `FireflyCreated` `#FFC857` | 13.1:1 | 10.9:1 | clears AAA |
+| `FireflyReceived` `#39C5CF` | 9.7:1 | 8.0:1 | clears AAA |
+| `JarTextSecondary` `#9B8FBF` | 6.8:1 | 5.6:1 | clears AA |
+| `JarTextTertiary` `#897FAA` | 5.4:1 | 4.5:1 | clears AA — **corrected**, was `#7B6FA0` at 3.7:1 |
+| `JarWatchingDim` `#8581A5` | 5.4:1 | 4.5:1 | clears AA — **corrected**, was `#6B6690` at 3.1:1 |
+
+As drawn, both tiers failed: 3.7:1 and 3.1:1 against the horizon stop. The 3:1 large-text
+exemption rescues neither, since both are used at 7–8sp. This was confirmed on device
+before changing anything — the worst case was the acoustic catch screen's unselected
+protocol/symbol-rate options (`near-ultrasonic`, `fast`), which in the tertiary tier were
+barely legible as options at all, alongside `clear history` on the shelf.
+
+The correction raises lightness while holding the package's hue and saturation exactly, so
+the palette reads unchanged and only the dim text gains legibility. Deliberately **not**
+corrected: `JarGlassWatching` and `JarRadarSweep` keep the original `#6B6690` base — they
+are sub-25%-alpha decorative strokes rather than text, carry no contrast obligation, and
+lightening them would visibly change how the watching jar reads.
+
+Related and still open: the package's caption sizes are 7–8px read straight across to sp.
+On device Silkscreen's blocky glyphs hold up better at that size than a proportional face
+would, and the tiers above are legible post-correction — but 7sp remains small, and it's
+the next thing to revisit if anyone reports strain.
+
 **Reversed from identity.md, explicitly:**
 - Gradient backgrounds — allowed (`bg-horizon`), was banned.
 - Glassmorphism-adjacent translucent surfaces — allowed (`jar-glass`), was banned ("no
@@ -52,6 +100,55 @@ Both computed via the standard relative-luminance formula, same method `identity
 ---
 
 ## Typography
+
+> **Superseded 2026-08-04 by the "Cozy Pixel Night" design package.** The surface now
+> uses **Silkscreen** (a pixel display face, OFL), vendored at `res/font/`. The original
+> reasoning is kept verbatim below because it was a real call with real tradeoffs, and
+> the override should read as a decision rather than an accident — this doc's own change
+> log invited it ("proposed starting points … not locked").
+>
+> What changed the answer: the design package doesn't use a display font for decoration,
+> it uses one as the *entire* identity — the pixel face is what makes the disguise read
+> as a cozy little collection game rather than a themed utility. That is a typographic
+> voice the platform default genuinely cannot produce, which is precisely the bar the
+> paragraph below sets. Asset cost came in at ~62 KB for both weights.
+>
+> **Scope of the reversal:** the pixel face is bound to the jar surface only, via
+> `JarType` in `ui/theme/Type.kt`. `NightjarTypography` — the shared M3 typography that
+> everything under the long-press reveal resolves through — is untouched and still
+> Roboto at 400/500/600. identity.md's typography rule is not relaxed by this entry.
+>
+> Silkscreen ships with weights 400 and 700 only; the 300-Light option the paragraph
+> below opens up is therefore not available on this surface anymore.
+>
+> **Sizes are ours, not the package's (revised on device, 2026-08-04).** The package's
+> numbers are CSS px from a 375×812 design canvas. Reading them straight across to `sp` is
+> geometrically defensible — that frame is about a phone's dp box — but it shipped captions
+> at 7–8sp, and on a real Pixel 6a that is unreadable. The mockup was reviewed on a desktop,
+> where the same values look comfortable. Nobody's error but the port's.
+>
+> The ramp is rebuilt around one fixed point: **`ActionTitle` at 16sp** ("catch a firefly",
+> "look for fireflies"), the only size confirmed correct on device. Everything else is
+> proportioned to it, which roughly doubles the small tiers:
+>
+> | Tier | Size | Roles |
+> |---|---|---|
+> | micro | 12sp | tile captions, screen subtitles, footers, meta labels, byte counters |
+> | small | 13sp | back links, section labels, wordmark subtitle, timestamps |
+> | base | **16sp** | tile titles, action titles, body copy, metadata values |
+> | button | 18sp | primary button labels |
+> | title | 24sp | detail-screen titles |
+> | display | 28sp | the wordmark |
+> | numeral | 36sp | the watching jar's live confidence figure |
+>
+> One structural bug fell out of the 1:1 port and is fixed here: `TileTitle` was 10sp while
+> `ActionTitle` was 16sp, even though both are the primary label of a full-width tappable
+> row. The shelf read as a weaker surface than the detail screens for no reason. They are
+> now the same size, and that is the rule — a tappable row's primary label is 16sp wherever
+> it appears.
+>
+> Tracking scales with the tier rather than holding the package's absolute px, so
+> letter-spacing reads the same relative to the glyphs at every size.
 
 **Staying on system default font (Roboto)** — same call identity.md made for the
 technical screens, same reasoning: bundling a display/storybook font adds real asset
@@ -76,11 +173,17 @@ not this surface's larger display type).
 since "instant everywhere" was identity.md's most emphatic, most-recently-ratified
 decision (Task #17). Concrete, bounded motion, not "animation everywhere":
 
-- **Firefly blink:** each dot's alpha animates between 0.4 and 1.0 via
+- **Firefly blink:** ~~each dot's alpha animates between 0.4 and 1.0 via
   `rememberInfiniteTransition` + `animateFloat(infiniteRepeatable(tween(...),
   RepeatMode.Reverse))`. Period randomized per dot in the 1.8–3.2s range, phase-offset by
-  the dot's list index, so a jar's fireflies blink asynchronously rather than in unison —
-  mimicking real, uncoordinated firefly flashing rather than a single pulsing UI element.
+  the dot's list index~~ — **revised 2026-08-04.** The design package drives every
+  firefly from a single continuous frame clock (`withFrameNanos`) rather than named
+  keyframe transitions: position comes from six layered sine/cosine terms and alpha from
+  a soft-cubic shaping of a per-id phase (period `3.5 + (id%5)*0.6`s, range 0.05–0.65).
+  The *intent* below is unchanged and is in fact what the package achieves more directly
+  — fireflies drift and breathe asynchronously, uncoordinated, never in unison. What
+  changed is that they also **move**, which keyframed alpha alone could not do. Exact
+  formulas live in `DESIGN_SPEC.md` §4.3; the implementation is `FireflyGlyphs.kt`.
 - **Screen transitions:** `JarShelf` ↔ `JarDetail` cross-fades (`AnimatedContent` or
   `Crossfade`, ~250ms) — allowed here, unlike identity.md's hard "no `Crossfade`
   anywhere" rule, because this surface's whole premise is a softer, less-instant feel.
@@ -111,6 +214,13 @@ check:
 - **Shimmer/glow/bloom** — the entire point of this surface; every firefly dot is a
   glow.
 - **Motion** — permitted, bounded (§ Motion above).
+- **Data visualizations — always permitted, not a reversal at all.** The image bit-plane
+  toggle, the audio spectrogram, and the v5 cover-vs-stego difference and L/R polarity views
+  (`JarDetailScreen.kt`, `CarrierInsightViews.kt`, gate-19/24/25) render a real measurement
+  of the actual firefly's carrier, not themed chrome — a different category from every
+  reversal above, licensed by what this surface already does rather than by anything relaxed
+  here: showing someone what a carrier's data literally contains was never what identity.md's
+  checklist was written to prevent.
 - **Success-affirmation copy** — softened, cute copy ("you caught one — N bytes") is
   permitted where identity.md would require a bare fact statement; still no
   exclamation points or checkmark glyphs (screen-flow.md § Screen 7 copy table) — warmth
@@ -138,3 +248,5 @@ itself should shift with the disguise, not stay a fixed color across both surfac
 | Date | Change | Reason |
 |---|---|---|
 | 2026-08-04 | Initial `firefly-jar-identity.md` — spec addition, Task #12 | New disguise-themed surface needs its own doctrine; identity.md stays authoritative for the technical screens underneath the long-press reveal. All values above are proposed starting points for the implementer/android-designer pass, same "placeholder pick pending user override" spirit `identity.md`'s own icon.md precedent uses — not locked. |
+| 2026-08-04 | **"Cozy Pixel Night" design package integrated** — sprint-09, tasks #10–#15 | The user-supplied design-team package (`firefly-app-design-refresh`, v1 explored three directions, v2 committed to "Cozy Pixel Night" across nine screens) is the "user override" the row above anticipated. Four reversals, each recorded in place: **(1) Typography** — Silkscreen replaces system Roboto on this surface only; § Typography. **(2) Palette** — two-stop sky becomes four-stop, `JarTextTertiary` added; § Palette. **(3) Motion** — bounded keyframe blink becomes a continuous parametric frame clock that also moves the fireflies; § Motion. **(4) Contrast** — two dim text tiers failed the AA bar this doc sets; confirmed on device, then corrected by lightness alone with the package's hue/saturation held. Extracted spec: `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md`. Notably the package stayed on-palette: `#FFC857`, `#39C5CF`, `#F5E6C8`, `#9B8FBF`, `#6B6690` and `#D9C9A3` were already this doc's tokens. |
+| 2026-09-21 | Data-visualization allowance made explicit — docs close-out (v5 review) | `JarDetailScreen.kt`/`CarrierInsightViews.kt` code comments had been citing a "data visualization, not decoration" framing as if quoted from this doc; the phrase was never actually here. Added a bullet to § Anti-AI-tell status saying so directly, so the citation is now true rather than paraphrase. |

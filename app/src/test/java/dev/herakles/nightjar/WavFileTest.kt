@@ -182,6 +182,91 @@ class WavFileTest {
     }
 
     // ---------------------------------------------------------------------
+    // codec-M02: WAVE_FORMAT_EXTENSIBLE (0xFFFE) fmt chunks. Common for files with >2 channels
+    // or an explicit channel-mask, and some Android/desktop recorders even for plain PCM16 mono/
+    // stereo -- decodePcm16 used to reject these outright (`AudioFormat != 1`) even when the
+    // real encoded data is fully readable 16-bit PCM. Hand-built rather than produced by
+    // WavFile itself, since [WavFile.encodePcm16Mono]/[encodePcm16Stereo] never emit this
+    // variant (only real-world/foreign files do).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `decodePcm16 accepts a WAVE_FORMAT_EXTENSIBLE fmt chunk whose SubFormat is PCM`() {
+        val pcm = shortArrayOf(0, 1, -1, 32767, -32768, 12345, -12345)
+        val wav = buildExtensibleWav(pcm, sampleRateHz, numChannels = 1, subFormatFirstTwoBytes = 1)
+
+        val parsed = WavFile.decodePcm16(wav)
+
+        assertTrue("a WAVE_FORMAT_EXTENSIBLE/PCM file must parse", parsed != null)
+        requireNotNull(parsed)
+        assertEquals("sample rate", sampleRateHz, parsed.sampleRateHz)
+        assertEquals("channel count", 1, parsed.numChannels)
+        assertArrayEquals("samples", pcm, parsed.samples)
+    }
+
+    @Test
+    fun `decodePcm16 rejects a WAVE_FORMAT_EXTENSIBLE fmt chunk whose SubFormat is not PCM`() {
+        val pcm = shortArrayOf(0, 1, -1)
+        // SubFormat leading 2 bytes = 3 (KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, say) instead of 1 (PCM).
+        val wav = buildExtensibleWav(pcm, sampleRateHz, numChannels = 1, subFormatFirstTwoBytes = 3)
+
+        assertNull(WavFile.decodePcm16(wav))
+    }
+
+    /**
+     * Hand-builds a minimal RIFF/WAVE file with a `WAVE_FORMAT_EXTENSIBLE` (`0xFFFE`) `fmt `
+     * chunk (40-byte body: the 16-byte base fields, `cbSize` = 22, `wValidBitsPerSample`,
+     * `dwChannelMask`, and a 16-byte `SubFormat` GUID whose leading 2 bytes are
+     * [subFormatFirstTwoBytes] — the only part [WavFile.decodePcm16] actually reads, per
+     * codec-M02) followed by a `data` chunk holding [pcm] as little-endian PCM16.
+     */
+    private fun buildExtensibleWav(pcm: ShortArray, sampleRateHz: Int, numChannels: Int, subFormatFirstTwoBytes: Int): ByteArray {
+        val fmtBodySize = 40 // 16 base + 2 cbSize + 2 validBits + 4 channelMask + 16 SubFormat GUID
+        val dataBytes = pcm.size * 2
+        val out = ByteArray(12 + 8 + fmtBodySize + 8 + dataBytes)
+        var pos = 0
+
+        fun ascii(tag: String) {
+            for (c in tag) out[pos++] = c.code.toByte()
+        }
+        fun le16(value: Int) {
+            out[pos++] = (value and 0xFF).toByte()
+            out[pos++] = ((value ushr 8) and 0xFF).toByte()
+        }
+        fun le32(value: Int) {
+            out[pos++] = (value and 0xFF).toByte()
+            out[pos++] = ((value ushr 8) and 0xFF).toByte()
+            out[pos++] = ((value ushr 16) and 0xFF).toByte()
+            out[pos++] = ((value ushr 24) and 0xFF).toByte()
+        }
+
+        ascii("RIFF")
+        le32(4 + (8 + fmtBodySize) + (8 + dataBytes)) // ChunkSize: "WAVE" + fmt chunk + data chunk
+        ascii("WAVE")
+
+        ascii("fmt ")
+        le32(fmtBodySize)
+        le16(0xFFFE) // wFormatTag = WAVE_FORMAT_EXTENSIBLE
+        le16(numChannels)
+        le32(sampleRateHz)
+        le32(sampleRateHz * numChannels * 2) // nAvgBytesPerSec
+        le16(numChannels * 2) // nBlockAlign
+        le16(16) // wBitsPerSample
+        le16(22) // cbSize (size of the extension past the base 16 bytes)
+        le16(16) // wValidBitsPerSample
+        le32(if (numChannels == 1) 0x4 else 0x3) // dwChannelMask (SPEAKER_FRONT_CENTER / L+R)
+        le16(subFormatFirstTwoBytes) // SubFormat leading 2 bytes -- the only part decodePcm16 reads
+        repeat(14) { out[pos++] = 0 } // rest of the 16-byte SubFormat GUID -- irrelevant to decodePcm16
+
+        ascii("data")
+        le32(dataBytes)
+        for (sample in pcm) le16(sample.toInt())
+
+        check(pos == out.size) { "buildExtensibleWav wrote $pos bytes, expected ${out.size}" }
+        return out
+    }
+
+    // ---------------------------------------------------------------------
     // Little-endian / ASCII readers, independent of WavFile's own write helpers
     // ---------------------------------------------------------------------
 

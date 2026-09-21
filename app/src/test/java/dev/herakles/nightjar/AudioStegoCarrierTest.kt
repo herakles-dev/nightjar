@@ -1,5 +1,13 @@
 package dev.herakles.nightjar
 
+import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
+import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.log10
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -410,6 +418,340 @@ class AudioStegoCarrierTest {
         assertTrue("expected Failure but got $result", result is DecodeResult.Failure)
     }
 
+    // --- codec-H02: canEmbed / tiny-cover contract self-consistency, one per technique ---
+
+    @Test
+    fun phaseInversionCanEmbedIsFalseForATinyCoverBelowFrameOverhead() {
+        // 20000 samples: capacityBytes = floor(floor(20000/480)/8) = floor(41/8) = 5, under 11.
+        val tinyCover = ShortArray(20_000)
+        val carrier = AudioStegoCarrier(tinyCover, AudioStegoTechnique.PHASE_INVERSION)
+
+        assertEquals(0, carrier.maxPayloadBytes)
+        assertTrue("a 20000-sample cover (5-byte capacity) should not report canEmbed", !carrier.canEmbed)
+        try {
+            carrier.encode(ByteArray(0))
+            fail("expected encode() to throw for a cover too small to hold a frame")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "expected message to explain the cover is too small, was: ${expected.message}",
+                expected.message.orEmpty().contains("too small"),
+            )
+        }
+    }
+
+    @Test
+    fun spectrogramLsbCanEmbedIsFalseForATinyCoverBelowFrameOverhead() {
+        // 5 frames at stegoStrength=1 (8 bins/frame): capacityBytes = (5*8)/8 = 5, under 11.
+        val tinyCover = ShortArray(SPECTROGRAM_FRAME_SIZE * 5)
+        val carrier = AudioStegoCarrier(tinyCover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength = 1)
+
+        assertEquals(0, carrier.maxPayloadBytes)
+        assertTrue("a 5-frame cover (5-byte capacity) should not report canEmbed", !carrier.canEmbed)
+        try {
+            carrier.encode(ByteArray(0))
+            fail("expected encode() to throw for a cover too small to hold a frame")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "expected message to explain the cover is too small, was: ${expected.message}",
+                expected.message.orEmpty().contains("too small"),
+            )
+        }
+    }
+
+    @Test
+    fun mfskCanEmbedIsFalseForACoverJustUnderOneCodeword() {
+        val tinyCover = ShortArray(MFSK_FRAME_SIZE * (MFSK_CODEWORD_BYTES - 1))
+        val carrier = AudioStegoCarrier(tinyCover, AudioStegoTechnique.MFSK)
+
+        assertEquals(0, carrier.maxPayloadBytes)
+        assertTrue("a cover one block short of a codeword should not report canEmbed", !carrier.canEmbed)
+        try {
+            carrier.encode(ByteArray(0))
+            fail("expected encode() to throw for a cover too small to hold a codeword")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "expected message to explain the cover is too small, was: ${expected.message}",
+                expected.message.orEmpty().contains("too small"),
+            )
+        }
+    }
+
+    @Test
+    fun canEmbedIsTrueForOrdinaryCoversOnAllThreeTechniques() {
+        assertTrue(AudioStegoCarrier(noiseCover(SEGMENT_SAMPLES * 800, 1), AudioStegoTechnique.PHASE_INVERSION).canEmbed)
+        assertTrue(
+            AudioStegoCarrier(
+                spectrogramNoiseCover(100, 2),
+                AudioStegoTechnique.SPECTROGRAM_LSB,
+                stegoStrength = 2,
+            ).canEmbed,
+        )
+        assertTrue(AudioStegoCarrier(mfskNoiseCover(3), AudioStegoTechnique.MFSK).canEmbed)
+    }
+
+    // --- MFSK clipping fix (design-v5.md §12.2, revised after rev-2 MAJOR): TONE_AMPLITUDE * up
+    // to 8 simultaneous tones measurably exceeded int16 range pre-fix (96/141 saturated samples
+    // per stego on the two bundled covers). Uses the app's own real bundled covers
+    // (AudioStegoSampleCovers.kt), not synthetic noise, since that's exactly what was measured as
+    // clipping, and a real ~34-byte payload -- the same shape the fix was actually measured
+    // against. [MFSK_BASE_BIN]/[MFSK_TONE_COUNT]/[MFSK_TONE_AMPLITUDE] below mirror
+    // AudioStegoCarrier's documented MFSK tone-synthesis constants exactly, the same way every
+    // other technique's tests recompute their own constants inline.
+    //
+    // The fix applies ONE constant gain to the entire clip (encodeMfsk's `gain`, AudioStegoCarrier
+    // .kt), not a per-block one -- a per-block version was tried first and rejected (rev-2 MAJOR):
+    // it ducked the cover to a different, sometimes-zero gain every ~21ms, an audible click/
+    // dropout pattern worse than the clipping it fixed. A uniform gain also leaves decode()'s
+    // detection margin *exactly* unchanged (not just "close enough"): its verdict is a ratio --
+    // tone-bin magnitude vs. guard-bin median magnitude, both in dB -- and scaling every sample
+    // (so every FFT bin, by linearity) by the same constant cancels out of that ratio entirely.
+
+    @Test
+    fun mfskEncodeOnBothBundledCoversNeverSaturatesASample() {
+        for (cover in AudioSampleCover.entries) {
+            val (stego, result) = encodeAndDecodeMfskProbePayload(cover)
+
+            val saturatedCount = stego.count { it == Short.MAX_VALUE || it == Short.MIN_VALUE }
+            assertEquals(
+                "expected zero int16-saturated samples encoding MFSK onto ${cover.name}, found $saturatedCount",
+                0,
+                saturatedCount,
+            )
+
+            assertTrue("expected Success but got $result for ${cover.name}", result is DecodeResult.Success)
+            // A uniform whole-clip gain cancels out of decode()'s tone-vs-guard-bin-median dB
+            // ratio exactly (see this section's header comment) -- unlike the rejected per-block
+            // approach (which needed a "< 8, the RS correction bound" allowance because it
+            // measurably degraded some blocks' margin), a clean encode should need no correction
+            // at all.
+            assertEquals(
+                "expected zero RS-corrected byte errors on a clean encode of ${cover.name} -- the " +
+                    "whole-clip gain should leave decode()'s margin untouched",
+                0,
+                (result as DecodeResult.Success).correctedByteErrors,
+            )
+        }
+    }
+
+    /**
+     * codec rev-2 MAJOR: the per-block gain version of the clipping fix ducked the cover to a
+     * different (sometimes zero) gain every ~21ms symbol block, producing block-boundary sample
+     * jumps 21-150x the cover's own typical jump -- audible clicks/dropouts, and worse than the
+     * clipping it fixed. The whole-clip-gain replacement applies one constant `g` to every
+     * sample, cover and tones alike, so there is no seam left at a block boundary to click at:
+     * empirically, on both bundled covers, the largest sample-to-sample jump AT a block boundary
+     * is smaller than the largest jump found anywhere else in the touched span (tone content
+     * near ~19.7kHz, close to the Nyquist bin, already produces large interior jumps on its own —
+     * this test only asserts boundaries aren't *additionally* anomalous on top of that).
+     */
+    @Test
+    fun mfskHasNoAnomalousBlockBoundaryJumpOnEitherBundledCover() {
+        for (cover in AudioSampleCover.entries) {
+            val (stego, _) = encodeAndDecodeMfskProbePayload(cover)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            var maxBoundaryDelta = 0
+            var maxInteriorDelta = 0
+            for (i in 1 until neededSamples) {
+                val delta = abs(stego[i].toInt() - stego[i - 1].toInt())
+                if (i % MFSK_FRAME_SIZE == 0) {
+                    if (delta > maxBoundaryDelta) maxBoundaryDelta = delta
+                } else {
+                    if (delta > maxInteriorDelta) maxInteriorDelta = delta
+                }
+            }
+
+            assertTrue(
+                "expected no block-boundary sample jump larger than the largest interior jump on " +
+                    "${cover.name} (maxBoundaryDelta=$maxBoundaryDelta, maxInteriorDelta=$maxInteriorDelta) " +
+                    "-- a larger boundary jump would mean the gain isn't actually uniform across blocks",
+                maxBoundaryDelta <= maxInteriorDelta,
+            )
+        }
+    }
+
+    /**
+     * The mathematical guarantee a single whole-clip gain gives for free: for ANY two adjacent
+     * samples, `stego[i] = round(g * (cover[i] + tone[i]))`, so `|Δstego| <= g*(|Δcover| +
+     * |Δtone|) + 1` (the `+1` covers up to ±0.5 rounding error on each of the two roundings).
+     * [g] is measured empirically from the largest-magnitude sample in the untouched tail (past
+     * the MFSK codeword span, where `tone == 0` and `stego[i] == round(g * cover[i])` exactly) --
+     * picking the largest magnitude keeps the rounding-derived relative error on that estimate
+     * negligible (well under 0.01%). [maxDeltaTone] is a safe analytic upper bound (not the
+     * actual per-codeword value, which depends on the real Reed-Solomon-encoded byte values this
+     * test doesn't reconstruct): `|Δ(A*sin(θ))| <= 2*A*|sin(halfStep)|` per active tone, summed
+     * across all [MFSK_TONE_COUNT] tone bins.
+     */
+    @Test
+    fun mfskWholeClipGainSatisfiesTheNoDiscontinuityBound() {
+        for (cover in AudioSampleCover.entries) {
+            val pcm = synthesizeSampleCover(cover)
+            val (stego, _) = encodeAndDecodeMfskProbePayload(cover, pcm)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            var maxDeltaCover = 0
+            for (i in 1 until pcm.size) {
+                val d = abs(pcm[i].toInt() - pcm[i - 1].toInt())
+                if (d > maxDeltaCover) maxDeltaCover = d
+            }
+
+            var bestTailIndex = -1
+            var bestTailAbs = 0
+            for (i in neededSamples until pcm.size) {
+                val a = abs(pcm[i].toInt())
+                if (a > bestTailAbs) {
+                    bestTailAbs = a
+                    bestTailIndex = i
+                }
+            }
+            assertTrue("expected an untouched tail sample to measure gain from for ${cover.name}", bestTailIndex >= 0)
+            val gain = stego[bestTailIndex].toDouble() / pcm[bestTailIndex].toDouble()
+
+            var maxDeltaTone = 0.0
+            for (bit in 0 until MFSK_TONE_COUNT) {
+                val freqHz = (MFSK_BASE_BIN + bit) * NightjarAcoustics.SAMPLE_RATE_HZ.toDouble() / MFSK_FRAME_SIZE
+                val halfStep = PI * freqHz / NightjarAcoustics.SAMPLE_RATE_HZ
+                maxDeltaTone += 2.0 * MFSK_TONE_AMPLITUDE * abs(sin(halfStep))
+            }
+
+            var maxDeltaStego = 0
+            for (i in 1 until neededSamples) {
+                val d = abs(stego[i].toInt() - stego[i - 1].toInt())
+                if (d > maxDeltaStego) maxDeltaStego = d
+            }
+
+            val bound = gain * (maxDeltaCover + maxDeltaTone) + 1
+            assertTrue(
+                "expected max|Δstego| ($maxDeltaStego) <= gain*(maxDeltaCover+maxDeltaTone)+1 " +
+                    "($bound) on ${cover.name} (gain=$gain, maxDeltaCover=$maxDeltaCover, " +
+                    "maxDeltaTone=$maxDeltaTone)",
+                maxDeltaStego <= bound,
+            )
+        }
+    }
+
+    // --- MFSK click fix (Gate 8 round 4): owner-reported "crackle and pops in the first few
+    // seconds" of real-hardware MFSK playback, traced (offline JVM measurement against this
+    // class's own encode()/decode(), not a device capture) to encodeMfsk's per-block tone
+    // synthesis gating each tone fully on/off at every MFSK_FRAME_SIZE block boundary -- a
+    // rectangular edge, not the near-ultrasonic tones simply being audible (mid-symbol audible-
+    // band energy is unaffected by the fix below, ~-86 to -88 dBFS throughout) and not residual
+    // clipping (already zero, see mfskEncodeOnBothBundledCoversNeverSaturatesASample above).
+    // AudioStegoCarrier.kt's mfskToneEnvelope now applies a short raised-cosine (Hann) ramp at a
+    // tone's actual on/off transitions; decodeMfsk is untouched.
+
+    /**
+     * Measures the < 16 kHz ("audible-band") part of `stego - gain*cover`, low-pass-filtered
+     * ([lowPassBelow16kHz]) and pooled across all 63 internal MFSK_FRAME_SIZE block boundaries
+     * (±32 samples each), on both bundled covers. Measured before/after this fix, same payload
+     * this test uses ([MFSK_CLIP_FIX_TEST_PAYLOAD]):
+     *
+     * | cover        | before (rectangular gating) | after (this fix) |
+     * |--------------|------------------------------|-------------------|
+     * | SOFT_SYNTH   | -42.00 dBFS                   | -74.48 dBFS       |
+     * | SPOKEN_WORD  | -41.45 dBFS                   | -73.75 dBFS       |
+     *
+     * A 32+ dB reduction on both covers, comfortably past the -70 dBFS bound
+     * [MFSK_CLICK_FIX_TARGET_DBFS] asserts (the same bound `MFSK_RAMP_SAMPLES`'s KDoc in
+     * AudioStegoCarrier.kt cites as the tuning target). Mid-symbol audible-band energy (not
+     * asserted here -- see that KDoc's sweep instead) stays essentially unchanged by this fix,
+     * which is what confirms the reduction is specifically at the boundary, i.e. this technique's
+     * clicks, and not a change to the tones' own audibility.
+     */
+    @Test
+    fun mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget() {
+        for (cover in AudioSampleCover.entries) {
+            val pcm = synthesizeSampleCover(cover)
+            val (stego, result) = encodeAndDecodeMfskProbePayload(cover, pcm)
+            assertTrue("expected Success but got $result for ${cover.name}", result is DecodeResult.Success)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            // Same tail-sample gain estimate as mfskWholeClipGainSatisfiesTheNoDiscontinuityBound.
+            var bestTailIndex = -1
+            var bestTailAbs = 0
+            for (i in neededSamples until pcm.size) {
+                val a = abs(pcm[i].toInt())
+                if (a > bestTailAbs) {
+                    bestTailAbs = a
+                    bestTailIndex = i
+                }
+            }
+            assertTrue("expected an untouched tail sample to measure gain from for ${cover.name}", bestTailIndex >= 0)
+            val gain = stego[bestTailIndex].toDouble() / pcm[bestTailIndex].toDouble()
+
+            val residual = DoubleArray(neededSamples) { i -> stego[i].toDouble() - gain * pcm[i].toDouble() }
+            val filtered = lowPassBelow16kHz(residual)
+
+            val boundaryValues = mutableListOf<Double>()
+            val filterEdge = FIR_LOWPASS_TAPS / 2
+            for (block in 1 until MFSK_CODEWORD_BYTES) {
+                val boundary = block * MFSK_FRAME_SIZE
+                if (boundary - 32 >= filterEdge && boundary + 32 < filtered.size - filterEdge) {
+                    for (i in (boundary - 32)..(boundary + 32)) boundaryValues.add(filtered[i])
+                }
+            }
+            assertTrue("expected boundary windows to be collected for ${cover.name}", boundaryValues.isNotEmpty())
+            val meanSquare = boundaryValues.sumOf { it * it } / boundaryValues.size
+            val boundaryRmsDbfs = 20.0 * log10(sqrt(meanSquare) / 32768.0 + 1e-300)
+
+            assertTrue(
+                "expected boundary-locked audible-band RMS on ${cover.name} to be below " +
+                    "$MFSK_CLICK_FIX_TARGET_DBFS dBFS (measured ${"%.2f".format(boundaryRmsDbfs)} dBFS) -- " +
+                    "see this test's KDoc for the before/after numbers this fix was tuned against",
+                boundaryRmsDbfs < MFSK_CLICK_FIX_TARGET_DBFS,
+            )
+        }
+    }
+
+    /**
+     * Windowed-sinc (Hamming) FIR low-pass filter, [FIR_LOWPASS_TAPS] taps, 16 kHz cutoff at
+     * [NightjarAcoustics.SAMPLE_RATE_HZ] -- used only to isolate the audible part of a residual
+     * signal for [mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget]'s measurement;
+     * MFSK's tones themselves live at [MFSK_BASE_BIN]..+7 (~19.7-20 kHz), comfortably above this
+     * cutoff, so what survives filtering is spectral splatter, not the tones' own energy.
+     */
+    private fun lowPassBelow16kHz(x: DoubleArray): DoubleArray {
+        val cutoffHz = 16000.0
+        val sampleRateHz = NightjarAcoustics.SAMPLE_RATE_HZ.toDouble()
+        val fc = cutoffHz / sampleRateHz
+        val m = FIR_LOWPASS_TAPS - 1
+        val taps = DoubleArray(FIR_LOWPASS_TAPS) { n ->
+            val k = n - m / 2.0
+            val sincValue = if (k == 0.0) 2 * fc else sin(2 * PI * fc * k) / (PI * k)
+            val window = 0.54 - 0.46 * cos(2 * PI * n / m) // Hamming
+            sincValue * window
+        }
+        val tapSum = taps.sum()
+        for (n in taps.indices) taps[n] /= tapSum
+
+        val half = taps.size / 2
+        return DoubleArray(x.size) { i ->
+            var acc = 0.0
+            for (j in taps.indices) {
+                val idx = i + j - half
+                if (idx in x.indices) acc += taps[j] * x[idx]
+            }
+            acc
+        }
+    }
+
+    /** Shared MFSK clipping-fix test fixture: encodes [MFSK_CLIP_FIX_TEST_PAYLOAD] onto [cover]
+     *  (or the already-synthesized [pcm], if the caller needs it too) and decodes the result --
+     *  every clipping-fix test above needs this same encode/decode pair. */
+    private fun encodeAndDecodeMfskProbePayload(
+        cover: AudioSampleCover,
+        pcm: PcmAudio = synthesizeSampleCover(cover),
+    ): Pair<PcmAudio, DecodeResult> {
+        val carrier = AudioStegoCarrier(pcm, AudioStegoTechnique.MFSK)
+        assertTrue(
+            "test payload (${MFSK_CLIP_FIX_TEST_PAYLOAD.size}B) exceeds MFSK's fixed capacity " +
+                "(${carrier.maxPayloadBytes}B)",
+            MFSK_CLIP_FIX_TEST_PAYLOAD.size <= carrier.maxPayloadBytes,
+        )
+        val stego = carrier.encode(MFSK_CLIP_FIX_TEST_PAYLOAD)
+        return stego to carrier.decode(stego)
+    }
+
     // --- Test helpers ---
 
     /**
@@ -475,5 +817,34 @@ class AudioStegoCarrierTest {
 
         /** Mirrors AudioStegoCarrier's documented MFSK codeword size (data + parity bytes = symbol blocks). */
         private const val MFSK_CODEWORD_BYTES = MFSK_RS_DATA_BYTES + MFSK_RS_PARITY_BYTES
+
+        /** Mirrors AudioStegoCarrier's documented first MFSK tone bin. */
+        private const val MFSK_BASE_BIN = 420
+
+        /** Mirrors AudioStegoCarrier's documented MFSK simultaneous-tone-channel count. */
+        private const val MFSK_TONE_COUNT = 8
+
+        /** Mirrors AudioStegoCarrier's documented MFSK per-tone amplitude ceiling. */
+        private const val MFSK_TONE_AMPLITUDE = 6000.0
+
+        /** 34 bytes, comfortably under MFSK's fixed ~37-byte capacity -- the same payload shape
+         *  (a real ASCII string, not synthetic noise) the clipping fix was measured against. */
+        private val MFSK_CLIP_FIX_TEST_PAYLOAD = "nightjar MFSK gain probe payload!!".toByteArray(Charsets.US_ASCII)
+
+        /**
+         * Taps for [lowPassBelow16kHz]'s FIR filter. 129 gives a transition band narrow enough
+         * (relative to the ~3.7 kHz gap between the 16 kHz cutoff and [MFSK_BASE_BIN]'s ~19.7 kHz)
+         * to cleanly separate audible-band splatter from the tones' own near-ultrasonic energy.
+         */
+        private const val FIR_LOWPASS_TAPS = 129
+
+        /**
+         * Bound [mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget] asserts:
+         * boundary-locked audible-band RMS must land below this. Matches the -70 dBFS target
+         * `MFSK_RAMP_SAMPLES`'s KDoc in AudioStegoCarrier.kt cites as the ramp-length tuning
+         * target; the actual measured values (see that test's KDoc) clear it by several dB on
+         * both bundled covers.
+         */
+        private const val MFSK_CLICK_FIX_TARGET_DBFS = -70.0
     }
 }

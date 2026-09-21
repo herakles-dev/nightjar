@@ -7,21 +7,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -30,11 +24,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -48,30 +46,46 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.AcousticCarrier
 import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.DebugProbe
 import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DecodeResult
+import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.WavFile
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
+import dev.herakles.nightjar.modules.fireflyjar.JarGlyph
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
+import dev.herakles.nightjar.ui.theme.JarCardFill
+import dev.herakles.nightjar.ui.theme.JarMeterTrack
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import java.io.ByteArrayOutputStream
@@ -79,14 +93,18 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.coroutineContext
 import kotlin.math.log10
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -173,6 +191,16 @@ sealed interface ModemStatus {
      * problem that never reaches `decode()` at all.
      */
     data class ImportFailed(val message: String) : ModemStatus
+
+    /**
+     * mic-2 fix: [AcousticModemController.startListening]'s AudioRecord failed to initialize
+     * (every [MicCapture.openBestAudioRecord] tier busy/unavailable), or `startRecording()` threw
+     * once initialized — surfaced as a plain "mic busy" message instead of the uncaught
+     * IllegalStateException this used to crash on. Distinct from [ImportFailed] (a transport/
+     * format problem with a *picked file*, never touching the mic) and from [DecodedFailure] (a
+     * well-formed capture that simply didn't decode).
+     */
+    data class ListenFailed(val message: String) : ModemStatus
 }
 
 /**
@@ -184,9 +212,6 @@ sealed interface ModemStatus {
  * starting immediately. The user can also stop early by tapping "stop".
  */
 private const val MAX_LISTEN_SECONDS = 20.0
-
-/** Logcat tag for AudioRecord source/effect fallback diagnostics (Task #26). */
-private const val TAG = "AcousticModem"
 
 /**
  * Task #27: floor for the live input-level readout, in dBFS relative to full-scale PCM16
@@ -233,6 +258,11 @@ fun AcousticModemScreen(
     val controller = remember(carrier) { AcousticModemController(carrier, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-5: stop in-flight listen capture / transmit playback when the app is backgrounded,
+    // rather than leaving the mic capturing or the speaker playing behind a closed/minimized app.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopForBackground()
     }
 
     var payloadText by remember { mutableStateOf("") }
@@ -323,9 +353,16 @@ fun AcousticModemScreen(
  * `Transmitting` — moot here anyway since [JarModemFlowContent]'s `canCatch` gate matches
  * [AcousticModemContent]'s `canTransmit` and disables the row over budget), and
  * [ModemStatus.DecodedSuccess] is itself a terminal, one-shot state.
+ *
+ * Task #17 (design refresh) re-skins everything below against
+ * `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md` §5 screens 1d/1e — the catch flow
+ * gets its own small jar preview, gold input box, and gradient "send" button; the listen flow
+ * gets a cyan listening card with a real level meter and a "you spotted one" result card. This
+ * function's own state/controller wiring is untouched; only [JarModemFlowContent] and its
+ * private helpers below changed.
  */
 @Composable
-fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
 
     var protocol by remember { mutableStateOf(NightjarAcoustics.Protocol.AUDIBLE) }
@@ -336,6 +373,11 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     val controller = remember(carrier) { AcousticModemController(carrier, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-5: stop in-flight listen capture / transmit playback when the app is backgrounded,
+    // rather than leaving the mic capturing or the speaker playing behind a closed/minimized app.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopForBackground()
     }
 
     var payloadText by remember { mutableStateOf("") }
@@ -356,6 +398,30 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
     val status = controller.status
     var previousStatus by remember { mutableStateOf<ModemStatus>(ModemStatus.Idle) }
+
+    // Task #19 (gate-17), Stage B: persist the carrier WAV alongside the FireflyRecord at both
+    // catch sites below. Mirrors ImageStegoScreen.kt's/AudioStegoScreen.kt's `jarCatchFlow` shape
+    // (tasks #17/#18): a local suspend helper called from inside the existing transition-guarded
+    // arms, WAV encode pushed off the composition (Main) dispatcher via
+    // `withContext(Dispatchers.Default)` (encoding a full 20s capture -- ~1.9 MB, the largest
+    // media this app writes -- inline in the LaunchedEffect body would block composition). Unlike
+    // the other two screens, this one has no single controller-held "current media" property that
+    // both directions can share: CREATED wants [AcousticModemController.lastTransmittedPcm] and
+    // RECEIVED wants [AcousticModemController.lastDecodedPcm], so [pcm] is a parameter rather than
+    // read from a fixed controller field. Falls back to the existing media-less insert() when
+    // there's no PCM (nothing transmitted/decoded yet) or it's empty -- never writes a zero-byte
+    // file.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord, pcm: PcmAudio?) {
+        if (pcm == null || pcm.isEmpty()) {
+            repository.insert(record)
+            return
+        }
+        val wavBytes = withContext(Dispatchers.Default) {
+            WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+        }
+        repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+    }
+
     // Keyed on the status's class rather than the full value: ModemStatus.Listening carries a
     // levelDb/remainingSeconds pair that changes on every ~85ms captured chunk (200+ instances
     // over a full listen window), and neither branch below needs to observe that churn — only
@@ -363,7 +429,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     LaunchedEffect(status::class) {
         if (status is ModemStatus.Idle && previousStatus is ModemStatus.Transmitting) {
             val bytes = payloadText.encodeToByteArray().size
-            dao.insert(
+            insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.ACOUSTIC_MODEM.name,
                     direction = "CREATED",
@@ -372,11 +438,12 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     technique = null,
                     payloadPreview = payloadText.take(40),
                 ),
+                controller.lastTransmittedPcm,
             )
             catchResultMessage = "you caught one — $bytes bytes"
         } else if (status is ModemStatus.DecodedSuccess) {
             val bytes = status.text.encodeToByteArray().size
-            dao.insert(
+            insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.ACOUSTIC_MODEM.name,
                     direction = "RECEIVED",
@@ -385,6 +452,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     technique = null,
                     payloadPreview = status.text.take(40),
                 ),
+                controller.lastDecodedPcm,
             )
         }
         previousStatus = status
@@ -423,13 +491,14 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
 /**
  * Pure UI for [jarCatchFlow]: no [FireflyDao], no carrier, no permission logic — same
- * stateful-root/pure-content split every screen in this app uses. Two clusters (screen-flow.md §
- * Screen 7): "catch a firefly" expands inline into the payload field + protocol/symbol-rate
- * selector + a confirm row when tapped (the same fields [AcousticModemContent] defines for this
- * module, per gate-13 — nothing here is a second implementation of them); "look for fireflies"
- * (toggles to "stop") needs no extra fields. Jar palette throughout ([JarTextPrimary]/
- * [JarTextSecondary]/[FireflyCreated]/[FireflyReceived]) rather than this file's technical
- * [TextPrimary]/[TextSecondary]/[AccentSignal] — this content sits inside
+ * stateful-root/pure-content split every screen in this app uses. Two clusters: "catch a
+ * firefly" expands inline into a small jar preview, payload field, protocol/symbol-rate
+ * selector, and a "send" button when tapped (the same fields [AcousticModemContent] defines
+ * for this module, per gate-13 — nothing here is a second implementation of them); "look for
+ * fireflies" swaps for a cyan listening card the moment [status] actually is
+ * [ModemStatus.Listening], per DESIGN_SPEC.md §5 screens 1d/1e. Jar palette throughout
+ * ([JarTextPrimary]/[JarTextTertiary]/[FireflyCreated]/[FireflyReceived]) rather than this
+ * file's technical [TextPrimary]/[TextSecondary]/[AccentSignal] — this content sits inside
  * [dev.herakles.nightjar.modules.fireflyjar.JarDetailContent]'s dusk/horizon gradient shell, not
  * this screen's own [BgBase].
  */
@@ -452,65 +521,56 @@ private fun JarModemFlowContent(
 ) {
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
-        status is ModemStatus.DecodedFailure
+        status is ModemStatus.DecodedFailure ||
+        status is ModemStatus.ListenFailed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
     val canToggleLook = idleEquivalent || status is ModemStatus.Listening
-    val lookLabel = if (status is ModemStatus.Listening) "stop" else "look for fireflies"
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column {
-            JarFlowRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatch)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            JarFlowRow(
+                label = "catch a firefly",
+                accent = FireflyCreated,
+                fill = JarActionCatchFill,
+                border = JarActionCatchBorder,
+                enabled = idleEquivalent,
+                onClick = onToggleCatch,
+            )
             if (catchExpanded) {
-                Column(
-                    modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    BasicTextField(
-                        value = payloadText,
-                        onValueChange = onPayloadTextChange,
-                        singleLine = true,
-                        enabled = idleEquivalent,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
-                        cursorBrush = SolidColor(JarTextPrimary),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(width = 1.dp, color = JarTextSecondary.copy(alpha = 0.4f))
-                            .padding(12.dp),
-                        decorationBox = { innerTextField ->
-                            if (payloadText.isEmpty()) {
-                                Text(
-                                    text = "what do you want to send?",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = JarTextSecondary,
-                                )
-                            }
-                            innerTextField()
-                        },
-                    )
-                    Text(
-                        text = "$payloadBytes / $maxPayloadBytes bytes",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JarTextSecondary,
-                    )
-                    JarProtocolAndRateSelector(
-                        protocol = protocol,
-                        onProtocolChange = onProtocolChange,
-                        symbolRate = symbolRate,
-                        onSymbolRateChange = onSymbolRateChange,
-                        enabled = idleEquivalent,
-                    )
-                    JarFlowRow(label = "send it out", enabled = canCatch, onClick = onCatch)
-                }
+                JarCatchExpanded(
+                    payloadText = payloadText,
+                    onPayloadTextChange = onPayloadTextChange,
+                    payloadBytes = payloadBytes,
+                    maxPayloadBytes = maxPayloadBytes,
+                    protocol = protocol,
+                    onProtocolChange = onProtocolChange,
+                    symbolRate = symbolRate,
+                    onSymbolRateChange = onSymbolRateChange,
+                    enabled = idleEquivalent,
+                    canCatch = canCatch,
+                    onCatch = onCatch,
+                )
             }
         }
 
-        JarFlowRow(label = lookLabel, enabled = canToggleLook, onClick = onToggleLook)
+        if (status is ModemStatus.Listening) {
+            JarListeningCard(status = status, onStop = onToggleLook)
+        } else {
+            JarFlowRow(
+                label = "look for fireflies",
+                accent = FireflyReceived,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                enabled = canToggleLook,
+                onClick = onToggleLook,
+            )
+        }
 
         if (micPermissionDenied) {
             Text(
                 text = "needs the microphone to look for fireflies.",
-                style = MaterialTheme.typography.bodyLarge,
+                style = JarType.Body,
                 color = JarTextSecondary,
             )
         }
@@ -519,30 +579,139 @@ private fun JarModemFlowContent(
     }
 }
 
-/** One tappable jar-flow row — [JarTextPrimary]/[JarTextSecondary] equivalent of this file's own
- *  technical [ActionRow]. */
+/** One tappable jar-flow row (DESIGN_SPEC.md §5 1d/1e screen titles doubling as this app's
+ *  single-screen entry point — no separate navigation exists, so the row IS the title). [fill]/
+ *  [border] are the module's own accent-tinted tokens ([JarActionCatchFill]/[JarActionLookFill]
+ *  and their border twins) — never a new inline color. */
 @Composable
-private fun JarFlowRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun JarFlowRow(label: String, accent: Color, fill: Color, border: Color, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .clip(RoundedCornerShape(8.dp))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(8.dp))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) JarTextPrimary else JarTextSecondary,
+            style = JarType.ActionTitle,
+            color = if (enabled) accent else JarTextTertiary,
         )
     }
 }
 
 /**
+ * DESIGN_SPEC.md §5 1d — the expanded "catch a firefly" flow: a small jar preview, the payload
+ * field, the (preserved, restyled) protocol/symbol-rate selector, and the "send" button. Same
+ * fields [AcousticModemContent] defines for this module, per gate-13 — nothing here is a second
+ * implementation of them.
+ */
+@Composable
+private fun JarCatchExpanded(
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    payloadBytes: Int,
+    maxPayloadBytes: Int,
+    protocol: NightjarAcoustics.Protocol,
+    onProtocolChange: (NightjarAcoustics.Protocol) -> Unit,
+    symbolRate: NightjarAcoustics.SymbolRate,
+    onSymbolRateChange: (NightjarAcoustics.SymbolRate) -> Unit,
+    enabled: Boolean,
+    canCatch: Boolean,
+    onCatch: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            JarGlyph(
+                module = Module.ACOUSTIC_MODEM,
+                fireflies = listOf(FireflyVisual(id = 10, color = FireflyCreated)),
+                modifier = Modifier.size(width = 80.dp, height = 96.dp),
+            )
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(text = "your message", style = JarType.SectionLabel, color = JarTextTertiary)
+            BasicTextField(
+                value = payloadText,
+                onValueChange = onPayloadTextChange,
+                singleLine = true,
+                enabled = enabled,
+                textStyle = JarType.Body.copy(color = JarTextPrimary),
+                cursorBrush = SolidColor(JarTextPrimary),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(JarCardFill)
+                    .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                    .padding(12.dp),
+                decorationBox = { innerTextField ->
+                    if (payloadText.isEmpty()) {
+                        Text(text = "what do you want to send?", style = JarType.Body, color = JarTextTertiary)
+                    }
+                    innerTextField()
+                },
+            )
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                Text(
+                    text = "$payloadBytes / $maxPayloadBytes bytes",
+                    style = JarType.MetaLabel,
+                    color = JarTextTertiary,
+                )
+            }
+        }
+
+        JarProtocolAndRateSelector(
+            protocol = protocol,
+            onProtocolChange = onProtocolChange,
+            symbolRate = symbolRate,
+            onSymbolRateChange = onSymbolRateChange,
+            enabled = enabled,
+        )
+
+        JarSendButton(enabled = canCatch, onClick = onCatch)
+    }
+}
+
+/** DESIGN_SPEC.md §5 1d's gold gradient "send" button — the gradient/border alphas are derived
+ *  from [FireflyCreated] via `.copy(alpha = …)`, never a new named color. */
+@Composable
+private fun JarSendButton(enabled: Boolean, onClick: () -> Unit) {
+    val strength = if (enabled) 1f else 0.4f
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        FireflyCreated.copy(alpha = 0.15f * strength),
+                        FireflyCreated.copy(alpha = 0.08f * strength),
+                    ),
+                ),
+            )
+            .border(width = 1.dp, color = FireflyCreated.copy(alpha = 0.25f * strength), shape = RoundedCornerShape(12.dp))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(text = "send", style = JarType.ButtonLabel, color = FireflyCreated.copy(alpha = strength))
+        Text(text = "plays sound from speaker", style = JarType.Footer, color = JarTextSecondary)
+    }
+}
+
+/**
  * Jar-palette equivalent of this file's own technical [ChannelSettingsBlock] — same
- * protocol/symbol-rate fields and [protocolLabel]/[symbolRateLabel] copy (screen-flow.md § Screen
- * 7: "same fields Screen 2/4/5 already define for this module"), just re-colored for the jar
- * shell and with its mismatch note softened into jar voice.
+ * protocol/symbol-rate fields and [protocolLabel]/[symbolRateLabel] copy, just re-colored for the
+ * jar shell and with its mismatch note softened into jar voice. Not part of DESIGN_SPEC.md's 1d
+ * mockup (which has no home for this control) — preserved per this task's own instruction to keep
+ * existing controls the spec's layout doesn't show, restyled rather than deleted.
  */
 @Composable
 private fun JarProtocolAndRateSelector(
@@ -554,7 +723,7 @@ private fun JarProtocolAndRateSelector(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = "protocol", style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+            Text(text = "protocol", style = JarType.SectionLabel, color = JarTextTertiary)
             NightjarAcoustics.Protocol.entries.forEach { option ->
                 JarOptionRow(
                     label = protocolLabel(option),
@@ -565,7 +734,7 @@ private fun JarProtocolAndRateSelector(
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = "symbol rate", style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+            Text(text = "symbol rate", style = JarType.SectionLabel, color = JarTextTertiary)
             NightjarAcoustics.SymbolRate.entries.forEach { option ->
                 JarOptionRow(
                     label = symbolRateLabel(option),
@@ -577,7 +746,7 @@ private fun JarProtocolAndRateSelector(
         }
         Text(
             text = "both phones need to match here, or the other one won't see your light.",
-            style = MaterialTheme.typography.labelSmall,
+            style = JarType.Footer,
             color = JarTextSecondary,
         )
     }
@@ -595,8 +764,8 @@ private fun JarOptionRow(label: String, selected: Boolean, enabled: Boolean, onC
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) JarTextPrimary else JarTextSecondary,
+            style = JarType.Body,
+            color = if (selected) JarTextPrimary else JarTextTertiary,
         )
     }
 }
@@ -604,74 +773,151 @@ private fun JarOptionRow(label: String, selected: Boolean, enabled: Boolean, onC
 /**
  * Jar-palette, jar-copy twin of this file's own technical [StatusBlock]. [catchResultMessage]
  * (set by [jarCatchFlow] the moment a catch round-trip completes — [ModemStatus] itself has no
- * persisted "encode succeeded" state, unlike e.g. `ImageStegoScreen`'s `Embedded`) renders in the
- * one idle-equivalent slot the technical screen leaves silent (this file's "no success color,
- * silence is success" rule stays true for the *technical* screen; the jar shell's whole point is
- * a warmer, narrated voice — screen-flow.md's copy table gives "you caught one — N bytes" as
- * exactly this state's mapped phrase). [ModemStatus.Importing]/[ModemStatus.ImportFailed] can
- * never actually occur here (this flow has no import affordance — "look for fireflies" is listen-
- * only, screen-flow.md § Screen 7), but [ModemStatus] is sealed so the `when` still names them.
+ * persisted "encode succeeded" state, unlike e.g. `ImageStegoScreen`'s `Embedded`) renders gold —
+ * firefly-jar-identity.md's doctrine reversal explicitly allows a success color here, unlike this
+ * file's own technical screen. [ModemStatus.Listening] is handled by [JarListeningCard] one level
+ * up, not here, so it's `Unit` in this `when`. [ModemStatus.Importing]/[ModemStatus.ImportFailed]
+ * can never actually occur in this flow (no import affordance — "look for fireflies" is listen-
+ * only), but [ModemStatus] is sealed so the `when` still names them.
  */
 @Composable
 private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?) {
     when (status) {
         is ModemStatus.Idle -> if (catchResultMessage != null) {
-            Text(text = catchResultMessage, style = MaterialTheme.typography.bodyLarge, color = JarTextPrimary)
+            Text(text = catchResultMessage, style = JarType.SectionLabel, color = FireflyCreated)
+        } else {
+            Text(text = "ready to catch", style = JarType.Footer, color = JarWatchingDim)
         }
         is ModemStatus.Encoding -> JarStatusWord("warming up the light")
         is ModemStatus.Transmitting -> JarStatusWord("sending the glow", color = FireflyCreated)
-        is ModemStatus.Listening -> JarListeningBlock(status)
+        is ModemStatus.Listening -> Unit
         is ModemStatus.Importing -> Unit
         is ModemStatus.Decoding -> JarStatusWord("reading the light")
-        is ModemStatus.DecodedSuccess -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = status.text, style = MaterialTheme.typography.bodyLarge, color = JarTextPrimary)
-            if (status.correctedByteErrors > 0) {
-                val plural = if (status.correctedByteErrors == 1) "" else "s"
-                Text(
-                    text = "${status.correctedByteErrors} byte$plural corrected",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = JarTextSecondary,
-                )
-            }
-        }
+        is ModemStatus.DecodedSuccess -> JarCatchResultCard(status)
         is ModemStatus.DecodedFailure -> Text(
             text = jarFailureMessage(status.reason),
-            style = MaterialTheme.typography.bodyLarge,
+            style = JarType.Body,
             color = JarTextSecondary,
         )
         is ModemStatus.ImportFailed -> Unit
+        is ModemStatus.ListenFailed -> Text(
+            text = status.message,
+            style = JarType.Body,
+            color = JarTextSecondary,
+        )
     }
 }
 
 @Composable
 private fun JarStatusWord(word: String, color: Color = JarTextSecondary) {
-    Text(text = word, style = MaterialTheme.typography.labelLarge, color = color)
+    Text(text = word, style = JarType.SectionLabel, color = color)
+}
+
+/** DESIGN_SPEC.md §5 1e's "you spotted one" result card — reuses [JarActionLookFill]/
+ *  [JarActionLookBorder] rather than a new token, same cyan the listening card itself uses. The
+ *  byte count and correction count both always render (the mockup's own example, "22 bytes · 0
+ *  corrected", shows the zero case rather than hiding it). */
+@Composable
+private fun JarCatchResultCard(status: ModemStatus.DecodedSuccess) {
+    val bytes = status.text.encodeToByteArray().size
+    val plural = if (status.correctedByteErrors == 1) "" else "s"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(JarActionLookFill)
+            .border(width = 1.dp, color = JarActionLookBorder, shape = RoundedCornerShape(10.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(text = "you spotted one", style = JarType.SectionLabel, color = FireflyReceived)
+        Text(text = status.text, style = JarType.Body, color = JarTextPrimary)
+        Text(
+            text = "$bytes bytes · ${status.correctedByteErrors} byte$plural corrected",
+            style = JarType.MetaLabel,
+            color = JarTextTertiary,
+        )
+    }
 }
 
 /**
- * Jar-palette twin of this file's own technical [ListeningBlock]. `levelDb` is remapped from
- * dBFS ([SILENCE_FLOOR_DB]..0) onto the same plain 0-100 "strength" convention the watching jar
- * (detector) already uses for its confidence readout, rather than surfacing a raw dB number —
- * the jar shell's whole premise is staying in plain, undisguised-technical language.
+ * DESIGN_SPEC.md §5 1e — the cyan listening card: a small jar preview, the "listening"/countdown
+ * row, a real level meter (never the mockup's sine-wave placeholder, §4.8 — [status.levelDb] is
+ * the actual captured level), and the "stop" button. Jar-palette twin of this file's own
+ * technical [ListeningBlock]; `levelDb` is remapped from dBFS ([SILENCE_FLOOR_DB]..0) onto the
+ * same plain 0-100 "strength" convention the watching jar (detector) already uses for its
+ * confidence readout, rather than surfacing a raw dB number.
  */
 @Composable
-private fun JarListeningBlock(status: ModemStatus.Listening) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        JarStatusWord("looking for fireflies", color = FireflyReceived)
+private fun JarListeningCard(status: ModemStatus.Listening, onStop: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(JarActionLookFill)
+            .border(width = 1.dp, color = JarActionLookBorder, shape = RoundedCornerShape(12.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            JarGlyph(
+                module = Module.ACOUSTIC_MODEM,
+                fireflies = listOf(FireflyVisual(id = 11, color = FireflyReceived)),
+                modifier = Modifier.size(width = 80.dp, height = 96.dp),
+            )
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(text = "listening", style = JarType.SectionLabel, color = FireflyReceived)
+            val remaining = status.remainingSeconds.roundToInt().coerceAtLeast(0)
+            Text(text = "${remaining}s left", style = JarType.MetaLabel, color = JarTextSecondary)
+        }
+
         val glowStrength = status.levelDb?.let { db ->
             (((db - SILENCE_FLOOR_DB) / -SILENCE_FLOOR_DB) * 100).roundToInt().coerceIn(0, 100)
         }
-        Text(
-            text = glowStrength?.let { "glow strength $it" } ?: "waiting for a glow to start",
-            style = MaterialTheme.typography.labelSmall,
-            color = JarTextSecondary,
-        )
-        val remaining = status.remainingSeconds.roundToInt().coerceAtLeast(0)
-        Text(
-            text = "${remaining}s left to spot one",
-            style = MaterialTheme.typography.labelSmall,
-            color = JarTextSecondary,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(text = "glow strength", style = JarType.MetaLabel, color = JarTextTertiary)
+                Text(
+                    text = glowStrength?.toString() ?: "waiting",
+                    style = JarType.MetaLabel,
+                    color = JarTextTertiary,
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(JarMeterTrack),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction = (glowStrength ?: 0) / 100f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(FireflyReceived.copy(alpha = 0.25f), FireflyReceived),
+                            ),
+                        ),
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(FireflyReceived.copy(alpha = 0.10f))
+                .border(width = 1.dp, color = FireflyReceived.copy(alpha = 0.20f), shape = RoundedCornerShape(12.dp))
+                .clickable(onClick = onStop)
+                .padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(text = "stop", style = JarType.ButtonLabel, color = FireflyReceived)
+        }
     }
 }
 
@@ -749,7 +995,8 @@ fun AcousticModemContent(
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
         status is ModemStatus.DecodedFailure ||
-        status is ModemStatus.ImportFailed
+        status is ModemStatus.ImportFailed ||
+        status is ModemStatus.ListenFailed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canTransmit = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
     val canImport = idleEquivalent
@@ -1027,6 +1274,13 @@ private fun StatusBlock(status: ModemStatus) {
             style = MaterialTheme.typography.bodyLarge,
             color = TextSecondary,
         )
+        // mic-2: mic failed to initialize or startRecording() threw — same informational
+        // treatment as ImportFailed/DecodedFailure, not destructive-red.
+        is ModemStatus.ListenFailed -> Text(
+            text = status.message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
     }
 }
 
@@ -1152,8 +1406,34 @@ class AcousticModemController(
     var fileActionBusyLabel: String? by mutableStateOf(null)
         private set
 
+    /**
+     * Task #19 (gate-17), Stage B: the last successfully-transmitted clip. [ModemStatus] carries
+     * no PCM of its own, and the `pcm` [transmit] encodes is a coroutine-local that's gone by the
+     * time `jarCatchFlow`'s separate `LaunchedEffect(status::class)` reacts to the
+     * Transmitting→Idle edge and wants to persist it alongside the CREATED [FireflyRecord]. One
+     * clip, overwritten on every transmit -- not a history buffer.
+     */
+    var lastTransmittedPcm: PcmAudio? by mutableStateOf(null)
+        private set
+
+    /**
+     * Task #19 (gate-17), Stage B: the audio [carrier.decode] most recently ran against -- from
+     * either a live [capturePcm] mic window ([startListening]) or an [importAndDecode] file pick,
+     * whichever path most recently produced the [ModemStatus.DecodedSuccess] that
+     * `jarCatchFlow`'s effect reacts to. Same retain-because-the-local-goes-out-of-scope need as
+     * [lastTransmittedPcm]; kept path-agnostic (updated by both callers) so a
+     * decode-success-via-import never gets tagged with a stale clip left over from an earlier
+     * live listen. One clip, overwritten on every decode attempt -- not a history buffer.
+     */
+    var lastDecodedPcm: PcmAudio? by mutableStateOf(null)
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listening = AtomicBoolean(false)
+
+    /** [transmit]'s currently in-flight job, if any — tracked so [stopForBackground] can cancel
+     *  just the transmit playback without tearing down [scope] itself (mic-5). */
+    private var transmitJob: Job? = null
 
     /** True while idle, or holding a terminal decode result — the shared "not busy" gate for
      * [transmit]/[saveToDevice]/[shareFromDevice], all of which run their own one-shot [encode]. */
@@ -1163,7 +1443,7 @@ class AcousticModemController(
     /** Encode [payloadText] and play it over the speaker. No-op while busy. */
     fun transmit(payloadText: String) {
         if (!isIdleEquivalent()) return
-        scope.launch {
+        transmitJob = scope.launch {
             status = ModemStatus.Encoding
             val pcm = try {
                 carrier.encode(payloadText.encodeToByteArray())
@@ -1174,6 +1454,7 @@ class AcousticModemController(
             }
             DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.ENCODE, success = true)
             status = ModemStatus.Transmitting
+            lastTransmittedPcm = pcm
             playPcm(pcm)
             status = ModemStatus.Idle
         }
@@ -1328,7 +1609,8 @@ class AcousticModemController(
             // does by chance. Padding with trailing silence is safe: decode() locates every
             // window from the header's own declared length, never from the buffer's total size.
             val pcm = padToFrameBoundary(imported.samples)
-            status = when (val result = carrier.decode(pcm)) {
+            lastDecodedPcm = pcm
+            status = when (val result = decodeCancellable(carrier, pcm)) {
                 is DecodeResult.Success -> {
                     DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, success = true)
                     ModemStatus.DecodedSuccess(result.payload.decodeToString(), result.correctedByteErrors)
@@ -1345,19 +1627,33 @@ class AcousticModemController(
     fun startListening() {
         if (status is ModemStatus.Listening) return
         listening.set(true)
+        // mic-6 fix: status flips to Listening synchronously, before scope.launch, instead of as
+        // the first line inside the launched coroutine. Previously there was a window between the
+        // `listening` flag going true and `status` actually reading Listening where a double-tap
+        // could slip past this method's own `if (status is Listening) return` guard above and open
+        // a second concurrent AudioRecord. Mirrors DetectorController.startListening()'s
+        // `isListening` flag, which already does this correctly. levelDb starts null (nothing
+        // captured yet); remainingSeconds starts at the full window so the countdown is visible
+        // the instant "listen" is tapped, before the first AudioRecord.read() chunk has even
+        // returned (Task #27).
+        status = ModemStatus.Listening(levelDb = null, remainingSeconds = MAX_LISTEN_SECONDS)
         scope.launch {
-            // levelDb starts null (nothing captured yet); remainingSeconds starts at the full
-            // window so the countdown is visible the instant "listen" is tapped, before the
-            // first AudioRecord.read() chunk has even returned (Task #27).
-            status = ModemStatus.Listening(levelDb = null, remainingSeconds = MAX_LISTEN_SECONDS)
             val captureResult = try {
                 capturePcm()
             } catch (permissionRevoked: SecurityException) {
                 status = ModemStatus.Idle
                 return@launch
+            } catch (micBusy: IllegalStateException) {
+                // mic-2 fix: MicCapture.openBestAudioRecord() returned null, or startRecording()
+                // itself threw once initialized — either way, surface it instead of crashing (this
+                // used to be an uncaught IllegalStateException from openBestAudioRecord()'s last
+                // resort `error(...)` call).
+                status = ModemStatus.ListenFailed("the microphone is busy — a call or another app is using it.")
+                return@launch
             }
+            lastDecodedPcm = captureResult.pcm
             status = ModemStatus.Decoding
-            status = when (val result = carrier.decode(captureResult.pcm)) {
+            status = when (val result = decodeCancellable(carrier, captureResult.pcm)) {
                 is DecodeResult.Success -> {
                     DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, success = true)
                     ModemStatus.DecodedSuccess(result.payload.decodeToString(), result.correctedByteErrors)
@@ -1373,6 +1669,27 @@ class AcousticModemController(
     /** Ends the capture window early; the in-flight coroutine finishes the decode itself. */
     fun stopListening() {
         listening.set(false)
+    }
+
+    /**
+     * mic-5 fix: stops in-flight listen capture and/or transmit playback when the app is
+     * backgrounded (`LifecycleEventEffect(Lifecycle.Event.ON_STOP)` in every composable that owns
+     * this controller). Distinct from [dispose]: this leaves [scope] alive, so the controller is
+     * still usable once the app returns to the foreground — it only tears down whichever op is
+     * currently running. [stopListening]'s existing graceful stop (`listening.set(false)`, letting
+     * the in-flight coroutine exit its own read loop and finish the decode) already covers the
+     * listen case; transmit has no equivalent cooperative flag — [playPcm] is a single blocking
+     * `delay()` for the tone's playback duration — so cancelling [transmitJob] is what actually
+     * interrupts it (cancellation propagates through that `delay()` call, running `playPcm`'s own
+     * `finally { audioTrack.stop(); audioTrack.release() }`).
+     */
+    fun stopForBackground() {
+        stopListening()
+        val job = transmitJob
+        if (job != null && job.isActive) {
+            job.cancel()
+            status = ModemStatus.Idle
+        }
     }
 
     /** Cancels any in-flight transmit/listen work. Call from `DisposableEffect.onDispose`. */
@@ -1428,8 +1745,13 @@ class AcousticModemController(
         )
         val recordBufferBytes = if (minBufBytes > 0) minBufBytes * 4 else NightjarAcoustics.FRAME_SAMPLES * 8
 
-        val audioRecord = openBestAudioRecord(recordBufferBytes)
-        val disabledEffects = disablePlatformAudioEffects(audioRecord.audioSessionId)
+        // mic-2 fix: MicCapture.openBestAudioRecord() returns null (never throws) when every
+        // AudioSource tier fails to initialize (mic held by a call or another app). That used to
+        // be an uncaught IllegalStateException thrown straight out of a private `error(...)` last
+        // resort; now it's thrown once, here, at a boundary startListening()'s own try/catch
+        // already has a handler for (ModemStatus.ListenFailed) instead of crashing the app.
+        val audioRecord = MicCapture.openBestAudioRecord(appContext, recordBufferBytes)
+            ?: throw IllegalStateException("AudioRecord failed to initialize — mic busy or unavailable")
 
         val maxSamples = (MAX_LISTEN_SECONDS * NightjarAcoustics.SAMPLE_RATE_HZ).toInt()
         val out = ShortArray(maxSamples)
@@ -1439,7 +1761,14 @@ class AcousticModemController(
         // readout, applied here so the input-level/countdown UI recomposes a few times a second
         // instead of on every ~21ms analysis frame (Task #27).
         val chunk = ShortArray(NightjarAcoustics.FRAME_SAMPLES * LEVEL_UPDATE_CHUNK_FRAMES)
+        // mic-8 fix: disablePlatformAudioEffects() now runs from inside this try — right after the
+        // AudioRecord it operates on is already in hand — instead of before it. A throwing OEM
+        // effect factory used to be able to skip straight past audioRecord.release() below and
+        // leak the record; disabledEffects simply stays empty (nothing to release) if the disable
+        // call itself throws.
+        var disabledEffects: List<AudioEffect> = emptyList()
         try {
+            disabledEffects = MicCapture.disablePlatformAudioEffects(audioRecord.audioSessionId)
             audioRecord.startRecording()
             while (listening.get() && written < maxSamples) {
                 val n = audioRecord.read(chunk, 0, chunk.size)
@@ -1450,7 +1779,12 @@ class AcousticModemController(
                 publishListeningReadout(chunk, n, written, maxSamples)
             }
         } finally {
-            audioRecord.stop()
+            // mic-1 precedent applied here too: only call stop() if the record actually reached
+            // RECORDSTATE_RECORDING — calling it otherwise (e.g. startRecording() itself threw)
+            // throws its own IllegalStateException and would mask whatever failure got us here.
+            if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord.stop()
+            }
             audioRecord.release()
             disabledEffects.forEach { it.release() }
         }
@@ -1471,113 +1805,37 @@ class AcousticModemController(
         status = ModemStatus.Listening(levelDb = dbfsLevel(chunk, n), remainingSeconds = remainingSeconds)
     }
 
-    /**
-     * Task #26: picks a capture source that avoids platform speech-tuned DSP (noise
-     * suppression / AGC / echo cancellation), which is well documented to distort or
-     * destroy pure-tone FSK/PSK signals like this modem's. Tiered fallback, each tier
-     * verified by actually constructing the [AudioRecord] and checking
-     * [AudioRecord.STATE_INITIALIZED] rather than trusting the source constant alone:
-     *
-     * 1. [MediaRecorder.AudioSource.UNPROCESSED] — raw samples, no DSP at all — only
-     *    attempted when [AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED] reports
-     *    device support.
-     * 2. [MediaRecorder.AudioSource.VOICE_RECOGNITION] — much more broadly supported,
-     *    also bypasses most speech-tuned processing (ggwave, the real prior art this
-     *    design follows, uses the same workaround).
-     * 3. [MediaRecorder.AudioSource.MIC] — last resort; logs a warning since this source
-     *    is the one most likely to run the phone's call/voice DSP over the signal.
-     */
-    private fun openBestAudioRecord(recordBufferBytes: Int): AudioRecord {
-        val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        val unprocessedSupported = audioManager
-            ?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
+    // mic-1/mic-2/mic-3/mic-8: AudioRecord source-fallback + platform-DSP-effect suppression
+    // moved out to the shared dev.herakles.nightjar.MicCapture helper (used by DetectorController
+    // too) — see capturePcm() above and MicCapture.kt's own KDoc.
+}
 
-        if (unprocessedSupported) {
-            buildAudioRecord(MediaRecorder.AudioSource.UNPROCESSED, recordBufferBytes)?.let {
-                Log.i(TAG, "capture: using AudioSource.UNPROCESSED")
-                return it
-            }
-        }
-        buildAudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, recordBufferBytes)?.let {
-            Log.i(TAG, "capture: using AudioSource.VOICE_RECOGNITION")
-            return it
-        }
-        Log.w(
-            TAG,
-            "capture: falling back to AudioSource.MIC — UNPROCESSED/VOICE_RECOGNITION " +
-                "unavailable on this device; platform speech DSP (noise suppression / AGC / " +
-                "echo cancellation) may distort the FSK/PSK tones",
-        )
-        return buildAudioRecord(MediaRecorder.AudioSource.MIC, recordBufferBytes)
-            ?: error("AudioRecord failed to initialize on AudioSource.MIC")
-    }
-
-    /** Constructs an [AudioRecord] on [source]; returns null (never throws) if unsupported. */
-    private fun buildAudioRecord(source: Int, recordBufferBytes: Int): AudioRecord? {
-        return try {
-            val record = AudioRecord.Builder()
-                .setAudioSource(source)
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(NightjarAcoustics.SAMPLE_RATE_HZ)
-                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(recordBufferBytes)
-                .build()
-            if (record.state == AudioRecord.STATE_INITIALIZED) {
-                record
-            } else {
-                record.release()
-                null
-            }
-        } catch (unsupported: UnsupportedOperationException) {
-            null
-        } catch (invalid: IllegalArgumentException) {
-            null
-        }
-    }
-
-    /**
-     * Task #26 belt-and-suspenders: some OEMs apply NoiseSuppressor/AGC/AEC even on
-     * VOICE_RECOGNITION (or, rarely, UNPROCESSED), so the source choice above isn't
-     * sufficient on its own. Explicitly disables each effect if present on this capture
-     * session. Callers must `.release()` the returned list once capture stops.
-     */
-    private fun disablePlatformAudioEffects(sessionId: Int): List<AudioEffect> {
-        val disabled = mutableListOf<AudioEffect>()
-        disableEffectIfPresent("NoiseSuppressor", NoiseSuppressor.isAvailable(), disabled) {
-            NoiseSuppressor.create(sessionId)
-        }
-        disableEffectIfPresent("AutomaticGainControl", AutomaticGainControl.isAvailable(), disabled) {
-            AutomaticGainControl.create(sessionId)
-        }
-        disableEffectIfPresent("AcousticEchoCanceler", AcousticEchoCanceler.isAvailable(), disabled) {
-            AcousticEchoCanceler.create(sessionId)
-        }
-        return disabled
-    }
-
-    /** Logs availability/creation/disable outcome per effect type so field reports are diagnosable. */
-    private inline fun disableEffectIfPresent(
-        name: String,
-        availableOnDevice: Boolean,
-        disabled: MutableList<AudioEffect>,
-        create: () -> AudioEffect?,
-    ) {
-        if (!availableOnDevice) {
-            Log.i(TAG, "effects: $name not available on this device")
-            return
-        }
-        val effect = create()
-        if (effect == null) {
-            Log.i(TAG, "effects: $name available but create() returned null for this session")
-            return
-        }
-        effect.setEnabled(false)
-        disabled += effect
-        Log.i(TAG, "effects: $name found on this session, disabled")
+/**
+ * Runs [carrier].decode([pcm]) with cooperative cancellation when possible, in place of a bare
+ * `carrier.decode(pcm)` call. [AcousticCarrier.decode]'s cost is linear in `pcm`'s length (that
+ * class's own KDoc "Cost" note) — cheap for a bounded live-listen capture, but on a large imported
+ * file (up to [MAX_IMPORT_FILE_BYTES], ~11 minutes at 48kHz mono) a transmission-free buffer used
+ * to scan the *whole* thing with no way to actually cancel: `decode()` is a single synchronous,
+ * non-`suspend` call, so backing out of the screen (cancelling [AcousticModemController]'s `scope`)
+ * had no effect on a search already in flight, and `startListening()`/`importAndDecode()`'s own
+ * busy-gate left transmit/save/share/import/listen all disabled for however long it took.
+ *
+ * [AcousticCarrier] exposes a `decode(carrier, checkCancelled)` overload for exactly this, but it
+ * isn't part of [CovertCarrier] — this screen's controllers are otherwise deliberately
+ * carrier-agnostic (see [AcousticModemController]'s own KDoc), and widening the shared interface
+ * would also require updating every other [CovertCarrier] implementation (`AudioStegoCarrier`,
+ * `ImageStegoCarrier`) for a change only this carrier's search actually needs. This function is
+ * the one narrow, documented exception: a runtime type check reaches the cancellable overload when
+ * [carrier] is actually the concrete [AcousticCarrier] this screen always constructs (via
+ * `carrierFactory`/[jarCatchFlow]'s own direct construction); any other [CovertCarrier] — e.g. a
+ * test fake — just runs the plain, uncancellable [CovertCarrier.decode].
+ */
+private suspend fun decodeCancellable(carrier: CovertCarrier<PcmAudio>, pcm: PcmAudio): DecodeResult {
+    val ctx = coroutineContext
+    return if (carrier is AcousticCarrier) {
+        carrier.decode(pcm) { ctx.ensureActive() }
+    } else {
+        carrier.decode(pcm)
     }
 }
 
@@ -1612,7 +1870,7 @@ private const val CODEC_TIMEOUT_US = 10_000L
  * read/parse failure: unreadable Uri, corrupt/unsupported container, no audio track, or a WAV
  * whose `fmt ` isn't PCM16 ([WavFile.decodePcm16]'s own failure contract).
  */
-private fun readAudioFile(context: Context, uri: Uri): ImportedAudio? =
+private suspend fun readAudioFile(context: Context, uri: Uri): ImportedAudio? =
     if (sniffIsWav(context, uri)) {
         val bytes = readBoundedBytes(context, uri, MAX_IMPORT_FILE_BYTES) ?: return null
         val parsed = WavFile.decodePcm16(bytes) ?: return null
@@ -1679,7 +1937,7 @@ private fun readBoundedBytes(context: Context, uri: Uri, maxBytes: Int): ByteArr
  *
  * Returns `null` on any failure to open/demux/decode the file, or if it has no audio track.
  */
-private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
+private suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
     val extractor = MediaExtractor()
     return try {
         extractor.setDataSource(context, uri, null)
@@ -1711,6 +1969,14 @@ private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudi
         null
     } catch (invalid: IllegalArgumentException) {
         null
+    } catch (cancelled: CancellationException) {
+        // mic-9: decodeSelectedTrack()'s drain loop now checks coroutineContext.ensureActive()
+        // per iteration, so backing out of the app mid-import throws this here. It must NOT be
+        // swallowed by the broad `catch (codecFailure: Exception)` below (CancellationException
+        // is a RuntimeException) — that would break structured cancellation and leave the
+        // coroutine thinking the import "completed" with a null result instead of actually
+        // stopping.
+        throw cancelled
     } catch (codecFailure: Exception) {
         // MediaCodec/OEM decoder implementations are documented to throw a wide variety of
         // unchecked exceptions (IllegalStateException, MediaCodec.CodecException, ...) on a
@@ -1729,8 +1995,13 @@ private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudi
  * [IMPORT_DECODE_TIMEOUT_MS] wall-clock time so a stalled decoder can't hang forever. Output
  * bytes are the platform decoder's native PCM16 little-endian samples (Android's audio decoders
  * emit `ENCODING_PCM_16BIT` by default).
+ *
+ * mic-9: also checks [coroutineContext] for cancellation once per iteration — before this fix,
+ * backing out of the import screen mid-decode (which cancels [AcousticModemController]'s `scope`,
+ * e.g. via [AcousticModemController.dispose]) had no effect on this loop; it would keep polling
+ * the codec for up to [IMPORT_DECODE_TIMEOUT_MS] (30s) after the operator had already left.
  */
-private fun decodeSelectedTrack(
+private suspend fun decodeSelectedTrack(
     extractor: MediaExtractor,
     format: MediaFormat,
     mime: String,
@@ -1751,6 +2022,7 @@ private fun decodeSelectedTrack(
         val deadlineMs = System.currentTimeMillis() + IMPORT_DECODE_TIMEOUT_MS
 
         while (!sawOutputEos) {
+            coroutineContext.ensureActive()
             if (System.currentTimeMillis() > deadlineMs) return null
 
             if (!sawInputEos) {

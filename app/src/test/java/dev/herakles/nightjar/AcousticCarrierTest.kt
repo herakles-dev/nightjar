@@ -4,6 +4,8 @@ import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
+import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -191,13 +193,104 @@ class AcousticCarrierTest {
     }
 
     @Test
-    fun `decode returns NO_PAYLOAD_FOUND when leading silence exceeds the bounded search range`() {
+    fun `round trip recovers payload when the transmission starts about 12s into a realistic 20s capture window`() {
+        // codec-M03: decode()'s coarse START-marker search used to be capped at a fixed
+        // MAX_START_SEARCH_SECONDS = 8.0, well under AcousticModemController's real up-to-20s
+        // listen window (MAX_LISTEN_SECONDS in AcousticModemScreen.kt) — a transmission that
+        // legitimately started later than 8s into a real two-phone capture (plausible manual
+        // coordination delay) would be reported NO_PAYLOAD_FOUND even though it was still well
+        // within the buffer decode() was handed. The search bound is now derived from the buffer's
+        // own length instead, so this must now succeed.
+        val carrier = AcousticCarrier(protocol, symbolRate)
+        val original = "started late in a long capture".toByteArray(Charsets.US_ASCII)
+        val pcm = carrier.encode(original)
+
+        val twelveSecondsInSamples = (12.0 * NightjarAcoustics.SAMPLE_RATE_HZ).toInt()
+        val leadingSilenceFrames = twelveSecondsInSamples / NightjarAcoustics.FRAME_SAMPLES
+        val leadingSilence = PcmAudio(NightjarAcoustics.FRAME_SAMPLES * leadingSilenceFrames)
+        val captured = leadingSilence + pcm
+
+        // A real 20s AudioRecord capture is frame-aligned to MAX_LISTEN_SECONDS * SAMPLE_RATE_HZ,
+        // not to whatever encode() happened to produce — pad the tail with trailing silence up to
+        // that same total length (itself already a whole number of FRAME_SAMPLES, same as every
+        // other fixture in this file) so this fixture matches the real transport's buffer shape
+        // rather than ending the instant the transmission does.
+        val twentySecondsInFrames = ((20.0 * NightjarAcoustics.SAMPLE_RATE_HZ) / NightjarAcoustics.FRAME_SAMPLES).toInt()
+        val totalFrames = twentySecondsInFrames
+        require(captured.size <= totalFrames * NightjarAcoustics.FRAME_SAMPLES) {
+            "test fixture's own content already exceeds a 20s window; shorten it"
+        }
+        val paddedCaptured = captured + PcmAudio(totalFrames * NightjarAcoustics.FRAME_SAMPLES - captured.size)
+
+        val elapsedMs = measureTimeMillis {
+            val success = assertSuccess(carrier.decode(paddedCaptured))
+            assertTrue(
+                "recovered payload must equal original despite a ~12s leading offset",
+                success.payload.contentEquals(original),
+            )
+        }
+        // The coarse search is one FFT per candidate frame (task #25's KDoc) over up to ~20s of
+        // buffer now, instead of the old fixed ~8s cap — assert it still finishes promptly rather
+        // than silently letting decode() become slow as a side effect of this fix.
+        assertTrue("decode() on a 20s buffer took ${elapsedMs}ms, expected well under 5s", elapsedMs < 5_000)
+    }
+
+    @Test
+    fun `decode's checkCancelled overload propagates a thrown cancellation instead of returning a result`() {
+        // codec-M03 follow-up: decode() is a single synchronous call with no suspension point of
+        // its own -- the coarse search's cost is linear in the carrier buffer's length (decode()'s
+        // own KDoc "Cost" note), so a long, transmission-free import (this app accepts files up to
+        // MAX_IMPORT_FILE_BYTES, ~11 minutes at 48kHz mono in AcousticModemScreen.kt) needs an
+        // actual way to stop mid-search when the operator backs out -- not a shorter fixed cap,
+        // which would just re-break late-starting transmissions in long imports the same way the
+        // old MAX_START_SEARCH_SECONDS cap did (see the "starts about 12s" test above). This test
+        // simulates a coroutine's `{ ctx.ensureActive() }` checkCancelled (AcousticModemScreen.kt's
+        // decodeCancellable) by throwing CancellationException directly, without a real coroutine.
+        val carrier = AcousticCarrier(protocol, symbolRate)
+        // 5000 frames of silence: comfortably longer than the ~6 candidate checks below need
+        // (checkCancelled fires every 64 candidates -- see decode()'s coarse-search loop), so if
+        // cancellation weren't propagating promptly this would instead keep scanning for dozens
+        // more calls and eventually return a NO_PAYLOAD_FOUND Failure.
+        val longSilence = PcmAudio(NightjarAcoustics.FRAME_SAMPLES * 5_000)
+        var calls = 0
+        val cancelAfterCalls = 5
+        var result: DecodeResult? = null
+
+        val thrown = try {
+            result = carrier.decode(longSilence) {
+                calls++
+                if (calls > cancelAfterCalls) throw CancellationException("test-triggered cancel")
+            }
+            null
+        } catch (cancelled: CancellationException) {
+            cancelled
+        }
+
+        assertTrue("a throwing checkCancelled must propagate out of decode(), not be swallowed", thrown != null)
+        assertNull("decode() must not still produce a result once checkCancelled has thrown", result)
+        assertEquals(
+            "checkCancelled should stop being invoked the moment it throws (throttled every 64 " +
+                "candidate frames, so the 6th call is the first where calls > cancelAfterCalls)",
+            cancelAfterCalls + 1,
+            calls,
+        )
+    }
+
+    @Test
+    fun `decode returns NO_PAYLOAD_FOUND when the only marker present sits too close to the buffer's end`() {
         val carrier = AcousticCarrier(protocol, symbolRate)
         val pcm = carrier.encode("too far to find".toByteArray(Charsets.US_ASCII))
-        // Comfortably past AcousticCarrier's bounded START search range (a few seconds' worth of
-        // frames) — the search must stay bounded (never scan the whole buffer) and fail cleanly.
-        val leadingSilence = PcmAudio(NightjarAcoustics.FRAME_SAMPLES * 500)
-        val captured = leadingSilence + pcm
+        // codec-M03: the coarse search's outer bound is no longer a fixed time constant — it's
+        // derived from the carrier buffer's own length, leaving room for at least
+        // NightjarAcoustics.MARKER_FRAMES more frames after any candidate (decode()'s KDoc step
+        // 1a). This fragment keeps only pcm's real START marker (bit-exact from the encoder, not
+        // a synthetic tone) and drops everything after it, so — however much leading silence
+        // precedes it — the marker's own frame position always sits past
+        // `totalFrames - 2 * markerFrames` and is correctly excluded from the search, exercising
+        // that remaining bound now that it's no longer also gated by a fixed number of seconds.
+        val markerOnly = pcm.copyOfRange(0, markerSamples)
+        val leadingSilence = PcmAudio(NightjarAcoustics.FRAME_SAMPLES * NightjarAcoustics.MARKER_FRAMES * 2)
+        val captured = leadingSilence + markerOnly
 
         val failure = assertFailure(carrier.decode(captured))
         assertEquals(DecodeFailure.NO_PAYLOAD_FOUND, failure.reason)

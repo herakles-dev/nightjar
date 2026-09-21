@@ -75,8 +75,16 @@ val FireflyCreated = Color(0xFFFFC857)
  *  event, seen through two skins. */
 val FireflyReceived = Color(0xFF39C5CF)
 
-/** The watching jar's passive, non-glowing treatment — it never creates fireflies. */
-val JarWatchingDim = Color(0xFF6B6690)
+/** The watching jar's passive, non-glowing treatment — it never creates fireflies, and the
+ *  dimmest text tier generally (footers, "ready to catch", "no fireflies yet").
+ *
+ *  Lightened from the design package's `#6B6690` to clear WCAG AA: at 7–8sp against the sky's
+ *  `#1E1548` horizon stop the original was 3.1:1, well under the 4.5:1 this surface's doctrine
+ *  holds itself to, and it was visibly hard to read on device. Hue and saturation are the
+ *  package's, untouched — only lightness moved. [JarGlassWatching]/[JarRadarSweep] keep the
+ *  original base: they're sub-25%-alpha decorative strokes, not text, and lightening them would
+ *  change how the watching jar reads. */
+val JarWatchingDim = Color(0xFF8581A5)
 
 /** Jar silhouette outline/glass — translucent (35% alpha baked in), unlike the
  *  technical screens' opaque 1px borders. */
@@ -98,3 +106,93 @@ val JarTextPrimary = Color(0xFFF5E6C8)
 /** Captions, the "long-press to open the workshop" hint, timestamps on the jar
  *  shelf/detail screens. Added for Task #7 (JarShelfScreen.kt), the first consumer. */
 val JarTextSecondary = Color(0xFF9B8FBF)
+
+// --- Cozy Pixel Night (design refresh) ---------------------------------------------
+// The "Firefly Redesign v2" design-team package, extracted to
+// sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md. Mostly an EXTENSION of the
+// block above rather than a replacement: FireflyCreated, FireflyReceived, JarTextPrimary,
+// JarTextSecondary, JarWatchingDim and JarGlassOutline all already carried the package's
+// values. What's genuinely new is the deeper four-stop sky, a third text tier, and the
+// per-jar tile tints.
+
+/** Night-sky gradient, top to bottom — four stops at 0% / 40% / 70% / 100%. Deeper at
+ *  the top and warmer at the horizon than the two-stop [JarBgDusk] → [JarBgHorizon] pair
+ *  it supersedes on the jar surface. */
+val JarSkyZenith = Color(0xFF060610)
+val JarSkyUpper = Color(0xFF0A0A22)
+val JarSkyLower = Color(0xFF141035)
+val JarSkyHorizon = Color(0xFF1E1548)
+
+/** Stop positions for the sky gradient, matching the package's
+ *  `linear-gradient(180deg, … 0%, … 40%, … 70%, … 100%)`. */
+val JarSkyStops = floatArrayOf(0f, 0.40f, 0.70f, 1f)
+
+/** Third text tier, between [JarTextSecondary] and [JarWatchingDim]: subtitles under
+ *  titles, section labels ("your fireflies"), tile status captions, byte counters. The
+ *  one text color the pre-refresh palette had no equivalent for.
+ *
+ *  Lightened from the design package's `#7B6FA0` for the same reason as [JarWatchingDim] —
+ *  3.7:1 against the horizon stop, and this tier carries the picker rows' unselected options,
+ *  which were the worst case on device: barely legible as options at all. */
+val JarTextTertiary = Color(0xFF897FAA)
+
+/** Opaque backing behind the jar's glass strokes, so the starfield doesn't show through
+ *  the jar's interior. */
+val JarBodyFill = Color(0xFF0A0A20)
+
+// Lid and wood tones. Lit jars get warm browns; the watching jar gets cool purples so
+// the "asleep" detector jar reads as distinct at a glance (DESIGN_SPEC.md § 1).
+val JarLidKnob = Color(0xFF6A4A30)
+val JarLidKnobStroke = Color(0xFF8A6A4A)
+val JarLidRim = Color(0xFF4A3520)
+val JarLidRimStroke = Color(0xFF6A4A30)
+val JarLidKnobDim = Color(0xFF3A2850)
+val JarLidKnobStrokeDim = Color(0xFF5A4A6A)
+val JarLidRimDim = Color(0xFF2A2040)
+val JarLidRimStrokeDim = Color(0xFF4A3A60)
+
+/** Jar glass outline at the three "fullness" alphas the package uses — a fuller jar gets
+ *  a fractionally brighter rim. Base hex is [JarGlassOutline]'s `#D9C9A3`. */
+val JarGlassFull = Color(0x30D9C9A3)
+val JarGlassPartial = Color(0x25D9C9A3)
+val JarGlassEmpty = Color(0x20D9C9A3)
+
+/** The watching jar's outline and radar sweep — cool gray-purple, never warm parchment. */
+val JarGlassWatching = Color(0x206B6690)
+val JarRadarSweep = Color(0x356B6690)
+
+/** Shelf-tile fills. The watching jar's tile sits one step darker than the rest. */
+val JarTileFill = Color(0x0AFFFFFF)
+val JarTileFillDim = Color(0x08FFFFFF)
+
+/** Shelf-tile borders, tinted by the jar's state color. The humming jar's is fainter
+ *  than the singing jar's because it has no fireflies yet. */
+val JarTileBorderCreated = Color(0x1FFFC857)
+val JarTileBorderCreatedFaint = Color(0x14FFC857)
+val JarTileBorderReceived = Color(0x1F39C5CF)
+val JarTileBorderWatching = Color(0x266B6690)
+
+/** Action-row fills and borders, by verb. Gold = catch/transmit, cyan = look/listen,
+ *  lavender = the framed jar's passive "check for hidden data". */
+val JarActionCatchFill = Color(0x14FFC857)
+val JarActionCatchBorder = Color(0x26FFC857)
+val JarActionLookFill = Color(0x0F39C5CF)
+val JarActionLookBorder = Color(0x1F39C5CF)
+val JarActionCheckFill = Color(0x0F9B8FBF)
+val JarActionCheckBorder = Color(0x1F9B8FBF)
+
+/** The firefly-detail message box — a touch fainter than the catch action row it sits
+ *  near, so the payload reads as content rather than as something tappable. */
+val JarMessageFill = Color(0x0FFFC857)
+val JarMessageBorder = Color(0x1AFFC857)
+
+/** Neutral card/chip surfaces — metadata mini-cards, unselected technique chips,
+ *  history rows, the level-meter track. */
+val JarCardFill = Color(0x08FFFFFF)
+val JarCardBorder = Color(0x0FFFFFFF)
+val JarHistoryRowFill = Color(0x05FFFFFF)
+val JarMeterTrack = Color(0x0FFFFFFF)
+
+/** The white specular highlights on the jar glass. Opacity is applied per-stroke at the
+ *  call site (0.03–0.12 depending on which reflection) rather than baked in here. */
+val JarGlassHighlight = Color(0xFFFFFFFF)

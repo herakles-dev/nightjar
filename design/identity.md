@@ -242,6 +242,29 @@ animation is available (not custom-built — it's the system's own swipe-preview
 No new violations were introduced by this task's own changes (the accent color, the
 icon, the documentation edits above).
 
+**Re-run 2026-09-21 (gate-9, gate-14 close-out): extended to Module 2 (audio
+steganography, `AudioStegoScreen.kt`) and every v3–v5 addition** — the original pass above
+predates all of them. Checked the same items against `AudioStegoScreen.kt` (including the
+v5 "check for hidden data" detector wiring and its `DETECTOR_CAVEAT`/`JAR_PEEK_CAVEAT`
+honesty lines), `CarrierInsightViews.kt` (the v5 difference/polarity views), and
+`ui/FullscreenImageViewer.kt` (the owner-requested fullscreen viewer, shared by both
+surfaces): no emoji, no ellipsis-suffixed status words, no "Got it!"-style affirmation (the
+one literal hit is this doc's own KDoc citation of the rule, not a violation), no
+`Brush`/gradient/blur, no card surfaces, no pure-white text, no mascot/carousel/"Powered
+by"/Discover-style section, no version badge. `FullscreenImageViewer.kt`'s two small
+`RoundedCornerShape` clips (a close glyph, a corner tap-affordance icon) are not cards and
+carry no shadow — outside what the checklist's "no glassmorphism/no drop-shadow" items were
+written to catch. Zero violations found; this closes gate-9's "anti-AI-tell checklist
+re-run against the new screen" for Module 2, which was never previously recorded as done
+(the 2026-08-03 pass above only covers the original four screens).
+
+**Safety-scope re-check (gate-9/gate-14, INV-1):** grepped the full `app/src/main/java` and
+`app/src/test/java` trees for exploit/malware-adjacent content — no hits beyond incidental
+variable names (`c2` as a cosine-wave term, `Stage C2` internal task labeling). Every
+`payloadText` default in production code is either empty or a `@Preview`-only sample
+string (`"the ravens have landed"`, `"wet-snacks-design"`); the user always supplies the
+real payload. INV-1 (synthetic/benign payloads only) still holds.
+
 ---
 
 ## Change log
@@ -273,6 +296,7 @@ icon, the documentation edits above).
 | 2026-08-03 | **Task #17.** Ran the full anti-AI-tell checklist against all four screens (module picker, modem, detector, image steganography) for the first time as a single pass, not per-task spot checks. | See Anti-AI-tell status above — zero new violations found; every item confirmed or explicitly marked N/A with reasoning. |
 | 2026-08-03 | **Task #27.** Acoustic modem's `listening` state now shows a live input-level readout (`input level N dB`, RMS dBFS, ~85ms update cadence) and a remaining-time countdown (`Ns left in listen window`) as two labelSmall/TextSecondary rows under the status word. `DecodedFailure` gained a `timedOut` flag, giving the `NO_PAYLOAD_FOUND` case a more specific message when the full 20s window elapses with nothing decoded ("no signal detected in 20s. move phones closer and confirm the other phone actually transmitted.") vs. an early manual stop (unchanged shorter message). | Real two-phone test feedback: the person running it had no way to tell whether "listen" was picking anything up, how long the window would run, or why it failed — the screen just sat there. Both additions are plain numeric text at the same throttled cadence the detector's live confidence readout already established (Task #10) — no meter, no gauge, no animation added; the accent/motion/palette decisions this task ratified are unchanged. |
 | 2026-08-03 | **Task #28.** Added one line of static, first-run guidance text to all four screens, all labelSmall/TextSecondary, all present-always (not tied to a live state): (1) module picker — each of the 3 rows gained a one-line `description` under its label ("send text as sound, phone to phone" / "hide or extract text inside an image" / "continuously listens for the modem's signal"), rows changed from a fixed-height `Row` to a wrap-content `Column` to fit the second line; (2) acoustic modem — "works best within 1m, in a quiet room." under the title, sourced from architecture.md §7's AUDIBLE-protocol round-trip envelope (speaker→mic ≤1.0m, ambient noise <45 dBA), not a made-up number; (3) image steganography — one caption above the embed/extract/check row group explaining what each of the three verbs does; (4) detector — one line under the title explaining the confidence number is a live match score against the modem's own signal and that it runs continuously/passively (never decodes). | Real user feedback: the app wasn't usable for a first-time user — no idea what distance to use, what the byte counters meant, or what a confidence number implied. All four additions are plain static text, no dialogs, no onboarding carousel, no tooltip/popover — matches the "terse inline text, not tutorial overlays" instruction and the existing screens' own established micro-copy voice (bare lowercase sentences, no exclamation, real numbers over vague ones). None of Task #27's live listening-state additions (level readout, countdown) were touched or duplicated — the new modem note sits above the payload field, entirely separate from `ListeningBlock`. |
+| 2026-09-21 | **Gate-9/gate-14 close-out.** Re-ran the full anti-AI-tell checklist against Module 2 (`AudioStegoScreen.kt`, including its v5 detector wiring), `CarrierInsightViews.kt`'s v5 difference/polarity views, and the owner-requested `FullscreenImageViewer.kt` — none of which the 2026-08-03 Task #17 pass above could have covered. Also re-checked INV-1 (synthetic/benign payloads only) against the full `app/src/main/java`/`app/src/test/java` tree. | Gate-9 has required this re-run since Module 2 shipped (v2 addition) but it was never actually recorded as done. Zero violations found on either check; see Anti-AI-tell status above for the item-by-item results. |
 
 ---
 

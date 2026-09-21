@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -38,10 +40,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.CovertDetector
@@ -53,16 +58,28 @@ import dev.herakles.nightjar.ImageSteganalysis
 import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.R
-import dev.herakles.nightjar.modules.fireflyjar.FireflyDao
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.ui.ExpandGlyph
+import dev.herakles.nightjar.ui.FullscreenImageViewer
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionCheckBorder
+import dev.herakles.nightjar.ui.theme.JarActionCheckFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
 import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarTileFill
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import java.io.ByteArrayOutputStream
@@ -161,6 +178,15 @@ sealed interface StegoStatus {
     data class ExtractedSuccess(val text: String) : StegoStatus
     data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : StegoStatus
     data class Analyzed(val result: DetectionResult) : StegoStatus
+
+    /**
+     * S-01 defense in depth: an embed/extract/check attempt ran out of memory mid-operation
+     * (huge picked-cover bitmap copy, or `ImageSteganalysis`'s per-pixel channel-sample array —
+     * see [ImageStegoController]'s catch sites) instead of the fixed [downsampleFactor] bug that
+     * normally prevents this. Idle-equivalent (the operator can immediately retry with a smaller
+     * image), never a crash.
+     */
+    data class Failed(val message: String) : StegoStatus
 }
 
 /**
@@ -210,6 +236,10 @@ fun ImageStegoScreen(
     var payloadText by remember { mutableStateOf("") }
     var isCoverLoading by remember { mutableStateOf(false) }
     var coverLoadError by remember { mutableStateOf<String?>(null) }
+    // codec-M01: set instead of coverLoadError (this is informational, not a failure) whenever a
+    // picked cover actually had transparency and got flattened onto an opaque background --
+    // never touched for the two bundled sample covers, which are already opaque.
+    var coverImportNotice by remember { mutableStateOf<String?>(null) }
     var saveStatus: SaveStatus by remember { mutableStateOf<SaveStatus>(SaveStatus.Idle) }
 
     val pickCoverScope = rememberCoroutineScope()
@@ -219,13 +249,21 @@ fun ImageStegoScreen(
         if (uri == null) return@rememberLauncherForActivityResult // operator backed out of the picker; keep current cover
         isCoverLoading = true
         coverLoadError = null
+        coverImportNotice = null
         pickCoverScope.launch {
             val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
             isCoverLoading = false
             if (decoded == null) {
                 coverLoadError = "couldn't load that image. try a different one."
             } else {
-                coverSource = CoverSource.Picked(decoded)
+                // codec-M01: flatten transparency (if any) once at import, off the main thread --
+                // real work for a large picked photo, same reasoning as the decode itself.
+                val flattened = withContext(Dispatchers.Default) { flattenToOpaque(decoded) }
+                if (flattened !== decoded) {
+                    coverImportNotice = "that image had transparent areas — they were filled in " +
+                        "so the hidden data survives on this device."
+                }
+                coverSource = CoverSource.Picked(flattened)
             }
         }
     }
@@ -297,6 +335,7 @@ fun ImageStegoScreen(
         coverSource = coverSource,
         isCoverLoading = isCoverLoading,
         coverLoadError = coverLoadError,
+        coverImportNotice = coverImportNotice,
         onSelectSample = { coverSource = CoverSource.Sample(it) },
         onPickFromDevice = {
             pickCoverImage.launch(
@@ -330,7 +369,7 @@ fun ImageStegoScreen(
  * embed/extract... logic, it re-presents it." Builds its own [ImageStegoController] wrapping the
  * concrete [ImageStegoCarrier]/[ImageSteganalysis] pair directly: unlike [ImageStegoScreen],
  * this function's call site (`catchFlowFor` in `JarCatchFlows.kt`, task #9) has a fixed
- * `(dao, onExit)` signature with no carrier/detector injection point the way `MainActivity`'s
+ * `(repository, onExit)` signature with no carrier/detector injection point the way `MainActivity`'s
  * technical-screen route has, so there's nowhere else for that wiring to live. Zero changes to
  * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
  *
@@ -358,7 +397,7 @@ fun ImageStegoScreen(
  * affordance — worth a second look if that reading turns out wrong.
  */
 @Composable
-fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
     val controller = remember {
         ImageStegoController(
@@ -408,7 +447,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     // that triggered that specific instance, both instances ended up reading the *same* final
     // Embedded(N) value — and raced on the shared `previousStatus` remembered state, both
     // reading it as not-yet-Embedded before either wrote back, so both independently passed
-    // the transition guard and both called `dao.insert(...)`. Live-reproduced and confirmed via
+    // the transition guard and both called `repository.insert(...)`. Live-reproduced and confirmed via
     // temporary logging: two effect firings, identical status object identity, both reading
     // `previousStatus=Idle`, 31ms apart — the same signature as every prior duplicate-insert
     // report. AcousticModemScreen.kt's `jarCatchFlow` never exhibited this bug because it
@@ -418,9 +457,29 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
     // gap: an effect instance can now only ever observe the value it was actually launched for.
     val status = controller.status
     var previousStatus: StegoStatus by remember { mutableStateOf(StegoStatus.Idle) }
+
+    // Task #17 (gate-17), Stage B: persist the carrier PNG alongside the FireflyRecord at both
+    // catch sites below, so the firefly the operator caught keeps the actual image the message
+    // was hidden in. Same `controller.workingBitmap ?: coverBitmap` source onLookForFireflies/
+    // onPeekInside already read from. PNG encoding is real CPU work, so it's pushed off the
+    // composition (Main) dispatcher -- this LaunchedEffect body otherwise runs on Main. Falls
+    // back to the existing media-less insert() when there's no bitmap to attach (should not
+    // happen in practice -- coverBitmap is always a decoded bundled resource here -- but keeps
+    // this path crash-free and zero-byte-file-free either way). Called from inside the two
+    // transition-guarded `when` arms below, never outside them.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
+        val bitmap = controller.workingBitmap ?: coverBitmap
+        if (bitmap == null) {
+            repository.insert(record)
+            return
+        }
+        val pngBytes = withContext(Dispatchers.Default) { encodePngBytes(bitmap) }
+        repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
+    }
+
     LaunchedEffect(status) {
         when {
-            status is StegoStatus.Embedded && previousStatus !is StegoStatus.Embedded -> dao.insert(
+            status is StegoStatus.Embedded && previousStatus !is StegoStatus.Embedded -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.IMAGE_STEGANOGRAPHY.name,
                     direction = "CREATED",
@@ -430,7 +489,7 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
                     payloadPreview = pendingCatchPreview.take(40),
                 ),
             )
-            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> dao.insert(
+            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.IMAGE_STEGANOGRAPHY.name,
                     direction = "RECEIVED",
@@ -469,11 +528,14 @@ fun jarCatchFlow(dao: FireflyDao, onExit: () -> Unit) {
 
 /**
  * Pure UI for [jarCatchFlow]: no [FireflyDao], no `Context`/bitmap decoding, same
- * stateful-root/pure-content split every screen in this app uses. Jar palette only
- * ([JarTextPrimary]/[JarTextSecondary]/[FireflyCreated]/[FireflyReceived]) — never
- * [TextPrimary]/[TextSecondary]/[AccentSignal], which belong to the technical surface this jar
- * disguises (design/firefly-jar-identity.md § Palette). No cards, no borders, matching
- * screen-flow.md § Screen 7's plain wireframe.
+ * stateful-root/pure-content split every screen in this app uses. Jar palette and type only
+ * ([JarType], [JarTextPrimary]/[JarTextSecondary]/[JarTextTertiary]/[FireflyCreated]/
+ * [FireflyReceived]) — never [MaterialTheme.typography]/[TextPrimary]/[TextSecondary]/
+ * [AccentSignal], which belong to the technical surface this jar disguises (design/
+ * firefly-jar-identity.md § Palette). Design-refresh pass (Task #18): action rows and the
+ * payload field now carry the tinted, rounded-corner card treatment DESIGN_SPEC.md §1/§3
+ * defines for them (gold/cyan/purple by verb, 8dp rows, 12dp confirm button) — this file's
+ * three rows previously rendered as bare text with no fill or border.
  */
 @Composable
 private fun JarImageStegoContent(
@@ -493,74 +555,126 @@ private fun JarImageStegoContent(
         status is StegoStatus.Embedded ||
         status is StegoStatus.ExtractedSuccess ||
         status is StegoStatus.ExtractedFailure ||
-        status is StegoStatus.Analyzed
+        status is StegoStatus.Analyzed ||
+        status is StegoStatus.Failed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Column {
-            JarActionRow(label = "catch a firefly", enabled = idleEquivalent, onClick = onToggleCatchExpanded)
-            if (catchExpanded) {
-                Column(
-                    modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SampleCover.entries.forEach { cover ->
-                        JarCoverRow(
-                            label = cover.label,
-                            selected = coverChoice == cover,
+        // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look/peek are the
+        // framed jar's three stacked rows (§5 1f); the status readout below is its own section.
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column {
+                JarActionRow(
+                    label = "catch a firefly",
+                    enabled = idleEquivalent,
+                    fill = JarActionCatchFill,
+                    border = JarActionCatchBorder,
+                    onClick = onToggleCatchExpanded,
+                )
+                if (catchExpanded) {
+                    Column(
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SampleCover.entries.forEach { cover ->
+                            JarCoverRow(
+                                label = cover.label,
+                                selected = coverChoice == cover,
+                                enabled = idleEquivalent,
+                                onClick = { onSelectCover(cover) },
+                            )
+                        }
+                        BasicTextField(
+                            value = payloadText,
+                            onValueChange = onPayloadTextChange,
+                            singleLine = true,
+                            textStyle = JarType.Body.copy(color = JarTextPrimary),
+                            cursorBrush = SolidColor(JarTextPrimary),
                             enabled = idleEquivalent,
-                            onClick = { onSelectCover(cover) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(JarTileFill)
+                                .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            decorationBox = { innerTextField ->
+                                if (payloadText.isEmpty()) {
+                                    Text(text = "what to hide", style = JarType.Body, color = JarTextTertiary)
+                                }
+                                innerTextField()
+                            },
+                        )
+                        Text(
+                            // codec-H01: a jar too small to hold even an empty frame gets its own
+                            // line rather than a bare `0 / 0 bytes` counter.
+                            text = if (maxPayloadBytes <= 0) {
+                                "too small to hide anything in this jar"
+                            } else {
+                                "$payloadBytes / $maxPayloadBytes bytes"
+                            },
+                            style = JarType.TileCaption,
+                            color = JarTextTertiary,
+                        )
+                        // A primary confirm action, not another list row — 12dp per DESIGN_SPEC.md
+                        // §3's "12px (primary buttons...)" radius tier, distinct from the 8dp rows above.
+                        JarActionRow(
+                            label = "catch",
+                            enabled = canCatch,
+                            fill = JarActionCatchFill,
+                            border = JarActionCatchBorder,
+                            onClick = onCatch,
+                            radius = 12.dp,
                         )
                     }
-                    BasicTextField(
-                        value = payloadText,
-                        onValueChange = onPayloadTextChange,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = JarTextPrimary),
-                        cursorBrush = SolidColor(JarTextPrimary),
-                        enabled = idleEquivalent,
-                        modifier = Modifier.fillMaxWidth(),
-                        decorationBox = { innerTextField ->
-                            if (payloadText.isEmpty()) {
-                                Text(
-                                    text = "what to hide",
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = JarTextSecondary,
-                                )
-                            }
-                            innerTextField()
-                        },
-                    )
-                    Text(
-                        text = "$payloadBytes / $maxPayloadBytes bytes",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = JarTextSecondary,
-                    )
-                    JarActionRow(label = "catch", enabled = canCatch, onClick = onCatch)
                 }
             }
+            JarActionRow(
+                label = "look for fireflies",
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onLookForFireflies,
+            )
+            JarActionRow(
+                label = "peek inside",
+                enabled = idleEquivalent,
+                fill = JarActionCheckFill,
+                border = JarActionCheckBorder,
+                onClick = onPeekInside,
+            )
         }
-        JarActionRow(label = "look for fireflies", enabled = idleEquivalent, onClick = onLookForFireflies)
-        JarActionRow(label = "peek inside", enabled = idleEquivalent, onClick = onPeekInside)
 
         JarStatusBlock(status = status)
     }
 }
 
+/** One tinted, rounded action row — gold for "catch", cyan for "look", purple for "peek/check"
+ *  (DESIGN_SPEC.md §1's card/row tint table). [radius] defaults to the 8dp action-row tier;
+ *  the inline "catch"/"send"-style confirm button passes 12dp, the primary-button tier. */
 @Composable
-private fun JarActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun JarActionRow(
+    label: String,
+    enabled: Boolean,
+    fill: Color,
+    border: Color,
+    onClick: () -> Unit,
+    radius: Dp = 8.dp,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .clip(RoundedCornerShape(radius))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (enabled) JarTextPrimary else JarTextSecondary,
+            style = JarType.TileTitle,
+            color = if (enabled) JarTextPrimary else JarTextTertiary,
         )
     }
 }
@@ -576,8 +690,10 @@ private fun JarCoverRow(label: String, selected: Boolean, enabled: Boolean, onCl
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) JarTextPrimary else JarTextSecondary,
+            // DESIGN_SPEC.md §1/§5 1g: selected option text takes the gold "chosen" accent,
+            // unselected drops to the tertiary tier — the same pairing the technique chips use.
+            style = JarType.TileTitle,
+            color = if (selected) FireflyCreated else JarTextTertiary,
         )
     }
 }
@@ -593,27 +709,36 @@ private fun JarStatusBlock(status: StegoStatus) {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
                 text = "you caught one — ${status.payloadBytes} byte$plural",
-                style = MaterialTheme.typography.bodyLarge,
+                // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
+                // accented announcement, not the message body itself.
+                style = JarType.SectionLabel,
                 color = FireflyCreated,
             )
         }
         is StegoStatus.ExtractedSuccess -> Text(
             text = status.text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = FireflyReceived,
+            // DESIGN_SPEC.md §2's "Message/body text" role — cream, not the FireflyReceived
+            // accent; only the short result label above a real message takes the accent color.
+            style = JarType.Body,
+            color = JarTextPrimary,
         )
         is StegoStatus.ExtractedFailure -> Text(
             text = jarExtractFailureMessage(status.reason),
-            style = MaterialTheme.typography.bodyLarge,
+            style = JarType.Body,
             color = JarTextSecondary,
         )
         is StegoStatus.Analyzed -> JarAnalyzedBlock(result = status.result)
+        is StegoStatus.Failed -> Text(
+            text = status.message,
+            style = JarType.Body,
+            color = JarTextSecondary,
+        )
     }
 }
 
 @Composable
 private fun JarStatusWord(word: String) {
-    Text(text = word, style = MaterialTheme.typography.labelLarge, color = JarTextSecondary)
+    Text(text = word, style = JarType.Footer, color = JarWatchingDim)
 }
 
 /** "peek inside"'s readout — confidence number kept (same "real data, not smoothed" discipline
@@ -626,19 +751,22 @@ private fun JarAnalyzedBlock(result: DetectionResult) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = "${(result.confidence * 100).roundToInt()}%",
-            style = MaterialTheme.typography.displayLarge,
+            style = JarType.Numeral,
             color = JarTextPrimary,
         )
         Text(
             text = if (result.flagged) "something's out there" else "all quiet",
-            style = MaterialTheme.typography.labelLarge,
-            color = JarTextPrimary,
+            style = JarType.TileTitle,
+            // DESIGN_SPEC.md §7 item 1: the mockup hardcodes this label to cyan regardless of
+            // value — a documented bug. The history-row convention (cyan when flagged, cream
+            // otherwise) is the intended semantic; implemented here rather than reproduced.
+            color = if (result.flagged) FireflyReceived else JarTextPrimary,
         )
         result.estimatedPayloadBytes?.let { bytes ->
             Text(
                 text = "about $bytes bytes, near as we can tell",
-                style = MaterialTheme.typography.labelSmall,
-                color = JarTextSecondary,
+                style = JarType.TileCaption,
+                color = JarTextTertiary,
             )
         }
     }
@@ -688,6 +816,10 @@ fun ImageStegoContent(
     coverSource: CoverSource,
     isCoverLoading: Boolean,
     coverLoadError: String?,
+    // codec-M01: defaults to null so every existing call site (all six @Preview functions in
+    // this file) keeps compiling unchanged -- only ImageStegoScreen's real launcher callback
+    // ever has a non-null value to pass.
+    coverImportNotice: String? = null,
     onSelectSample: (SampleCover) -> Unit,
     onPickFromDevice: () -> Unit,
     payloadText: String,
@@ -707,7 +839,8 @@ fun ImageStegoContent(
             status is StegoStatus.Embedded ||
             status is StegoStatus.ExtractedSuccess ||
             status is StegoStatus.ExtractedFailure ||
-            status is StegoStatus.Analyzed
+            status is StegoStatus.Analyzed ||
+            status is StegoStatus.Failed
         ) && !isCoverLoading && saveStatus !is SaveStatus.Saving && saveStatus !is SaveStatus.Sharing
     val payloadBytes = payloadText.encodeToByteArray().size
     val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
@@ -771,13 +904,44 @@ fun ImageStegoContent(
                         color = TextSecondary,
                     )
                 }
-                Image(
-                    bitmap = workingBitmap.asImageBitmap(),
-                    contentDescription = "${coverSource.previewLabel} cover image preview",
-                    modifier = Modifier
-                        .size(96.dp)
-                        .border(width = 1.dp, color = BorderDefault),
-                )
+                coverImportNotice?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                    )
+                }
+                // Owner request (v6 addition): tap the working image to view it fullscreen.
+                // Keyed on workingBitmap (not firefly.id -- there's no firefly here) so the
+                // fullscreen state resets if a fresh embed/extract swaps the displayed bitmap
+                // out from under an open preview.
+                var showFullscreenCover by remember(workingBitmap) { mutableStateOf(false) }
+                val coverDescription = "${coverSource.previewLabel} cover image preview"
+                Box {
+                    Image(
+                        bitmap = workingBitmap.asImageBitmap(),
+                        contentDescription = coverDescription,
+                        modifier = Modifier
+                            .size(96.dp)
+                            .border(width = 1.dp, color = BorderDefault)
+                            .clickable(onClickLabel = "view fullscreen") { showFullscreenCover = true },
+                    )
+                    // Subtle tap affordance (owner request): a quiet corner glyph -- the image
+                    // itself already carries the click target and its onClickLabel above.
+                    ExpandGlyph(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(3.dp),
+                        tint = TextSecondary,
+                    )
+                }
+                if (showFullscreenCover) {
+                    FullscreenImageViewer(
+                        bitmap = workingBitmap,
+                        contentDescription = coverDescription,
+                        onDismiss = { showFullscreenCover = false },
+                    )
+                }
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -809,7 +973,19 @@ fun ImageStegoContent(
                     },
                 )
                 Text(
-                    text = "$payloadBytes / $maxPayloadBytes bytes",
+                    // S-03: over capacity previously just silently grayed out "embed" with no
+                    // explanation -- mirrors AudioStegoContent's counter, which already said why.
+                    // codec-H01: maxPayloadBytes == 0 can mean "this cover can't hold a frame at
+                    // all" (ImageStegoCarrier.canEmbed == false), not just "trimmed to zero" --
+                    // worth a distinct message rather than a bare `0 / 0 bytes` that reads as a
+                    // typo.
+                    text = when {
+                        maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
+                        payloadBytes > maxPayloadBytes ->
+                            "$payloadBytes / $maxPayloadBytes bytes — " +
+                                "${payloadBytes - maxPayloadBytes} over, trim it"
+                        else -> "$payloadBytes / $maxPayloadBytes bytes"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
                 )
@@ -911,6 +1087,11 @@ private fun StatusBlock(status: StegoStatus) {
             color = TextSecondary,
         )
         is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+        is StegoStatus.Failed -> Text(
+            text = status.message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
     }
 }
 
@@ -1050,7 +1231,8 @@ class ImageStegoController(
             status is StegoStatus.Embedded ||
             status is StegoStatus.ExtractedSuccess ||
             status is StegoStatus.ExtractedFailure ||
-            status is StegoStatus.Analyzed
+            status is StegoStatus.Analyzed ||
+            status is StegoStatus.Failed
 
     /** Reset to a freshly selected cover image, discarding any prior embed/extract/check result. */
     fun selectCover(cover: Bitmap) {
@@ -1077,6 +1259,12 @@ class ImageStegoController(
      * task #18 live-reproduced from what looked like a single tap. Writing `status` here,
      * before `scope.launch`, closes that window: a second call arriving even a moment later
      * sees `status == Embedding` and is rejected by the gate.
+     *
+     * S-01 defense in depth: [ImageStegoCarrier.encode]'s mutable-bitmap copy is real allocation
+     * pressure even after [downsampleFactor]'s fix bounds the source bitmap's dimensions (a
+     * still-sizable device is still a real allocation on a memory-constrained device) — catching
+     * [OutOfMemoryError] here turns that into a visible, idle-equivalent [StegoStatus.Failed]
+     * instead of a crash.
      */
     fun embed(cover: Bitmap, payload: ByteArray) {
         if (!idleEquivalent) return
@@ -1088,6 +1276,9 @@ class ImageStegoController(
             } catch (oversized: IllegalArgumentException) {
                 status = StegoStatus.Idle
                 return@launch
+            } catch (oom: OutOfMemoryError) {
+                status = StegoStatus.Failed(OOM_ERROR_MESSAGE)
+                return@launch
             }
             workingBitmap = stego
             hasEmbeddedPayload = true
@@ -1096,36 +1287,52 @@ class ImageStegoController(
     }
 
     /** Attempt to recover a payload from [sample]. No-op while busy. Same synchronous-gate
-     *  discipline as [embed] — see its KDoc. */
+     *  discipline as [embed] — see its KDoc, including the S-01 [OutOfMemoryError] catch. */
     fun extract(sample: Bitmap) {
         if (!idleEquivalent) return
         status = StegoStatus.Extracting
         scope.launch {
             val carrier = carrierFactory(sample)
-            status = when (val result = carrier.decode(sample)) {
-                is DecodeResult.Success ->
-                    StegoStatus.ExtractedSuccess(result.payload.decodeToString())
-                is DecodeResult.Failure ->
-                    StegoStatus.ExtractedFailure(result.reason, result.detail)
+            status = try {
+                when (val result = carrier.decode(sample)) {
+                    is DecodeResult.Success ->
+                        StegoStatus.ExtractedSuccess(result.payload.decodeToString())
+                    is DecodeResult.Failure ->
+                        StegoStatus.ExtractedFailure(result.reason, result.detail)
+                }
+            } catch (oom: OutOfMemoryError) {
+                StegoStatus.Failed(OOM_ERROR_MESSAGE)
             }
         }
     }
 
     /** Score [sample] for the likelihood it holds an embedded payload. No-op while busy. Same
-     *  synchronous-gate discipline as [embed] — see its KDoc. */
+     *  synchronous-gate discipline as [embed] — see its KDoc, including the S-01
+     *  [OutOfMemoryError] catch ([ImageSteganalysis]'s per-pixel channel-sample array is the
+     *  largest single allocation in this file's whole embed/extract/check pipeline). */
     fun analyze(sample: Bitmap) {
         if (!idleEquivalent) return
         status = StegoStatus.Analyzing
         scope.launch {
-            val result = detector.analyze(sample)
-            DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
-            status = StegoStatus.Analyzed(result)
+            status = try {
+                val result = detector.analyze(sample)
+                DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
+                StegoStatus.Analyzed(result)
+            } catch (oom: OutOfMemoryError) {
+                StegoStatus.Failed(OOM_ERROR_MESSAGE)
+            }
         }
     }
 
     /** Cancels any in-flight work. Call from `DisposableEffect.onDispose`. */
     fun dispose() {
         scope.cancel()
+    }
+
+    private companion object {
+        /** Copy shown for [StegoStatus.Failed] — plain, lowercase, matches this screen's other
+         *  short failure captions (e.g. `coverLoadError`'s "couldn't load that image..."). */
+        const val OOM_ERROR_MESSAGE = "that image is too large to work with here. try a smaller one."
     }
 }
 
@@ -1196,21 +1403,101 @@ private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
 }
 
 /**
- * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings both [width] and
- * [height] under [maxDimension], per `BitmapFactory.Options.inSampleSize`'s own contract
- * (power-of-two values decode fastest/cleanest — non-power-of-two values get rounded down to
- * the nearest power of two internally anyway).
+ * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings the post-scale long
+ * edge of a [width]x[height] image to [maxDimension] or under, per `BitmapFactory.Options
+ * .inSampleSize`'s own contract (power-of-two values decode fastest/cleanest — non-power-of-two
+ * values get rounded down to the nearest power of two internally anyway). An edge that lands
+ * exactly on [maxDimension] stays at sample size 1 — it's already within budget, not over it.
+ *
+ * S-01 fix (CRITICAL): the previous condition compared the *already-halved* `w`/`h` against
+ * [maxDimension] (`while (w / 2 >= maxDimension ...)`) instead of the current, not-yet-halved
+ * value. That off-by-one-power-of-two meant any cover up to ~2x [maxDimension] on its long edge
+ * (e.g. a real 24-50MP photo, 8000x6000 or 5712x4284) evaluated the loop condition as false on
+ * its very first check and skipped downsampling entirely — `inSampleSize` stayed 1, and
+ * `BitmapFactory` decoded the image at full, undownsampled resolution (~183MB ARGB_8888 for
+ * 8000x6000 against this function's own KDoc promise of a ~64MB ceiling), risking an OOM crash
+ * in this decode or the very next `copy()`/pixel-array allocation downstream (`ImageStegoCarrier
+ * .encode`, `ImageSteganalysis`). `internal` (not `private`) purely for `ImageStegoScreenTest`'s
+ * visibility, matching [encodePngBytes]'s precedent in this same file.
  */
-private fun downsampleFactor(width: Int, height: Int, maxDimension: Int): Int {
+internal fun downsampleFactor(width: Int, height: Int, maxDimension: Int): Int {
     var sampleSize = 1
     var w = width
     var h = height
-    while (w / 2 >= maxDimension || h / 2 >= maxDimension) {
+    while (w > maxDimension || h > maxDimension) {
         w /= 2
         h /= 2
         sampleSize *= 2
     }
     return sampleSize
+}
+
+// --- codec-M01: Android stores an ARGB_8888 Bitmap's pixels premultiplied by alpha, so
+// setPixel/getPixel's R/G/B LSBs for any pixel with alpha < 255 don't survive the store/read
+// round trip intact on a real device (Robolectric's ShadowBitmap stores ARGB ints verbatim and
+// doesn't reproduce this, which is why it wasn't caught by CI). Bundled sample covers are opaque
+// PNGs, so this only bites a Photo-Picker-selected cover with real transparency -- flattening it
+// onto an opaque background at import time, once, is simpler and more robust than trying to
+// disable premultiplication on every subsequent setPixel/getPixel call in ImageStegoCarrier. ---
+
+/**
+ * True if any pixel in [bitmap] has an alpha channel below fully opaque (255). Checked via one
+ * bulk [Bitmap.getPixels] call (fast: a single JNI round trip) rather than per-pixel
+ * `getPixel()`, since this runs on every Photo-Picker import regardless of size.
+ * `Bitmap.hasAlpha()` alone isn't enough here — it's a format-level flag (an ARGB_8888 bitmap
+ * decoded from a PNG with an alpha channel can report `hasAlpha() == true` even when every pixel
+ * happens to be opaque), and [flattenToOpaque] only wants to flatten — and tell the operator
+ * about — covers that are *actually* transparent somewhere.
+ */
+internal fun hasTransparency(bitmap: Bitmap): Boolean {
+    if (!bitmap.hasAlpha()) return false
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    return pixels.any { (it ushr 24) and 0xFF != 0xFF }
+}
+
+/**
+ * Flattens any non-opaque pixels in [bitmap] onto a solid black background and returns a new,
+ * fully-opaque [Bitmap] — or [bitmap] itself, unchanged, when [hasTransparency] is already false
+ * (the common case: both bundled sample covers, and most real photos, have no alpha channel to
+ * begin with).
+ *
+ * Deliberately plain per-pixel arithmetic (standard "composite over black" alpha blend:
+ * `resultChannel = srcChannel * srcAlpha / 255`, since the background channel is 0) via bulk
+ * [Bitmap.getPixels]/[Bitmap.setPixels] rather than a [Canvas]/`drawBitmap` composite — the
+ * platform compositor would do the same math, but it also depends on `Canvas`'s own blend-mode
+ * behavior being faithfully reproduced by whatever's running the code (a real device, or a test
+ * environment), and this fix's whole point is to stop depending on unverified platform behavior
+ * around alpha (`M-01`'s premultiplied-alpha bug was exactly that kind of gap — real, but
+ * invisible to Robolectric). Doing the blend explicitly means [ImageStegoScreenTest] can verify
+ * the *actual* arithmetic, not just that some `Canvas` call was made. `internal` (not `private`)
+ * for that test's visibility, matching [downsampleFactor]/[encodePngBytes]'s precedent in this
+ * file.
+ */
+internal fun flattenToOpaque(bitmap: Bitmap): Bitmap {
+    if (!hasTransparency(bitmap)) return bitmap
+    val width = bitmap.width
+    val height = bitmap.height
+    val pixels = IntArray(width * height)
+    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+    for (i in pixels.indices) {
+        val pixel = pixels[i]
+        val alpha = (pixel ushr 24) and 0xFF
+        if (alpha == 0xFF) continue // already opaque -- leave the RGB bits exactly as they are
+        val r = (pixel ushr 16) and 0xFF
+        val g = (pixel ushr 8) and 0xFF
+        val b = pixel and 0xFF
+        // Composite over solid black (0,0,0): resultChannel = srcChannel * srcAlpha / 255.
+        // Correct even for alpha == 0 (fully transparent -> pure black, matching the visible
+        // background this bitmap would actually have shown), same as a real compositor.
+        val blendedR = (r * alpha) / 0xFF
+        val blendedG = (g * alpha) / 0xFF
+        val blendedB = (b * alpha) / 0xFF
+        pixels[i] = (0xFF shl 24) or (blendedR shl 16) or (blendedG shl 8) or blendedB
+    }
+    val flattened = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    flattened.setPixels(pixels, 0, width, 0, 0, width, height)
+    return flattened
 }
 
 // --- Task #34: save the working stego image as a PNG via MediaStore, and share it through

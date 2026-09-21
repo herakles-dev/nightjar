@@ -190,6 +190,46 @@ class ImageStegoCarrierTest {
         assertEquals(DecodeFailure.PAYLOAD_TOO_LARGE, (result as DecodeResult.Failure).reason)
     }
 
+    // --- codec-H01: canEmbed / tiny-cover contract self-consistency ---
+
+    @Test
+    fun canEmbedIsFalseForATinyCoverBelowFrameOverhead() {
+        // 3x3 ARGB_8888: capacityBytes = floor(9*3/8) = 3, well under the 11-byte frame overhead.
+        val tinyCover = Bitmap.createBitmap(3, 3, Bitmap.Config.ARGB_8888)
+        val carrier = ImageStegoCarrier(tinyCover)
+
+        assertEquals(0, carrier.maxPayloadBytes)
+        assertTrue("a 3x3 cover (3-byte capacity) should not report canEmbed", !carrier.canEmbed)
+    }
+
+    @Test
+    fun canEmbedIsTrueForAnOrdinaryCover() {
+        val cover = loadCover(R.drawable.stego_cover_gradient)
+        val carrier = ImageStegoCarrier(cover)
+
+        assertTrue("an ordinary bundled cover should report canEmbed", carrier.canEmbed)
+    }
+
+    @Test
+    fun encodeThrowsAClearMessageOnATinyCoverEvenForAnEmptyPayload() {
+        // codec-H01's actual bug: maxPayloadBytes clamps to 0 (payload.size <= 0 passes for an
+        // empty payload), but encode() used to still throw from a second, buried capacity check
+        // with a message that never named canEmbed/maxPayloadBytes as the real cause. Now the
+        // very first check does, and fires even for a 0-byte payload.
+        val tinyCover = Bitmap.createBitmap(3, 3, Bitmap.Config.ARGB_8888)
+        val carrier = ImageStegoCarrier(tinyCover)
+
+        try {
+            carrier.encode(ByteArray(0))
+            fail("expected encode() to throw IllegalArgumentException for a cover too small to hold a frame")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "expected message to explain the cover is too small, was: ${expected.message}",
+                expected.message.orEmpty().contains("too small"),
+            )
+        }
+    }
+
     // --- HEADER_INVALID: unsupported version byte (zero prior coverage of this branch) ---
 
     @Test

@@ -13,9 +13,12 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -24,6 +27,8 @@ import dev.herakles.nightjar.modules.acoustic.AcousticModemScreen
 import dev.herakles.nightjar.modules.audiostego.AudioStegoScreen
 import dev.herakles.nightjar.modules.detector.DetectorScreen
 import dev.herakles.nightjar.modules.fireflyjar.FireflyDatabase
+import dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.JarDetailScreen
 import dev.herakles.nightjar.modules.fireflyjar.JarShelfScreen
 import dev.herakles.nightjar.modules.imagestego.ImageStegoScreen
@@ -31,6 +36,8 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Home screen entry point: module-picker → one of the real module screens. Task #4 built
@@ -71,6 +78,77 @@ private sealed interface Screen {
     data class ModuleStub(val module: Module) : Screen
 }
 
+/**
+ * Process-scoped latch for the orphan sweep (task #5, gate-20, INV-6): `LaunchedEffect(Unit)`
+ * re-runs on activity recreation (rotation, config change) even though the process survives, and
+ * the sweep is destructive against the media directory -- a re-run mid-catch (file written, row
+ * not yet inserted) would delete that firefly's just-caught media. `@Volatile` because the sweep
+ * itself hops onto [Dispatchers.IO], a different thread than the composition reads this from.
+ */
+private object OrphanSweepGuard {
+    @Volatile var hasRun = false
+}
+
+/** Reads [repository]'s stored-media snapshot and forwards it to [DebugProbe] (gate-20 v4 probe
+ *  contract) -- the one place both [NightjarApp] call sites route through so they can't drift
+ *  into reporting different fields. */
+private suspend fun reportStoredMediaProbe(repository: FireflyRepository) {
+    val snapshot = repository.probeSnapshot()
+    DebugProbe.reportStoredMedia(
+        recordCount = snapshot.recordCount,
+        recordsWithMediaCount = snapshot.recordsWithMediaCount,
+        totalMediaBytes = snapshot.totalMediaBytes,
+        orphanFileCount = snapshot.orphanFileCount,
+    )
+}
+
+/**
+ * Encodes/decodes [Screen] for [rememberSaveable] (F-03 fix, M-07 dup): `Screen` isn't directly
+ * Parcelable/primitive, so a plain `rememberSaveable { mutableStateOf(...) }` can't hold it
+ * without this. A plain `String` bundle value is enough since every case either has no payload
+ * or carries just a [Module] -- `Module.name`/[Module.valueOf] round-trips that exactly, the same
+ * way `debugLabel` below already encodes a [Screen] as a string for the probe.
+ *
+ * Without this, navigation position (and an open firefly-detail popup, see JarDetailScreen.kt's
+ * own `rememberSaveable` fix) was silently lost on any Activity recreation that wasn't a
+ * rotation -- e.g. toggling system dark mode mid-catch dumped the user back on the jar shelf even
+ * though the process and the Room DB survived intact (OrphanSweepGuard's own KDoc already
+ * documents that survival for the sweep guard; this closes the same gap for navigation).
+ */
+private val ScreenSaver: Saver<Screen, String> = Saver(
+    save = { screen ->
+        when (screen) {
+            is Screen.JarShelf -> "JarShelf"
+            is Screen.Picker -> "Picker"
+            is Screen.AcousticModem -> "AcousticModem"
+            is Screen.ImageSteganography -> "ImageSteganography"
+            is Screen.Detector -> "Detector"
+            is Screen.AudioSteganography -> "AudioSteganography"
+            is Screen.JarDetail -> "JarDetail:${screen.module.name}"
+            is Screen.ModuleStub -> "ModuleStub:${screen.module.name}"
+        }
+    },
+    restore = { encoded ->
+        when {
+            encoded == "JarShelf" -> Screen.JarShelf
+            encoded == "Picker" -> Screen.Picker
+            encoded == "AcousticModem" -> Screen.AcousticModem
+            encoded == "ImageSteganography" -> Screen.ImageSteganography
+            encoded == "Detector" -> Screen.Detector
+            encoded == "AudioSteganography" -> Screen.AudioSteganography
+            encoded.startsWith("JarDetail:") ->
+                Screen.JarDetail(Module.valueOf(encoded.removePrefix("JarDetail:")))
+            encoded.startsWith("ModuleStub:") ->
+                Screen.ModuleStub(Module.valueOf(encoded.removePrefix("ModuleStub:")))
+            // Unreachable from this Saver's own `save` above -- present anyway (this codebase's
+            // unreachable-but-present discipline, AudioStegoCarrier.kt's DecodeFailure precedent)
+            // so a future saved-state format change fails safe (back to the root) rather than
+            // crashing restore.
+            else -> Screen.JarShelf
+        }
+    },
+)
+
 /** Label the `COVERT_DEBUG` probe (task #18) reports for each [Screen] value. */
 private val Screen.debugLabel: String
     get() = when (this) {
@@ -86,10 +164,41 @@ private val Screen.debugLabel: String
 
 @Composable
 fun NightjarApp() {
-    var screen: Screen by remember { mutableStateOf<Screen>(Screen.JarShelf) }
+    var screen: Screen by rememberSaveable(stateSaver = ScreenSaver) { mutableStateOf<Screen>(Screen.JarShelf) }
 
     val context = LocalContext.current
     val fireflyDao = remember { FireflyDatabase.getInstance(context).fireflyDao() }
+    // Task #4 (gate-20, INV-6): rows and files inseparable. The jar UI (shelf, detail, and the
+    // three catch flows) now threads FireflyRepository throughout -- see FireflyRepository.kt's
+    // file KDoc for the write-then-insert path.
+    val fireflyRepository = remember { FireflyRepository(fireflyDao, FireflyMediaStore(context)) }
+
+    // Task #5 (gate-20, INV-6): reclaim orphaned media files once per process, at start-up,
+    // before the jar UI is reachable. Guarded by OrphanSweepGuard so activity recreation
+    // (rotation/config change) can't trigger a second, destructive sweep mid-catch.
+    LaunchedEffect(Unit) {
+        if (!OrphanSweepGuard.hasRun) {
+            OrphanSweepGuard.hasRun = true
+            withContext(Dispatchers.IO) { fireflyRepository.sweepOrphans() }
+            // Reports the freshest possible orphan_file_count right after the sweep -- the sweep
+            // is the one stored-media mutation that doesn't touch a row, so it's the one case the
+            // LaunchedEffect(allFireflies) below (keyed on the reactive record list) wouldn't
+            // otherwise catch.
+            reportStoredMediaProbe(fireflyRepository)
+        }
+    }
+
+    // Gate-20 v4 probe contract (spec.md Runtime Verification Surface): stored-media state is
+    // queryable via COVERT_DEBUG whenever it changes. Keyed on the reactive all-fireflies list, so
+    // this re-reports after every row mutation -- a catch in any of the 3 creation jars, clear-all,
+    // or a per-firefly delete -- without this file needing an explicit call at each of those sites
+    // (several of which live in modules this file's owner doesn't touch).
+    val allFireflies by fireflyRepository.observeAll().collectAsState(initial = null)
+    LaunchedEffect(allFireflies) {
+        if (allFireflies != null) {
+            reportStoredMediaProbe(fireflyRepository)
+        }
+    }
 
     // Task #18 probe wiring: every screen change (including the initial composition,
     // since LaunchedEffect runs immediately too) is reported to DebugProbe, so
@@ -118,13 +227,13 @@ fun NightjarApp() {
     ) {
         when (val current = screen) {
             is Screen.JarShelf -> JarShelfScreen(
-                dao = fireflyDao,
+                repository = fireflyRepository,
                 onSelectModule = { module -> screen = Screen.JarDetail(module) },
                 onRevealTechnicalMode = { screen = Screen.Picker },
             )
             is Screen.JarDetail -> JarDetailScreen(
                 module = current.module,
-                dao = fireflyDao,
+                repository = fireflyRepository,
                 onBack = { screen = Screen.JarShelf },
             )
             is Screen.Picker -> ModulePicker(
@@ -136,6 +245,9 @@ fun NightjarApp() {
                         Module.AUDIO_STEGANOGRAPHY -> Screen.AudioSteganography
                     }
                 },
+                // U-01 (gate-12): the picker's own visible "back to the jar" link -- same
+                // destination the BackHandler above already sends Screen.Picker to.
+                onBack = { screen = Screen.JarShelf },
             )
             is Screen.AcousticModem -> AcousticModemScreen(
                 // Task #30: protocol/symbol-rate selector on the screen rebuilds the carrier
@@ -157,6 +269,7 @@ fun NightjarApp() {
             )
             is Screen.AudioSteganography -> AudioStegoScreen(
                 carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) },
+                detector = AudioStegDetector(),
                 onBack = { screen = Screen.Picker },
             )
             is Screen.ModuleStub -> ModuleStubScreen(

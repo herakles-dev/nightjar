@@ -2,11 +2,13 @@ package dev.herakles.nightjar
 
 import java.util.zip.CRC32
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -140,10 +142,53 @@ import kotlin.math.sqrt
  * module's frequency plan even though both live in the same app.
  *
  * **Additive, not replacing**: each active tone's sine contribution (amplitude [TONE_AMPLITUDE])
- * is summed and saturate-added on top of [cover]'s own samples for that block (see
- * [saturatingAdd]) — the cover's own content survives underneath, exactly matching "mixed into an
- * existing carrier" the way [PHASE_INVERSION]'s secondary signal is mixed in, rather than
- * synthesizing a fresh transmission the way Module 3's live modem does.
+ * is summed on top of [cover]'s own samples for that block — the cover's own content survives
+ * underneath, exactly matching "mixed into an existing carrier" the way [PHASE_INVERSION]'s
+ * secondary signal is mixed in, rather than synthesizing a fresh transmission the way Module 3's
+ * live modem does.
+ *
+ * Clipping fix (design-v5.md §12.2): [TONE_AMPLITUDE] × up to [MFSK_TONE_COUNT] simultaneous
+ * tones can sum past int16 range on its own. [encodeMfsk] computes the full (cover + tones)
+ * signal for the whole clip in floating point, unclamped, and — only if that signal's peak
+ * magnitude would exceed [MFSK_SAMPLE_CEILING] — applies a single constant gain to the *entire*
+ * clip before rounding to `Short`. The whole clip is quieter by that one factor when a gain is
+ * needed; [cover]'s own relative dynamics (including the untouched tail past the MFSK codeword)
+ * are otherwise unchanged — there is no per-block/per-sample scaling, so there's no block-seam
+ * artifact to introduce. (An earlier version of this fix used a per-block gain split instead;
+ * that ducked the cover to a different, sometimes-zero gain every ~21ms — an audible click/
+ * dropout pattern, and a real violation of "the cover's own content survives underneath" above —
+ * so it was replaced with this single-gain approach.) A uniform gain never changes [decodeMfsk]'s
+ * verdict either: its tone-vs-guard-bin-median margin is a *relative* comparison within each
+ * block's own FFT, so scaling every sample by the same constant leaves every margin unchanged.
+ *
+ * **Click fix (Gate 8 round 4)**: the gain fix above stops [MFSK]'s samples from clipping, but
+ * [encodeMfsk]'s per-block tone synthesis still switches each tone channel fully on or fully off
+ * at every [FRAME_SIZE]-sample block boundary — a rectangular on/off gate. Owner-reported "crackle
+ * and pops in the first few seconds" on real hardware traced (offline JVM measurement against this
+ * class's own [encode]/[decode], not a device capture) to exactly that: on the SOFT_SYNTH sample
+ * cover with a 30-byte payload, the < 16 kHz ("audible-band") part of `stego - gain*cover` pooled
+ * across all 63 internal block boundaries measured -34.05 dBFS *before* the gain fix and -42.14
+ * dBFS *after* it (gain alone helps some, since it also removed ~127 clipped samples), against
+ * -85..-88 dBFS mid-symbol (i.e. away from any boundary) in both cases — a >40 dB boundary-vs-
+ * mid-symbol gap either way, the signature of a hard edge, not of the near-ultrasonic tones simply
+ * being audible (which would show up mid-symbol too). [mfskToneEnvelope] applies a short
+ * raised-cosine (Hann) ramp to each tone's amplitude across a boundary where it actually turns on
+ * or off (silent in the adjacent block, or the clip's first/last block) — the receiving side has
+ * no reason to care, since [MFSK_BASE_BIN]-relative tone frequencies are always an integer number
+ * of cycles per [FRAME_SIZE]-sample block, so a tone that *stays* on across a boundary is already
+ * phase-continuous there and gets no ramp at all (full, constant amplitude throughout). A
+ * [MFSK_RAMP_SAMPLES] = 32-sample ramp (a 32-value sweep, 8-128 samples, against both bundled
+ * covers) was the smallest tested that pushed the boundary-locked audible-band level below -70
+ * dBFS on both covers (SOFT_SYNTH -75.27 dBFS, SPOKEN_WORD -74.52 dBFS; a 33+ dB reduction from
+ * the post-gain-fix baseline either way) while leaving [decodeMfsk]'s own per-tone-bin margin
+ * comfortably clear of [MFSK_DETECTION_MARGIN_DB]: the weakened "meant to be on" bins stayed >= 20
+ * dB over threshold and no "meant to be off" bin crossed it (0 false positives on either cover).
+ * Ramps beyond that headroom are not free: the same sweep found silent-bin leakage from the
+ * ramp's own wider spectral main lobe climbing with ramp length (bin spacing is only 46.875 Hz,
+ * one FFT bin), crossing [MFSK_DETECTION_MARGIN_DB] and producing actual false-positive bit
+ * flips (corrected-error counts rising, then `ReedSolomon.decode` failing outright) starting
+ * around a 64-96 sample ramp on the SOFT_SYNTH cover — this is exactly why the ramp is tuned by
+ * measurement rather than picked generously "to be safe." [decodeMfsk] itself needed no change.
  *
  * **Detection (decode)**: FFTs each candidate block (reusing [fft]) and reads tone channel `i` as
  * active if its magnitude exceeds the local noise floor (the median magnitude of a
@@ -258,6 +303,20 @@ class AudioStegoCarrier(
 
     override val maxPayloadBytes: Int = (totalCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
 
+    /**
+     * True if [cover] has enough raw capacity, at this instance's [technique] (and
+     * [stegoStrength] for [AudioStegoTechnique.SPECTROGRAM_LSB]), to hold even an empty-payload
+     * frame ([FRAME_OVERHEAD_BYTES] bytes). Same role as [ImageStegoCarrier.canEmbed] (codec-H02
+     * is the audio-codec twin of codec-H01): `maxPayloadBytes == 0` used to be ambiguous between
+     * "this cover can embed an empty payload" and "this cover cannot hold a frame at all," and
+     * only the second case actually made every `encode()` call throw, including
+     * `encode(ByteArray(0))`, from a second, buried capacity check the caller had no way to
+     * predict from `maxPayloadBytes` alone. Each `encode*` function below now checks this first,
+     * with a message that says so directly; callers (the screens) use it to show "this cover is
+     * too small to hide anything" instead of a bare `0 / 0 bytes` counter.
+     */
+    val canEmbed: Boolean = totalCapacityBytes >= FRAME_OVERHEAD_BYTES
+
     override fun encode(payload: ByteArray): PcmAudio = when (technique) {
         AudioStegoTechnique.PHASE_INVERSION -> encodePhaseInversion(payload)
         AudioStegoTechnique.SPECTROGRAM_LSB -> encodeSpectrogramLsb(payload)
@@ -278,6 +337,11 @@ class AudioStegoCarrier(
      * `2 * cover.size`.
      */
     private fun encodePhaseInversion(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples, $totalCapacityBytes-byte phase-inversion capacity) " +
+                "cannot hold even an empty payload frame ($FRAME_OVERHEAD_BYTES bytes) -- this " +
+                "cover is too small to hide anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
                 "phase-inversion capacity of $maxPayloadBytes bytes"
@@ -285,10 +349,9 @@ class AudioStegoCarrier(
         val frame = buildFrame(payload)
         val totalBits = frame.size * 8
         val requiredSamples = totalBits.toLong() * SEGMENT_SAMPLES
-        require(requiredSamples <= cover.size) {
-            "cover (${cover.size} samples) is too small to hold even an empty payload frame " +
-                "($FRAME_OVERHEAD_BYTES bytes = ${FRAME_OVERHEAD_BYTES * 8} segments of " +
-                "$SEGMENT_SAMPLES samples each)"
+        check(requiredSamples <= cover.size) {
+            "required samples ($requiredSamples) exceed cover size (${cover.size}) -- should be " +
+                "unreachable once canEmbed and the payload-size check above both hold"
         }
 
         val n = cover.size
@@ -392,6 +455,11 @@ class AudioStegoCarrier(
      * [encodePhaseInversion], no stereo interleaving is needed here).
      */
     private fun encodeSpectrogramLsb(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples, $totalCapacityBytes-byte spectrogram-LSB capacity at " +
+                "stegoStrength=$stegoStrength) cannot hold even an empty payload frame " +
+                "($FRAME_OVERHEAD_BYTES bytes) -- this cover is too small to hide anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
                 "spectrogram-LSB capacity of $maxPayloadBytes bytes at stegoStrength=$stegoStrength"
@@ -399,10 +467,9 @@ class AudioStegoCarrier(
         val frame = buildFrame(payload)
         val totalBits = frame.size * 8
         val numFrames = cover.size / FRAME_SIZE
-        require(totalBits <= numFrames.toLong() * binsPerFrame) {
-            "cover ($numFrames usable $FRAME_SIZE-sample frames) is too small to hold even an " +
-                "empty payload frame ($FRAME_OVERHEAD_BYTES bytes = ${FRAME_OVERHEAD_BYTES * 8} " +
-                "bits) at $binsPerFrame bins/frame (stegoStrength=$stegoStrength)"
+        check(totalBits <= numFrames.toLong() * binsPerFrame) {
+            "frame bits ($totalBits) exceed available bins (${numFrames.toLong() * binsPerFrame}) " +
+                "-- should be unreachable once canEmbed and the payload-size check above both hold"
         }
 
         // Start from an exact copy of `cover`: every frame past the last embedded bit, and every
@@ -550,6 +617,11 @@ class AudioStegoCarrier(
      * [cover] (only the first `MFSK_CODEWORD_BYTES * FRAME_SIZE` samples are touched).
      */
     private fun encodeMfsk(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples) cannot hold an MFSK codeword ($MFSK_CODEWORD_BYTES " +
+                "symbol blocks of $FRAME_SIZE samples each) -- this cover is too small to hide " +
+                "anything"
+        }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds MFSK's fixed capacity of $maxPayloadBytes bytes"
         }
@@ -564,26 +636,71 @@ class AudioStegoCarrier(
             "unexpected RS codeword size ${codeword.size}, expected $MFSK_CODEWORD_BYTES"
         }
         val neededSamples = MFSK_CODEWORD_BYTES.toLong() * FRAME_SIZE
-        require(neededSamples <= cover.size) {
-            "cover (${cover.size} samples) is too small to hold an MFSK codeword " +
-                "($MFSK_CODEWORD_BYTES symbol blocks of $FRAME_SIZE samples each)"
+        check(neededSamples <= cover.size) {
+            "needed samples ($neededSamples) exceed cover size (${cover.size}) -- should be " +
+                "unreachable once canEmbed holds"
         }
 
-        val out = cover.copyOf()
+        // Clipping fix (design-v5.md §12.2, revised after rev-2 MAJOR): TONE_AMPLITUDE *
+        // MFSK_TONE_COUNT simultaneous active tones can sum past int16 range on its own -- for
+        // byteValue == 0xFF (all 8 tones active), the actual measured peak is ~47876, i.e.
+        // essentially the naive 8*TONE_AMPLITUDE bound (these 8 tones sit at adjacent FFT bins,
+        // 46.875 Hz apart, so they drift back into near-alignment well within one 1024-sample
+        // block) -- measured 96-141 saturated samples per stego on the two bundled covers
+        // pre-fix. A first version of this fix used a PER-BLOCK gain split (tone-first, cover
+        // fallback); that traded clipping for something worse -- 13-15 of 64 blocks ducking the
+        // cover to a *different* gain each time, including coverGain == 0.0 in several blocks,
+        // producing ~21ms-period block-boundary sample jumps up to 150x the cover's own natural
+        // jump (audible clicks/dropouts, and a real violation of "the cover's own content
+        // survives underneath" below). Pass 1: synthesize the full (cover + tones) signal for
+        // the whole clip in floating point, unclamped -- tones only inside the touched span,
+        // cover passed through unchanged everywhere else -- and find its single peak magnitude
+        // across the ENTIRE clip, not per block.
+        val combined = DoubleArray(cover.size) { i -> cover[i].toDouble() }
         for (blockIndex in 0 until MFSK_CODEWORD_BYTES) {
             val byteValue = codeword[blockIndex].toInt() and 0xFF
+            // Neighbor bytes decide, per tone channel, whether this block's occurrence of that
+            // tone is a boundary transition (needs a ramp) or a continuation (doesn't) -- see the
+            // class KDoc's "Click fix" paragraph. A block with no previous/next neighbor (the
+            // codeword's first/last block) is treated as silent on that side, so a tone active
+            // only at the very start or end of the clip still ramps in/out rather than snapping.
+            val prevByteValue = if (blockIndex > 0) codeword[blockIndex - 1].toInt() and 0xFF else 0
+            val nextByteValue = if (blockIndex < MFSK_CODEWORD_BYTES - 1) codeword[blockIndex + 1].toInt() and 0xFF else 0
             val start = blockIndex * FRAME_SIZE
             for (i in 0 until FRAME_SIZE) {
                 var toneSample = 0.0
                 for (bit in 0 until MFSK_TONE_COUNT) {
                     val bitMask = 1 shl (MFSK_TONE_COUNT - 1 - bit) // MSB-first: bit 0 == 0x80
                     if (byteValue and bitMask != 0) {
+                        val risingEdge = prevByteValue and bitMask == 0
+                        val fallingEdge = nextByteValue and bitMask == 0
+                        val envelope = mfskToneEnvelope(i, risingEdge, fallingEdge)
                         val freqHz = (MFSK_BASE_BIN + bit) * NightjarAcoustics.SAMPLE_RATE_HZ.toDouble() / FRAME_SIZE
-                        toneSample += sin(2.0 * PI * freqHz * i / NightjarAcoustics.SAMPLE_RATE_HZ) * TONE_AMPLITUDE
+                        toneSample += sin(2.0 * PI * freqHz * i / NightjarAcoustics.SAMPLE_RATE_HZ) * TONE_AMPLITUDE * envelope
                     }
                 }
-                out[start + i] = saturatingAdd(cover[start + i], toneSample)
+                combined[start + i] += toneSample
             }
+        }
+        var peak = 0.0
+        for (value in combined) {
+            val a = abs(value)
+            if (a > peak) peak = a
+        }
+
+        // Pass 2: ONE constant gain for the whole clip -- 1.0 (no attenuation, the byte-exact
+        // common case) whenever the clip's own peak already fits under MFSK_SAMPLE_CEILING,
+        // otherwise ceiling/peak. Applying the same scalar to every sample (touched span AND the
+        // untouched tail alike) is what makes this safe: decode()'s tone-vs-guard-bin-median
+        // margin is relative, so a uniform gain never changes which bins read as "active," and
+        // there is no per-block seam left to click at -- every adjacent-sample jump in the
+        // output is bounded by `gain * (that jump in cover + that jump in the raw tone
+        // waveform) + 1` (rounding), the same relationship the ungained cover already had,
+        // just uniformly scaled. See [AudioStegoCarrierTest]'s no-discontinuity test.
+        val gain = if (peak <= MFSK_SAMPLE_CEILING || peak == 0.0) 1.0 else MFSK_SAMPLE_CEILING / peak
+        val out = ShortArray(cover.size)
+        for (i in combined.indices) {
+            out[i] = roundToShort(combined[i] * gain)
         }
         return out
     }
@@ -700,15 +817,6 @@ class AudioStegoCarrier(
         val mid = sorted.size / 2
         return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2.0 else sorted[mid]
     }
-
-    /**
-     * Adds a real-valued time-domain [toneValue] to a cover [Short] sample, saturating (not
-     * wrapping) into `Short` range — same saturating discipline as [negatedSample]/[roundToShort].
-     */
-    private fun saturatingAdd(sample: Short, toneValue: Double): Short =
-        Math.round(sample.toDouble() + toneValue)
-            .coerceIn(Short.MIN_VALUE.toLong(), Short.MAX_VALUE.toLong())
-            .toShort()
 
     // --- Frame assembly (same shape as ImageStegoCarrier.buildFrame) ---
 
@@ -946,14 +1054,47 @@ class AudioStegoCarrier(
         private const val MFSK_BASE_BIN = 420
 
         /**
-         * Amplitude of each active tone channel's sine contribution (summed across active
-         * channels, then saturate-added onto the cover -- see [saturatingAdd]). Needs to clear
+         * Amplitude of each active tone channel's sine contribution before [encodeMfsk]'s
+         * whole-clip gain (summed across active channels onto the cover). Needs to clear
          * [MFSK_DETECTION_MARGIN_DB] reliably against typical cover energy in this high band;
          * 6000 (~18% of full-scale 32767) was sized against this class's own round-trip tests,
          * comfortably larger than [MIX_AMPLITUDE] since detection here relies on an absolute
-         * presence/absence margin rather than a signed-sum trick.
+         * presence/absence margin rather than a signed-sum trick. [MFSK_TONE_COUNT] simultaneous
+         * tones at this amplitude can sum past int16 range on their own (design-v5.md §12.2,
+         * measured 96-141 saturated samples per stego pre-fix; byteValue == 0xFF's actual
+         * measured peak is ~47876 -- essentially the full 8 * TONE_AMPLITUDE bound, since these 8
+         * adjacent-bin tones drift back into near-alignment within one 1024-sample block), which
+         * is exactly why [encodeMfsk]'s whole-clip gain exists -- this constant never changes;
+         * [MFSK_SAMPLE_CEILING] is what may attenuate its effective, post-gain amplitude.
          */
         private const val TONE_AMPLITUDE = 6000.0
+
+        /**
+         * Raised-cosine ramp length (samples) [mfskToneEnvelope] applies at a tone's on/off
+         * transitions -- see the class KDoc's "Click fix" paragraph for the full sweep. 32
+         * samples (0.67 ms, ~3% of one [FRAME_SIZE] block) was the smallest of {8, 16, 24, 32,
+         * 40, 48, 56, 64, 96, 128} that pushed the boundary-locked audible-band residual below
+         * -70 dBFS on *both* bundled sample covers, while keeping real headroom either side of
+         * [MFSK_DETECTION_MARGIN_DB]: every still-active tone bin stayed >= 20 dB over threshold,
+         * and no silent bin's ramp-induced spectral leakage got within 4 dB of crossing it (that
+         * leakage climbs with ramp length and was measured to actually flip bits -- false-positive
+         * "on" reads on bins meant to stay silent -- starting around a 64-96 sample ramp on
+         * SOFT_SYNTH, which is why this constant is a measured value, not a round number picked
+         * for looking safe).
+         */
+        private const val MFSK_RAMP_SAMPLES = 32
+
+        /**
+         * Ceiling the combined (cover + tones) signal's peak magnitude is kept at or under across
+         * the *whole* MFSK-encoded clip, used by [encodeMfsk] to derive its single whole-clip
+         * gain (`MFSK_SAMPLE_CEILING / peak`, applied uniformly, never per-block -- see that
+         * function's and the class KDoc's "Clipping fix" notes for why a uniform gain, not a
+         * per-block one, is required). Comfortably short of `Short.MAX_VALUE` (32767) so no
+         * legitimate (non-clipped) sum can land exactly on the int16 saturation boundary either --
+         * only genuine out-of-range arithmetic would, and this fix's whole point is that it never
+         * happens.
+         */
+        private const val MFSK_SAMPLE_CEILING = 32000.0
 
         /**
          * Minimum dB a tone bin's magnitude must exceed the surrounding guard band's median
@@ -992,80 +1133,29 @@ class AudioStegoCarrier(
         private const val MFSK_CODEWORD_BYTES = RS_DATA_BYTES + RS_PARITY_BYTES
 
         /**
-         * In-place iterative radix-2 Cooley-Tukey FFT -- the same standard algorithm as
-         * `AcousticDetector.fft`/`AcousticCarrier.fft`, but neither of those is reusable here: both
-         * are declared inside a `private companion object` (`AcousticDetector.fft`) or as a private
-         * member of one (`AcousticCarrier.fft`), so neither is visible outside its own file, and
-         * de-duplicating them into a shared utility is explicitly out of scope for this task. This
-         * is therefore a third, independent copy. `re.size` MUST be a power of two -- true for
-         * [FRAME_SIZE].
+         * Raised-cosine (Hann) amplitude multiplier for sample [n] (0-indexed within its
+         * [FRAME_SIZE]-sample symbol block) of a tone that is active in this block -- see the
+         * class KDoc's "Click fix" paragraph. Ramps 0 -> 1 over the first [MFSK_RAMP_SAMPLES]
+         * samples when [risingEdge] (that tone channel was silent in the previous block, or this
+         * is the codeword's first block), and 1 -> 0 over the last [MFSK_RAMP_SAMPLES] samples
+         * when [fallingEdge] (silent in the next block, or this is the last block). A tone that
+         * stays active across a boundary gets neither edge and plays through at full, constant
+         * amplitude -- correct because [MFSK_BASE_BIN]-relative tone frequencies are always an
+         * integer number of cycles per block, so the raw sinusoid is already phase-continuous
+         * there (`sin` at sample [FRAME_SIZE] of one block equals `sin` at sample 0 of the next),
+         * and no additional shaping is needed to avoid a discontinuity that was never there.
          */
-        private fun fft(re: DoubleArray, im: DoubleArray) {
-            val n = re.size
-            require(n and (n - 1) == 0) { "FFT size must be a power of two, was $n" }
-
-            var j = 0
-            for (i in 1 until n) {
-                var bit = n shr 1
-                while (j and bit != 0) {
-                    j = j xor bit
-                    bit = bit shr 1
-                }
-                j = j or bit
-                if (i < j) {
-                    val tr = re[i]; re[i] = re[j]; re[j] = tr
-                    val ti = im[i]; im[i] = im[j]; im[j] = ti
-                }
+        private fun mfskToneEnvelope(n: Int, risingEdge: Boolean, fallingEdge: Boolean): Double {
+            var envelope = 1.0
+            if (risingEdge && n < MFSK_RAMP_SAMPLES) {
+                envelope = 0.5 * (1.0 - cos(PI * n / MFSK_RAMP_SAMPLES))
             }
-
-            var len = 2
-            while (len <= n) {
-                val ang = -2.0 * PI / len
-                val wRe = cos(ang)
-                val wIm = sin(ang)
-                var i = 0
-                while (i < n) {
-                    var curRe = 1.0
-                    var curIm = 0.0
-                    val half = len / 2
-                    for (k in 0 until half) {
-                        val evenIdx = i + k
-                        val oddIdx = evenIdx + half
-                        val uRe = re[evenIdx]
-                        val uIm = im[evenIdx]
-                        val vRe = re[oddIdx] * curRe - im[oddIdx] * curIm
-                        val vIm = re[oddIdx] * curIm + im[oddIdx] * curRe
-                        re[evenIdx] = uRe + vRe
-                        im[evenIdx] = uIm + vIm
-                        re[oddIdx] = uRe - vRe
-                        im[oddIdx] = uIm - vIm
-                        val nextCurRe = curRe * wRe - curIm * wIm
-                        val nextCurIm = curRe * wIm + curIm * wRe
-                        curRe = nextCurRe
-                        curIm = nextCurIm
-                    }
-                    i += len
-                }
-                len = len shl 1
+            if (fallingEdge && n >= FRAME_SIZE - MFSK_RAMP_SAMPLES) {
+                val samplesFromBlockEnd = n - (FRAME_SIZE - MFSK_RAMP_SAMPLES)
+                val fallingEnvelope = 0.5 * (1.0 + cos(PI * samplesFromBlockEnd / MFSK_RAMP_SAMPLES))
+                envelope = min(envelope, fallingEnvelope)
             }
-        }
-
-        /**
-         * Inverse FFT via the standard conjugate trick: negate `im`, run the forward [fft], negate
-         * the result's `im` again, then divide both `re` and `im` by `n`. There is no separate
-         * inverse implementation to get wrong independently of [fft] -- and the `n` normalization
-         * (not `sqrt(n)`, and applied to both `re` and `im`) is exactly what makes `ifft(fft(x))`
-         * return `x` (up to floating-point rounding), which the class KDoc's "untouched frames
-         * round-trip exactly" claim depends on.
-         */
-        private fun ifft(re: DoubleArray, im: DoubleArray) {
-            val n = re.size
-            for (i in im.indices) im[i] = -im[i]
-            fft(re, im)
-            for (i in re.indices) {
-                re[i] = re[i] / n
-                im[i] = -im[i] / n
-            }
+            return envelope
         }
 
         /** Rounds to the nearest `Long` and saturate-clamps into `Short` range. */

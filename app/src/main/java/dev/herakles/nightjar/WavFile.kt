@@ -52,6 +52,17 @@ object WavFile {
     const val HEADER_BYTES: Int = 44
 
     private const val PCM_AUDIO_FORMAT: Int = 1
+
+    /**
+     * `AudioFormat` value marking a `fmt ` chunk as `WAVE_FORMAT_EXTENSIBLE` (codec-M02): the
+     * real codec is deferred to a 16-byte `SubFormat` GUID inside the chunk body rather than
+     * `AudioFormat` itself. Written by tools that need >2 channels or an explicit channel-mask
+     * (and some Android/desktop recorders even for plain stereo/mono PCM16) — not an exotic
+     * corner case, so [decodePcm16] accepts it exactly like [PCM_AUDIO_FORMAT] once the
+     * `SubFormat` confirms it's really PCM. See [isPcmAudioFormat].
+     */
+    private const val WAVE_FORMAT_EXTENSIBLE: Int = 0xFFFE
+
     private const val MONO_CHANNELS: Int = 1
     private const val STEREO_CHANNELS: Int = 2
     private const val BITS_PER_SAMPLE: Int = 16
@@ -155,12 +166,13 @@ object WavFile {
      * layout [encodePcm16Mono] itself always produces.
      *
      * Returns `null` (never throws) for anything that isn't a usable PCM16 carrier: not a
-     * RIFF/WAVE file, no `fmt `/`data` chunk found, a non-PCM `fmt ` (`AudioFormat != 1`), or a
-     * bit depth other than 16 — `AcousticCarrier.decode()` only ever operates on PCM16 samples
-     * (architecture.md §1). A *correct* PCM16 file at the wrong sample rate or channel count
-     * still parses successfully here — that check belongs to the caller
-     * (`AcousticModemScreen.kt`'s import path), which needs the real numbers to report a useful
-     * "file is Xhz Y, need 48000Hz mono" message rather than a bare parse failure.
+     * RIFF/WAVE file, no `fmt `/`data` chunk found, a non-PCM `fmt ` (`AudioFormat` neither `1`
+     * nor a `WAVE_FORMAT_EXTENSIBLE` (`0xFFFE`) `fmt ` chunk whose `SubFormat` GUID is the PCM
+     * one — see [isPcmAudioFormat]), or a bit depth other than 16 — `AcousticCarrier.decode()`
+     * only ever operates on PCM16 samples (architecture.md §1). A *correct* PCM16 file at the
+     * wrong sample rate or channel count still parses successfully here — that check belongs to
+     * the caller (`AcousticModemScreen.kt`'s import path), which needs the real numbers to report
+     * a useful "file is Xhz Y, need 48000Hz mono" message rather than a bare parse failure.
      *
      * `data`'s declared size is clamped to what's actually present in [bytes] — a capture cut off
      * mid-write (or a file truncated in transit) still parses whatever audio survived, rather
@@ -176,6 +188,7 @@ object WavFile {
         var numChannels: Int? = null
         var sampleRateHz: Int? = null
         var bitsPerSample: Int? = null
+        var subFormatIsPcm = false
         var dataOffset = -1
         var dataSize = -1
 
@@ -191,6 +204,16 @@ object WavFile {
                     numChannels = readLE16(bytes, chunkDataStart + 2)
                     sampleRateHz = readLE32(bytes, chunkDataStart + 4)
                     bitsPerSample = readLE16(bytes, chunkDataStart + 14)
+                    // WAVE_FORMAT_EXTENSIBLE (codec-M02): the real codec lives in the 16-byte
+                    // SubFormat GUID at fmt-body offset 24 (chunkDataStart + 24), not in
+                    // AudioFormat itself (always 0xFFFE for this variant). Only the GUID's
+                    // leading 2 bytes distinguish KSDATAFORMAT_SUBTYPE_PCM (0x0001) from every
+                    // other subtype -- the trailing 14 bytes are the same fixed
+                    // "...0000-0010-8000-00AA00389B71" suffix for every Microsoft-defined
+                    // subtype, so comparing just those 2 bytes is sufficient and matches how the
+                    // GUID's own leading Data1 field encodes the format tag.
+                    subFormatIsPcm = chunkDataStart + 26 <= bytes.size &&
+                        readLE16(bytes, chunkDataStart + 24) == PCM_AUDIO_FORMAT
                 }
                 "data" -> {
                     dataOffset = chunkDataStart
@@ -206,7 +229,11 @@ object WavFile {
             pos = next
         }
 
-        if (audioFormat != 1 || bitsPerSample != 16 || dataOffset < 0 || dataSize < 0) return null
+        if (!isPcmAudioFormat(audioFormat, subFormatIsPcm) || bitsPerSample != 16 ||
+            dataOffset < 0 || dataSize < 0
+        ) {
+            return null
+        }
         val channels = numChannels ?: return null
         val rate = sampleRateHz ?: return null
         if (channels <= 0 || rate <= 0) return null
@@ -218,6 +245,15 @@ object WavFile {
         }
         return ParsedWav(sampleRateHz = rate, numChannels = channels, samples = samples)
     }
+
+    /**
+     * True if a `fmt ` chunk whose `AudioFormat` field is [audioFormat] carries genuine PCM16
+     * data: either the plain [PCM_AUDIO_FORMAT] (`1`) tag, or [WAVE_FORMAT_EXTENSIBLE] (`0xFFFE`)
+     * with [subFormatIsPcm] confirming the `SubFormat` GUID is `KSDATAFORMAT_SUBTYPE_PCM`
+     * (codec-M02). `null` (no `fmt ` chunk found, or too short to read) is never PCM.
+     */
+    private fun isPcmAudioFormat(audioFormat: Int?, subFormatIsPcm: Boolean): Boolean =
+        audioFormat == PCM_AUDIO_FORMAT || (audioFormat == WAVE_FORMAT_EXTENSIBLE && subFormatIsPcm)
 
     private fun readAscii(bytes: ByteArray, pos: Int, length: Int): String {
         val chars = CharArray(length) { bytes[pos + it].toInt().toChar() }

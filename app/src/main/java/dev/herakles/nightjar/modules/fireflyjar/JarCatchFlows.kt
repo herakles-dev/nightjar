@@ -20,11 +20,11 @@ import dev.herakles.nightjar.modules.imagestego.jarCatchFlow as imageStegoJarCat
  * distinction [dev.herakles.nightjar.picker.JarRole] already draws.
  */
 @Composable
-fun catchFlowFor(module: Module, dao: FireflyDao, onExit: () -> Unit) {
+fun catchFlowFor(module: Module, repository: FireflyRepository, onExit: () -> Unit) {
     when (module) {
-        Module.ACOUSTIC_MODEM -> acousticJarCatchFlow(dao = dao, onExit = onExit)
-        Module.IMAGE_STEGANOGRAPHY -> imageStegoJarCatchFlow(dao = dao, onExit = onExit)
-        Module.AUDIO_STEGANOGRAPHY -> audioStegoJarCatchFlow(dao = dao, onExit = onExit)
-        Module.DETECTOR -> jarWatchFlow(dao = dao, onExit = onExit)
+        Module.ACOUSTIC_MODEM -> acousticJarCatchFlow(repository = repository, onExit = onExit)
+        Module.IMAGE_STEGANOGRAPHY -> imageStegoJarCatchFlow(repository = repository, onExit = onExit)
+        Module.AUDIO_STEGANOGRAPHY -> audioStegoJarCatchFlow(repository = repository, onExit = onExit)
+        Module.DETECTOR -> jarWatchFlow(repository = repository, onExit = onExit)
     }
 }
