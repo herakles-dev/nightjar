@@ -74,6 +74,50 @@ anywhere in the covert-data research base.
   count, never `Module` — the addition introduces no per-`Module` branch
   (`architecture.md` § Firefly Jar § 6). The spectrogram-LSB embedding format is
   unchanged: caught fireflies depend on it.
+- **In scope (v6 addition, this spec revision):** sharing fireflies between two
+  people who both have nightjar, through whatever app they already talk in, plus a
+  first-use riddle trail that teaches the app by doing.
+  - **Sturdy image fireflies** — a new Module 1 technique built to survive what
+    messaging apps do to photos (JPEG recompression, downscaling, 4:2:0 chroma,
+    metadata stripping): a small payload (target ≥ 64 bytes, enough for a message)
+    carried in luminance on a logical grid defined relative to the image's
+    dimensions, protected by Reed-Solomon, with its own magic + version. It sits
+    beside the existing raw-pixel LSB technique (now called "exact" in jar copy),
+    which is unchanged. Survival is measured, first offline and then through the
+    real apps installed on Hek, never assumed.
+  - **Lossless file route** — exact image and all audio fireflies travel as the
+    original PNG/WAV. The share flow gives per-channel advice drawn from the
+    measured channel table ("send it as a file"), and the receiving side says
+    plainly when an app squeezed a firefly, instead of reporting a checksum error.
+  - **Receive from anywhere** — nightjar accepts image and audio files from any
+    app's share sheet and from "open with", and offers a "catch from a photo or
+    file" entry inside the jar. The technique is auto-detected and the result lands
+    as a received firefly in the right jar.
+  - **Send from the jar** — "send this firefly" on a firefly's detail, and "hide
+    one in a photo" using the user's own picture (sturdy by default, exact
+    optional, with capacity and file size shown up front). Sending hands the share
+    sheet a private cache file; nothing reaches Photos or Music unless the user
+    separately keeps a copy (INV-5, amended).
+  - **Workshop audio send/receive** — the audio technical screen gains save/share
+    for its stego WAV and can decode a received WAV, trying all three techniques.
+  - **Riddle trail** — on first launch each creating jar holds one practice
+    firefly whose real hidden payload is a short, cryptic riddle. Each riddle is
+    accurate about how its technique works and points at the next thing to try,
+    with a one-line plain gloss available beside it. The last one leads to sending
+    and then to the workshop. One next step at a time is marked with the jar's
+    existing glow, and there are no overlays, carousels or coach-mark bubbles
+    (`design/firefly-jar-identity.md`). Progress persists; the trail can be skipped,
+    replayed, and its fireflies released.
+  - **Completeness** — TalkBack descriptions for the four custom-drawn carrier
+    views (deferred follow-up #12) and for every guidance highlight; all v6 copy
+    in `strings.xml`; MFSK's "lossy-channel robust" claim measured against real
+    codecs and corrected to the result.
+  - **The meadow** — the detector's tile, "the watching jar", becomes "the
+    meadow" in all user-facing copy (it never keeps a firefly, it only notices
+    them), and moves to 4th on the shelf, swapping with the humming jar, so the
+    three creating jars come first. The order comes from the `Module` enum, so the
+    workshop list follows. Internal identifiers (`JarRole.WATCHING`,
+    `JarWatching*` color tokens) keep their names (owner direction, 2026-09-21)
 - **Out of scope:** Module 4 video steganography (needs a non-mobile ML
   watermarking component) — deferred, and still out of scope under v5; the
   `AudioStegDetector` counterpart for Module 2 is now in scope under the v5
@@ -104,10 +148,29 @@ anywhere in the covert-data research base.
   technical screen; changing the spectrogram-LSB embedding format (including the
   silent-frame click train it produces — that is a gate-8 headphone-check item,
   not a codec change)
+  v6 addition, amendments and out of scope: jar-mode send is now in scope under
+  the v6 addition above, as a private cache-file share that never writes to shared
+  storage, which supersedes the jar-mode export exclusion above; "upload to any
+  third-party platform" still holds, because nightjar itself never uploads or posts
+  anything, and under v6 the user's own apps carry every file it hands to the share
+  sheet. Out of scope: sturdy fireflies surviving crops, rotation, filters,
+  screenshots or edits, and any promise about channels outside the measured table;
+  text/Unicode fireflies (considered and not chosen this round); encryption or
+  passwords (a firefly is hidden, not locked, and the copy says so); distributing
+  the app (both ends need nightjar installed, with no store listing, install link
+  or in-app invite); scanning the gallery or any inbox for fireflies; a detector
+  for the sturdy technique (follow-up; the copy says truthfully whether the
+  existing image check flags it); lossy-robust audio beyond measuring MFSK;
+  moving pre-v6 hard-coded copy into `strings.xml`; the spectrogram-LSB silent-frame
+  versioned-format fix (follow-up #9)
 - **Crosses:** device speaker/mic (AudioRecord/AudioTrack); local
   filesystem/MediaStore for sample images; the existing `hek` ADB bridge for
   install + debug-state verification (not a runtime dependency); no
-  backend/server — fully on-device
+  backend/server — fully on-device. v6 addition: Android's share sheet
+  (`ACTION_SEND` out and in), `ACTION_VIEW` "open with", `FileProvider` over a
+  private cache directory, the Photo Picker and document picker; the user's own
+  messaging apps (Messenger, Facebook, SMS/MMS, Telegram, email) are the
+  transport, reached only through the system chooser and never invoked directly
 
 ## Invariants
 - INV-1: Encoder paths only ever accept operator-supplied benign payloads —
@@ -118,9 +181,12 @@ anywhere in the covert-data research base.
   architect-defined max size at the architect-defined SNR/distance envelope
 - INV-4: The detector can identify the app's own Module 3 transmission live —
   self-detectability is the defensive proof-of-concept this app exists for
-- INV-5: Persisted carrier media stays app-private (`filesDir`) — it is never
-  written to shared storage and never leaves the device except through the
-  technical screens' existing, explicitly-invoked save/share action
+- INV-5 (amended in v6): Persisted carrier media stays app-private (`filesDir`).
+  It leaves the app only through an explicit user action: jar-mode "send" hands
+  the share sheet a copy in a private cache directory via `FileProvider` and writes
+  nothing to shared storage; the technical screens' save/share may write to
+  `Pictures/Nightjar` / `Music/Nightjar` as before. No path writes to shared storage
+  without its own explicit save or "keep a copy" gesture
 - INV-6: No firefly media outlives its record and no record outlives its media —
   clearing (all, or one) removes rows and files together, and an orphan sweep
   reclaims any file a crash stranded between the two writes
@@ -132,6 +198,23 @@ anywhere in the covert-data research base.
   a cover that re-derives to within −20 dB residual energy of the stego;
   otherwise it is withheld with a stated reason, never approximated. The v5
   addition leaves the Room schema at version 2
+- INV-9: Existing carrier formats are frozen — the exact-LSB image frame, all
+  three audio-stego formats and the acoustic modem format decode byte-for-byte as
+  in v5, and the sturdy technique is told apart by its own magic + version, so
+  every firefly caught before v6 still decodes. The v6 addition leaves the Room
+  schema at version 2 (the new technique is a `technique` string value, and
+  practice status lives in the trail's own saved state keyed by record id)
+- INV-10: nightjar has no network path and no broad storage access — no
+  `INTERNET` permission and no media/storage read permission. Every byte enters or
+  leaves through the share sheet, "open with", the Photo Picker or the document
+  picker, driven by the user
+- INV-11: Practice fireflies are real — each riddle is embedded by the production
+  encoder into a real carrier and revealed only through the production decoder,
+  and no riddle text is shown from anywhere but a successful decode (its plain
+  gloss is ordinary UI copy, labelled as such)
+- INV-12: Receiving never guesses — every incoming file resolves to exactly one of
+  caught, squeezed, damaged, no firefly, or unsupported, and a message is shown only
+  after its checksum verifies
 
 ## Non-goals
 - Not a Bluetooth/WiFi file-transfer replacement — throughput is
@@ -143,6 +226,10 @@ anywhere in the covert-data research base.
   test device only
 - Not a media gallery or file manager — the firefly collection exists to explain
   the covert channel that produced it, not to organize the user's media
+- Not a secure messenger (v6) — sharing makes fireflies travel, not secret:
+  anyone with nightjar who receives one can read it, and the send flow says so
+- Not a coverage guarantee (v6) — a channel counts as "works" only once it appears
+  in the measured channel table, and app updates on either end can change that
 
 ## Runtime Verification Surface
 - Probe contract: debug builds expose a logcat-tagged JSON state dump
@@ -157,6 +244,13 @@ anywhere in the covert-data research base.
   jar's peek report detector confidence under `ModuleId.AUDIO_STEGANALYSIS`, so
   flagged/clear is assertable from `COVERT_DEBUG`, and a peek leaves the stored
   record count unchanged
+- Probe contract (v6 addition): the dump gains the last incoming file (action,
+  MIME type, detected technique, outcome from INV-12's five), the last send
+  (technique, cache file bytes, authority used), cache-dir file count, and the
+  trail state (current step, steps done, skipped). Receiving is driven from the
+  bridge by `adb shell am start` with `ACTION_SEND`/`ACTION_VIEW` against pushed,
+  media-scanned fixtures. INV-5's "no shared-storage write" is asserted by
+  MediaStore row counts (`adb shell content query`) before and after a send
 - Waiver: N/A — probe required and defined above
 
 ## Agents
@@ -168,6 +262,11 @@ anywhere in the covert-data research base.
 | testing | spec-tester-v11 | round-trip + detector accuracy verification on both physical devices |
 | persistence (v4) | database-engineer | the Room v1→v2 migration is the one change that can brick launch for existing installs |
 | steganalysis calibration (v5) | spec-tester-v11 | thresholds are measured against the real codec, not asserted |
+| sturdy codec design (v6) | spec-architect-v11 | surviving recompression + resize is novel; the design has to come from offline measurement |
+| share/receive + trail build (v6) | spec-implementer-v11 | intents, `FileProvider`, detection router, trail state |
+| trail + send/receive UX (v6) | android-designer | guidance has to stay inside the jar identity: glow, not overlays |
+| channel + riddle verification (v6) | spec-tester-v11 | channel survival and riddle accuracy are measured, not asserted |
+| v6 review | adversarial-reviewer | new external input surface (incoming intents) + amended INV-5 |
 
 ## Gates
 - gate-1: scaffolded, builds, module-picker navigates 3 empty stubs
@@ -298,3 +397,83 @@ anywhere in the covert-data research base.
   updated, and `design/firefly-jar-identity.md`'s data-visualization allowance
   confirmed for the two new views; covert-data module-2 and library §06
   cross-referenced; session closed
+
+## Gates — v6 addition (sharing + first-use riddle trail)
+- gate-27: the sturdy technique lands as a pure-JVM `CovertCarrier` with a
+  `decode(encode(payload)) == payload` round-trip test, its own magic + version,
+  and no false catch across ≥ 200 clean images (real photos, gradients, noise,
+  both bundled covers). The exact-LSB frame and every audio format are
+  byte-for-byte unchanged, proven by decoding stored pre-v6 fixtures (INV-9)
+- gate-28: sturdy survival measured offline before any UI exists: a ≥ 64-byte
+  payload comes back intact after JPEG recompression at q 50–95 × downscale to
+  1600 / 1080 / 640 px long side × 4:2:0 chroma, across ≥ 20 real photo covers.
+  Margins are recorded in the test KDoc. Crops, rotation, heavy filters and
+  screenshots are asserted to fail cleanly (damaged or no firefly, never a wrong
+  message)
+- gate-29: channel survival measured for real, with sends performed by the owner
+  (they go out from the owner's own accounts): sturdy through Messenger photo,
+  Facebook (only-me visibility or Messenger), MMS via Fossify Messages to the
+  second phone, Telegram compressed photo, and K-9 email; exact image and audio
+  through each channel's file/document mode. Results land as a measured channel
+  table in `architecture.md`, and the in-app channel advice is written from that
+  table, not asserted
+- gate-30: sturdy fidelity judged by eye (gate-8 pattern): the owner compares
+  cover and sturdy at default strength on ≥ 3 of their own photos on Hek, and the
+  caption states what they actually saw. The existing image check is run on
+  sturdy output, and the copy says truthfully whether it flags
+- gate-31: receive from any app — the manifest accepts `ACTION_SEND` and
+  `ACTION_VIEW` for `image/*` and `audio/*`; `MainActivity` handles both
+  `onCreate` and `onNewIntent`; the technique is auto-detected (exact, sturdy, the
+  three audio techniques, acoustic modem WAV) and lands as a received firefly in the
+  right jar; the jar gains "catch from a photo or file" via the Photo Picker and
+  document picker; no permission is added (INV-10). Verified on Hek by bridge
+  intent injection and by real shares from Fossify Gallery, Telegram and K-9
+- gate-32: honest failure on receive — an exact firefly that arrives as a JPEG or
+  resized says it was squeezed on the way and what to do instead, never "checksum
+  didn't match"; squeezed, damaged, no firefly and unsupported are distinct
+  outcomes, each fixture-tested and reported on `COVERT_DEBUG` (INV-12)
+- gate-33: send from the jar — "send this firefly" and "hide one in a photo" (own
+  photo via the Photo Picker; sturdy by default; exact optional with its "send it
+  as a file" note; capacity and file size shown before sending; "hidden, not locked"
+  stated) open the share sheet from a private cache file via `FileProvider`.
+  MediaStore row counts are unchanged across a send, cache files are swept, and
+  amended INV-5 holds under test
+- gate-34: workshop audio send/receive — the audio technical screen saves/shares
+  its stego WAV and decodes a received WAV (trying all three techniques and naming
+  which matched), round-tripped between Hek and the second phone over a lossless
+  channel
+- gate-35: MFSK's "lossy-channel robust" claim measured — MFSK stego transcoded to
+  AAC and Opus at typical messaging bitrates (offline) and through one real
+  channel; the KDoc, `architecture.md` and any UI copy corrected to the measured
+  result, including if the 19.7–20.0 kHz tones do not survive a codec's low-pass
+- gate-36: riddle trail — a fresh install (or "start the trail again") puts one
+  practice firefly in each creating jar, and each is caught through the
+  production decode path (INV-11, verified by extracting the same carrier in the
+  workshop). The meadow's step completes on a real detection or says
+  honestly why it can't on one phone. One next step glows at a time; progress
+  survives process death; skip and replay work; practice fireflies are labelled
+  and can be released like any other; Room stays at version 2
+- gate-37: riddles teach truthfully — every riddle and its plain gloss is checked
+  against the code (what the technique changes, what the view shows, capacity);
+  a JVM test proves each riddle fits its carrier's capacity at default settings;
+  jar voice rules hold (lowercase, no exclamation, no emoji); the owner approves
+  the final wording
+- gate-38: guidance is subtle and accessible — highlights reuse the existing glow
+  primitives, with no scrim, modal, coach-mark bubble or carousel
+  (`design/firefly-jar-identity.md` re-checked). With animations off, the
+  highlight is static rather than missing. Every highlight and all four
+  custom-drawn carrier views (bit-plane, spectrogram, difference, polarity) have
+  TalkBack descriptions (closes follow-up #12), and all v6 copy lives in
+  `strings.xml`
+- gate-39: the meadow — no user-facing string says "watching jar" (audited by a
+  grep-backed JVM test over the copy); the shelf and the workshop list show
+  singing, framed, humming, meadow in that order, pinned by a test on
+  `Module.entries`; nothing persists an enum ordinal (verified before the reorder),
+  so stored fireflies keep their jars; the meadow tile's visual treatment follows
+  the v6 design addendum; verified on Hek
+- gate-40: safety and close — safety-scope checklist re-run (INV-1 benign
+  payloads, INV-10 no network or storage permission, and a review of the new
+  incoming-intent surface for malformed and oversized files); `architecture.md`,
+  `design/screen-flow.md` and `design/firefly-jar-identity.md` reconciled with the
+  shipped code; full unit suite green; v1–v5 on-device spot check on Hek; covert-data
+  module-1 cross-referenced for the sturdy technique; session closed
