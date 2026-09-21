@@ -1412,7 +1412,16 @@ private fun FireflyAudioCarrier(
                     image = spectrogramImage,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(56.dp)
+                        // gate-38 (v6): this canvas had no semantics -- TalkBack skipped it
+                        // entirely. wav is the exact ParsedWav this LaunchedEffect already
+                        // decoded, so durationSeconds is measured, never guessed.
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = audioSpectrogramContentDescription(
+                                technique = technique,
+                                durationSeconds = wav.samples.size / wav.numChannels.toDouble() / wav.sampleRateHz.toDouble(),
+                            )
+                        },
                 )
             } else {
                 // Unreachable in practice -- see this function's KDoc -- but present anyway,
@@ -1642,9 +1651,13 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
  * `AudioStegoCarrier.kt`'s own `DecodeFailure` handling already documents for its unreachable
  * cases.
  */
-private data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
+// gate-38 (v6): widened from `private` to `internal` (unchanged otherwise) so
+// audioSpectrogramContentDescription below -- and its JVM test -- can read this exact caption
+// text rather than duplicating it, guaranteeing the spectrogram canvas's spoken label can never
+// drift from the visible caption Text right underneath it.
+internal data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
 
-private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
+internal fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
     "MFSK" -> AudioSpectrogramCaption(
         text = "eight tones sit in a bright band near 19.7khz. that's the payload, visible right here.",
         genuinelyVisible = true,
@@ -1663,6 +1676,21 @@ private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption
         genuinelyVisible = true,
     )
     else -> AudioSpectrogramCaption(text = "", genuinelyVisible = false)
+}
+
+/**
+ * gate-38 (v6 addition, closes deferred follow-up #12) — [FireflySpectrogramCanvas]'s spoken
+ * label: [FireflyAudioCarrier]'s bare spectrogram [androidx.compose.foundation.Canvas] had no
+ * semantics at all, so TalkBack skipped it, landing straight from the view toggle onto the
+ * caption [Text] beneath it with nothing said about the canvas in between. [durationSeconds] is a
+ * real measured fact ([WavFile.ParsedWav] the caller already decoded, never re-derived here), and
+ * the rest is [audioSpectrogramCaption]'s own text for [technique] *verbatim* — calling that
+ * function rather than restating its claims is what guarantees this can never say more than the
+ * visible caption does (v5/v6 honesty rules, gate-19/24/26/38).
+ */
+internal fun audioSpectrogramContentDescription(technique: String?, durationSeconds: Double): String {
+    val duration = String.format(Locale.US, "%.1f", durationSeconds)
+    return "spectrogram of a $duration second clip. ${audioSpectrogramCaption(technique).text}"
 }
 
 /**
