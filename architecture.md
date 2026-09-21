@@ -820,3 +820,154 @@ The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → 
 (screen-flow.md § Screen 7, already module-agnostic) need zero changes.
 
 ---
+
+## Sturdy image technique (v6)
+
+> Task W0-A (design + offline measurement). Author: spec-architect-v11, 2026-09-21.
+> A second Module-1 image technique, sibling to the frozen exact-LSB carrier. It is **not** a
+> change to the exact-LSB frame (INV-9): it lands as its own pure-JVM `CovertCarrier` with its
+> own magic, told apart from every pre-v6 firefly by that magic + version. Every number below is
+> measured offline by the prototype in `scratchpad/sturdy/` (`sturdy_carrier.kt` + `harness.kt`),
+> never assumed. Real-channel confirmation is gate-29's job.
+
+### Why exact-LSB cannot survive a messaging app
+Raw-pixel LSB embeds one bit per colour channel in the least-significant bit. JPEG requantises
+every 8×8 DCT block, downscaling resamples pixels, and 4:2:0 subsampling throws away half the
+chroma — any of these obliterates the LSB plane. Survival therefore has to live in a feature that
+recompression and resizing *preserve*: the **low-spatial-frequency luminance** of a region, read
+on a grid defined relative to the image so a uniform downscale keeps the mapping.
+
+### Scheme — SFLY (dither-QIM on a logical luminance grid)
+1. **Luminance only.** Work on Y = 0.299R + 0.587G + 0.114B; leave Cb/Cr untouched (messaging
+   apps subsample chroma 4:2:0, so only luma is a reliable carrier). A luma shift is applied by
+   adding the same delta to R, G and B, which moves Y and leaves Cb/Cr exactly where they were.
+2. **Logical grid.** A `GX × GY` grid is laid over the image *relative to its dimensions*: cell
+   (gx,gy) owns source columns `[gx·W/GX, (gx+1)·W/GX)` and the matching rows. Encoder and decoder
+   both compute each cell's **mean luminance** the same way. A uniform downscale keeps which pixels
+   land in which cell, so the decoder just recomputes the grid on whatever size it receives — no
+   registration, no side information.
+3. **Dither QIM per cell.** Each coded bit is carried by one cell's mean luminance: bit 0 snaps the
+   mean to the lattice `{k·Δ}`, bit 1 to `{k·Δ + Δ/2}`. The whole cell is shifted by one flat luma
+   delta to reach the target. A flat shift is a DC-ish change — JPEG's DC coefficient and every
+   resampler preserve it, and the eye tolerates it far better than the same energy as high-frequency
+   noise.
+4. **FEC + repetition + interleave.** The payload is wrapped in a self-describing frame, protected
+   by Reed-Solomon over GF(256), and each coded bit is **repeated R times, its copies dispersed
+   across the grid** by a fixed interleave so a JPEG-block burst or a torn region only nicks each
+   symbol. The decoder soft-combines the copies (sums the signed QIM distance), hard-decides,
+   RS-corrects, then checks CRC-32. RS + CRC are the safety net that makes a damaged image decode to
+   *damaged*, never to a wrong message (INV-12).
+5. **DC-offset search.** JPEG and resampling can shift absolute luminance slightly, biasing every
+   QIM decision the same way. The decoder tries a small set of DC-offset hypotheses (± fractions of
+   Δ) and accepts the first whose RS **and** CRC-32 pass. CRC-32 makes a false accept ≈ 2⁻³² per
+   trial, so the handful of hypotheses stays safe.
+
+### Frame format (before FEC)
+Own magic `0x53 0x46` (`"SF"`) — deliberately **not** exact-LSB's `0x4E` — so the two techniques
+never collide and auto-detect can tell them apart (INV-9, INV-12).
+
+| Field    | Bytes | Value / meaning                                             |
+|----------|-------|------------------------------------------------------------|
+| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)        |
+| version  | 1     | `0x01`                                                      |
+| length   | 2     | payload byte count, big-endian (== 64 this version)        |
+| payload  | N     | N = 64 bytes (fixed this version → decoder geometry needs no side info) |
+| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+payload, big-endian |
+
+Frame = 5 + 64 + 4 = **73 bytes**. It is RS-encoded as one systematic codeword
+`RS(73 + 48, 73) = RS(121, 73)`, correcting up to **24 byte-errors**.
+
+### Parameters (measured, not guessed)
+| Param | Value | Reasoning |
+|-------|-------|-----------|
+| Grid `GX×GY` | **72 × 72** (5184 cells) | Fine enough for capacity + interleave depth; coarse enough that at a 640 px long side each cell is still ~9 px, averaging ~80 px so JPEG/resample noise washes out. Below ~512 px long side cells get too small and survival drops (see edge below). |
+| `Δ` (QIM step) | **24** (luma, 0–255) | Lowest step that held **21/21** covers through the MMS-like pipeline with margin. Δ=20 lost one cover at 640/q60; Δ=22 lost one; Δ=24 cleared everything. Larger Δ only costs visibility. |
+| Max per-pixel luma delta | **12** (= Δ/2) | Worst-case flat shift to reach a lattice point. |
+| RS parity | **48** → RS(121,73), t=24 | Half-rate-ish FEC; combined with repetition it is mostly a safety net (see margin). |
+| Repetition `R` | **5** | Soft-combining 5 dispersed copies is the main robustness lever; it carried the two hardest covers (a 741×500 photo downscaled to exactly 640, and a synthetic hard-edged mosaic). |
+| Payload | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed size keeps decoder geometry deterministic without a length side-channel. |
+
+Bit budget: coded = 121 bytes = 968 bits; × R=5 = 4840 cells used of 5184 (344 spare). Effective
+code rate ≈ 64 / 648 ≈ **1/10** — heavy by design, because the channel is hostile.
+
+### Capacity
+Payload is a fixed **64 bytes** this version (enough for a short message, per spec). The grid could
+carry more (raw grid bit-capacity 648 bytes before FEC/repetition), but larger payloads need a new
+version byte and a re-measured Δ/R, so they are deliberately out of scope for v6.
+
+### Measured survival matrix
+Covers: 21 lossless images — 18 real natural photos (skimage's astronaut, coffee, chelsea, cat,
+rocket, coins, camera, moon, brick, grass, gravel, page, clock, hubble, retina, immunohisto,
+colorwheel, motorcycle) + 3 synthetic (gradient, cloud, mosaic). **The Kodak suite was unreachable
+at design time (r0k.us returned HTTP 401; no route out); these natural photos stand in for it.
+Gate-28's "≥20 real photos" should be re-run against actual Kodak on a networked host — see risks.**
+A 64-byte payload was embedded, pushed through each channel, and decoded; a cell is the count of
+covers whose payload came back **byte-exact**. Measured twice, with two independent JPEG encoders
+that agree:
+
+| Pipeline (long side × JPEG q, 4:2:0) | javax.imageio | libjpeg-turbo (`convert`) |
+|--------------------------------------|:---:|:---:|
+| orig × q95 / q80 / q70 / q50         | 21/21 each | — |
+| 1080 px × q80 (bicubic) / q70 (bilinear) | 21/21 / 21/21 | — |
+| 640 px × q70 (bicubic) / q60 (bilinear)  | 21/21 / 21/21 | — |
+| **Facebook-like** (2048→q85→1080→q75)    | **21/21** | **21/21** |
+| **MMS-like** (640 px, q50)               | **21/21** | **21/21** |
+
+**Headroom beyond the spec floor** (how far past q50 it holds, javax.imageio): 640 px q35 → 21/21,
+640 px q40 → 20/21, double MMS re-compression (mms twice) → 21/21. It degrades only when the image
+gets *small*: 512 px q40 → 19/21, 480 px q45 → 15/21. So the technique wants a long side **≳ 640
+px**; the app should keep/target that (a phone photo is far larger, so this is comfortable in
+practice).
+
+**FEC margin:** across MMS-like and FB-like, RS corrected a **median of 0** byte-errors — the R=5
+soft-combine alone brought the coded bitstream back clean, leaving the full t=24 RS budget and the
+CRC as untouched safety net. Margin is large.
+
+### Visibility (PSNR / max delta)
+At the default strength (Δ=24): **PSNR mean 31.6 dB, min 31.2 dB; max per-pixel luminance delta
+12/255 (≈4.7%).** The change is a flat per-cell luma shift (low spatial frequency), which reads as
+far more subtle than a 31.6 dB *noise* figure would suggest, but flat regions and gradients are
+where a careful eye could catch faint banding. This is exactly what gate-30 (owner's by-eye check on
+real photos on Hek) must confirm; the design does not claim invisibility. Three cover-vs-stego
+side-by-sides at default strength are saved for that check in `scratchpad/sturdy/eyecheck/`.
+
+### Failure envelope (asserted, gate-28)
+Each attack was applied to the stego image; the requirement is **never a wrong message** (INV-12),
+and ideally *no firefly* / *damaged*. Across all 21 covers, **0 wrong payloads** in every case:
+
+| Attack | Outcome |
+|--------|---------|
+| 10% crop | 21/21 **NoFirefly** (grid mapping breaks) |
+| 90° rotation | 21/21 **NoFirefly** |
+| screenshot-like (scale 0.9 + border) | 21/21 **NoFirefly** (border shifts the grid) |
+| grayscale + 1.3× contrast | 20/21 **NoFirefly**, **1/21 still decoded correctly** |
+
+The one nuance to state honestly: because SFLY lives in **luminance**, a pure grayscale conversion
+does *not* destroy a sturdy firefly — luma is preserved. What kills it is a **contrast/levels change
+that scales luma** enough to break the absolute Δ lattice (the DC search only removes an offset, not
+a gain). At a mild 1.3× contrast one cover still decoded; it was still the *correct* payload, never a
+wrong one. Callers must not assume "it was filtered, so it's gone."
+
+### No false catch (gate-27)
+**0 false catches across 247 clean, never-embedded images** (all covers untouched, JPEG-recompressed
+and resized copies, 126 random crops/rescales, and 40 synthetic noise/gradient frames). The 2-byte
+magic + version + CRC-32, re-checked under every DC hypothesis, is what keeps a clean or unrelated
+image reading as *no firefly* rather than a spurious catch.
+
+### Known risks / open items
+- **Simulation ≠ Facebook's real pipeline.** These are library encoders (javax.imageio,
+  libjpeg-turbo via `convert`) with plausible resize+q chains. Facebook/Messenger/Telegram apply
+  their own, undisclosed, possibly-changing transforms. Gate-29 (owner's real sends from real
+  accounts) is the only ground truth; treat the matrix as a strong prior, not a guarantee.
+- **Kodak substitution.** Kodak was unreachable (401); the 21 covers are skimage natural photos +
+  synthetics. Re-run gate-28 against real Kodak (or the owner's own photos on Hek) on a networked
+  host before trusting the "≥20 real photos" wording literally.
+- **Small images.** Survival falls below ~512–640 px long side. The app should refuse or warn on
+  covers with a long side under ~640 px (a real phone photo is far above this).
+- **Grayscale/contrast honesty.** As above: grayscale alone preserves the payload; the receive-side
+  copy must not claim a filtered image is necessarily clean.
+- **Interleave/RS port.** The prototype bundles its own `Gf256`/`Rs`; task W1-1 must call the
+  existing `dev.herakles.nightjar.ReedSolomon`/`GF256` (same GF, prim poly 0x11d) and **not** add a
+  second RS. The prototype's fixed LCG interleave is self-contained and ports as-is.
+- **No detector this round.** A steganalysis detector for SFLY is a follow-up (spec v6 out-of-scope);
+  the existing image chi-square check is not tuned for it, and the copy must say so truthfully.
