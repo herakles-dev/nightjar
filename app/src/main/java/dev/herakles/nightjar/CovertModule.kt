@@ -61,6 +61,8 @@ enum class ModuleId {
     ACOUSTIC_DETECTOR,
     /** Module 2 — audio steganography encode/decode (phase-inversion / spectrogram-LSB / MFSK). */
     AUDIO_STEGO_CODEC,
+    /** Module 2 — blind audio steganalysis (v5 addition, `AudioStegDetector`, spec.md INV-7). */
+    AUDIO_STEGANALYSIS,
 }
 
 /**
