@@ -83,6 +83,22 @@ class CarrierInsightCaptionsTest {
             "SOFT_SYNTH's fade-in also creates cells: caption must mention them",
             stegoDifferenceCaption(softSynth5).contains("pale cells"),
         )
+
+        // gate-8: the owner heard the added sound on headphones as a faint crackle on the
+        // SOFT_SYNTH cover's near-silent fade-in. The caption states that fact, gated on the
+        // same createdCells > 0 condition as the rest of the created-cells sentence.
+        assertFalse(
+            "no created cells: caption must not claim an audible crackle",
+            stegoDifferenceCaption(spokenWord5).contains("crackle"),
+        )
+        assertTrue(
+            "created cells present: caption must mention the audible headphone crackle",
+            stegoDifferenceCaption(spokenWord40).contains("faint crackle"),
+        )
+        assertTrue(
+            "SOFT_SYNTH's fade-in also creates cells: caption must mention the audible headphone crackle",
+            stegoDifferenceCaption(softSynth5).contains("faint crackle"),
+        )
     }
 
     @Test

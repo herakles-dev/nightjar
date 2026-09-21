@@ -221,7 +221,10 @@ fun stegoDifferenceReadout(map: StegoDifferenceMap, coverLabel: String): String 
  *   "nudge" — design-v5.md §3.3's finding is that a silent cover has nothing to nudge, so QIM's
  *   floor forces genuinely new spectral content into the gap. That sentence only appears when
  *   [StegoDifferenceMap.createdCells] is actually greater than zero for this map
- *   (`CarrierInsightCaptionsTest`'s branch coverage).
+ *   (`CarrierInsightCaptionsTest`'s branch coverage). The same sentence also says that added
+ *   sound is audible on headphones as a faint crackle — the owner's gate-8 listening pass heard
+ *   exactly that on the near-silent fade-in of the bundled `SOFT_SYNTH` cover, so this is a
+ *   measured fact, not a guess, and it's gated on the identical `createdCells > 0` condition.
  * - The last sentence is unconditional: this view only exists because the app can re-derive its
  *   own bundled cover (design-v5.md §3.1) — someone holding just the stego clip has no cover to
  *   subtract at all.
@@ -251,7 +254,8 @@ fun stegoDifferenceCaption(map: StegoDifferenceMap): String {
     if (map.createdCells > 0) {
         caption.append(
             " where the cover was silent there was nothing to nudge, so it had to add faint " +
-                "sound (the pale cells). those spots do show up in the spectrogram.",
+                "sound (the pale cells). those spots do show up in the spectrogram, and on " +
+                "headphones you can hear it as a faint crackle.",
         )
     }
     caption.append(

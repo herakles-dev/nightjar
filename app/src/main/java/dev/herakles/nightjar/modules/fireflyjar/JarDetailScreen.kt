@@ -51,7 +51,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -402,7 +407,14 @@ private fun FireflyDot(record: FireflyRecord, onClick: () -> Unit, onLongClick: 
     Canvas(
         modifier = Modifier
             .size(28.dp)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            // P3: a bare Canvas has no text a screen reader can read at all otherwise.
+            .semantics(mergeDescendants = true) {
+                contentDescription = fireflySwarmContentDescription(record)
+                customActions = listOf(
+                    CustomAccessibilityAction("let this firefly go") { onLongClick(); true },
+                )
+            },
     ) {
         val alpha = fireflyAlpha(record.id.toInt(), clock.value)
         val radius = size.minDimension * 0.22f
@@ -552,18 +564,36 @@ private fun FireflySwarmTile(
     when (val thumbnail = rememberSwarmThumbnail(record = record, kind = kind, loadMedia = loadMedia)) {
         null, SwarmThumbnail.Failed -> FireflyDot(record = record, onClick = onClick, onLongClick = onLongClick)
         is SwarmThumbnail.Image -> Box(
-            modifier = swarmThumbModifier(color).combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            modifier = swarmThumbModifier(color)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                // P3: mergeDescendants folds the Image's own description in below -- nulled
+                // out there so it doesn't get appended onto this one, and this one names the
+                // actual firefly rather than just "a picture".
+                .semantics(mergeDescendants = true) {
+                    contentDescription = fireflySwarmContentDescription(record)
+                    customActions = listOf(
+                        CustomAccessibilityAction("let this firefly go") { onLongClick(); true },
+                    )
+                },
             contentAlignment = Alignment.Center,
         ) {
             Image(
                 bitmap = thumbnail.bitmap.asImageBitmap(),
-                contentDescription = "the image this firefly hid inside",
+                contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
         }
         is SwarmThumbnail.Audio -> Box(
-            modifier = swarmThumbModifier(color).combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            modifier = swarmThumbModifier(color)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                // P3: same as the FireflyDot case -- FireflySwarmWaveform is a bare Canvas.
+                .semantics(mergeDescendants = true) {
+                    contentDescription = fireflySwarmContentDescription(record)
+                    customActions = listOf(
+                        CustomAccessibilityAction("let this firefly go") { onLongClick(); true },
+                    )
+                },
             contentAlignment = Alignment.Center,
         ) {
             FireflySwarmWaveform(
@@ -715,12 +745,29 @@ private fun FireflyDetailContent(
                 .padding(horizontal = 16.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
         ) {
-            MetaCard(label = "size", value = fireflyByteLabel(firefly.payloadSizeBytes))
-            MetaCard(label = "channel", value = module.jarChannel)
+            // P2 (on-device review): three tiles used to share the row unevenly -- each
+            // measured at its own natural width in order, so whatever "size"/"channel" didn't
+            // use was all "direction" got, and on a real Pixel 6a that left too little for the
+            // word "direction" and it hard-wrapped mid-letter ("DIRECTIO"/"N"). Equal weights
+            // give every tile the same third of the row regardless of its neighbors' content,
+            // and softWrap=false + TextOverflow.Visible is the backstop: a label or value never
+            // truncates and never breaks mid-word, even if it's still tight at 1.3x font scale --
+            // it can only ever spill past its own tile's edge, whole.
+            MetaCard(
+                label = "size",
+                value = fireflyByteLabel(firefly.payloadSizeBytes),
+                modifier = Modifier.weight(1f),
+            )
+            MetaCard(
+                label = "channel",
+                value = module.jarChannel,
+                modifier = Modifier.weight(1f),
+            )
             MetaCard(
                 label = "direction",
                 value = if (caught) "caught" else "spotted",
                 valueColor = accent,
+                modifier = Modifier.weight(1f),
             )
         }
 
@@ -741,9 +788,14 @@ private fun FireflyDetailContent(
 
 /** One of the three mini-cards under a firefly's message (DESIGN_SPEC.md §5 1c). */
 @Composable
-private fun MetaCard(label: String, value: String, valueColor: Color = JarTextPrimary) {
+private fun MetaCard(
+    label: String,
+    value: String,
+    valueColor: Color = JarTextPrimary,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(8.dp))
             .background(JarCardFill)
             .border(1.dp, JarCardBorder, RoundedCornerShape(8.dp))
@@ -751,8 +803,24 @@ private fun MetaCard(label: String, value: String, valueColor: Color = JarTextPr
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(text = label, style = JarType.MetaLabel, color = JarTextTertiary)
-        Text(text = value, style = JarType.MetaValue, color = valueColor)
+        // P2: neither line wraps -- a wrapped single word breaks mid-letter with no good
+        // hyphenation point, so a too-narrow tile instead overflows its own bounds whole
+        // rather than mangling the word. See the call site's comment for why the tile is
+        // rarely that narrow in the first place.
+        Text(
+            text = label,
+            style = JarType.MetaLabel,
+            color = JarTextTertiary,
+            softWrap = false,
+            overflow = TextOverflow.Visible,
+        )
+        Text(
+            text = value,
+            style = JarType.MetaValue,
+            color = valueColor,
+            softWrap = false,
+            overflow = TextOverflow.Visible,
+        )
     }
 }
 
@@ -760,6 +828,21 @@ private fun formatFireflyTime(timestampMillis: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestampMillis))
 
 private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else "$bytes bytes"
+
+/**
+ * P3 (on-device review, accessibility): a swarm tile's spoken/semantic label. Without it,
+ * TalkBack (and UI automation) reaches an unlabeled glyph -- [FireflyDot] and
+ * [FireflySwarmWaveform] are bare [androidx.compose.foundation.Canvas]es with no text of their
+ * own, and the carrier-thumbnail [Image] only ever said what kind of thing it was ("the image
+ * this firefly hid inside"), never which firefly. Mirrors [FireflyDetailContent]'s own
+ * "a firefly you caught"/timestamp/[fireflyByteLabel] copy so the spoken label and the visible
+ * detail screen agree on the same firefly. `internal` and Compose-free so
+ * `CarrierInsightCaptionsTest`'s sibling JVM tests can drive it directly.
+ */
+internal fun fireflySwarmContentDescription(record: FireflyRecord): String {
+    val direction = if (record.direction == "CREATED") "firefly you caught" else "firefly you spotted"
+    return "$direction, ${formatFireflyTime(record.timestampMillis)}, ${fireflyByteLabel(record.payloadSizeBytes)}"
+}
 
 // Stage D/4 (gate-19): the carrier's media size, human-readable. SI (1000-based) to match the
 // "MB" copy the shelf storage readout uses. Locale.US keeps the decimal point deterministic.

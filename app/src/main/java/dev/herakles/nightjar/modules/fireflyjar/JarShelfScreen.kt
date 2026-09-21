@@ -229,7 +229,13 @@ private fun tileFireflies(module: Module, count: Int): List<FireflyVisual> {
 }
 
 private fun fireflyCountLabel(module: Module, count: Int): String = when {
-    module == Module.DETECTOR -> "always listening"
+    // P4 (on-device review, honesty): "always listening" overclaimed -- DetectorController's
+    // mic capture (modules/detector/DetectorScreen.kt) only starts from the watching jar's own
+    // "watch" button tap (jarWatchFlow's onToggleWatch), never on opening the jar, and
+    // LifecycleEventEffect(ON_STOP) stops it again the moment the app is backgrounded. "watch" is
+    // the same verb the jar's own button already uses (DetectorContent), so this stays honest
+    // without introducing new vocabulary.
+    module == Module.DETECTOR -> "off until you tap watch"
     count == 0 -> "no fireflies yet"
     count == 1 -> "1 firefly"
     else -> "$count fireflies"
