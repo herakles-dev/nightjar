@@ -4,7 +4,10 @@ import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.log10
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -627,6 +630,111 @@ class AudioStegoCarrierTest {
         }
     }
 
+    // --- MFSK click fix (Gate 8 round 4): owner-reported "crackle and pops in the first few
+    // seconds" of real-hardware MFSK playback, traced (offline JVM measurement against this
+    // class's own encode()/decode(), not a device capture) to encodeMfsk's per-block tone
+    // synthesis gating each tone fully on/off at every MFSK_FRAME_SIZE block boundary -- a
+    // rectangular edge, not the near-ultrasonic tones simply being audible (mid-symbol audible-
+    // band energy is unaffected by the fix below, ~-86 to -88 dBFS throughout) and not residual
+    // clipping (already zero, see mfskEncodeOnBothBundledCoversNeverSaturatesASample above).
+    // AudioStegoCarrier.kt's mfskToneEnvelope now applies a short raised-cosine (Hann) ramp at a
+    // tone's actual on/off transitions; decodeMfsk is untouched.
+
+    /**
+     * Measures the < 16 kHz ("audible-band") part of `stego - gain*cover`, low-pass-filtered
+     * ([lowPassBelow16kHz]) and pooled across all 63 internal MFSK_FRAME_SIZE block boundaries
+     * (±32 samples each), on both bundled covers. Measured before/after this fix, same payload
+     * this test uses ([MFSK_CLIP_FIX_TEST_PAYLOAD]):
+     *
+     * | cover        | before (rectangular gating) | after (this fix) |
+     * |--------------|------------------------------|-------------------|
+     * | SOFT_SYNTH   | -42.00 dBFS                   | -74.48 dBFS       |
+     * | SPOKEN_WORD  | -41.45 dBFS                   | -73.75 dBFS       |
+     *
+     * A 32+ dB reduction on both covers, comfortably past the -70 dBFS bound
+     * [MFSK_CLICK_FIX_TARGET_DBFS] asserts (the same bound `MFSK_RAMP_SAMPLES`'s KDoc in
+     * AudioStegoCarrier.kt cites as the tuning target). Mid-symbol audible-band energy (not
+     * asserted here -- see that KDoc's sweep instead) stays essentially unchanged by this fix,
+     * which is what confirms the reduction is specifically at the boundary, i.e. this technique's
+     * clicks, and not a change to the tones' own audibility.
+     */
+    @Test
+    fun mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget() {
+        for (cover in AudioSampleCover.entries) {
+            val pcm = synthesizeSampleCover(cover)
+            val (stego, result) = encodeAndDecodeMfskProbePayload(cover, pcm)
+            assertTrue("expected Success but got $result for ${cover.name}", result is DecodeResult.Success)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            // Same tail-sample gain estimate as mfskWholeClipGainSatisfiesTheNoDiscontinuityBound.
+            var bestTailIndex = -1
+            var bestTailAbs = 0
+            for (i in neededSamples until pcm.size) {
+                val a = abs(pcm[i].toInt())
+                if (a > bestTailAbs) {
+                    bestTailAbs = a
+                    bestTailIndex = i
+                }
+            }
+            assertTrue("expected an untouched tail sample to measure gain from for ${cover.name}", bestTailIndex >= 0)
+            val gain = stego[bestTailIndex].toDouble() / pcm[bestTailIndex].toDouble()
+
+            val residual = DoubleArray(neededSamples) { i -> stego[i].toDouble() - gain * pcm[i].toDouble() }
+            val filtered = lowPassBelow16kHz(residual)
+
+            val boundaryValues = mutableListOf<Double>()
+            val filterEdge = FIR_LOWPASS_TAPS / 2
+            for (block in 1 until MFSK_CODEWORD_BYTES) {
+                val boundary = block * MFSK_FRAME_SIZE
+                if (boundary - 32 >= filterEdge && boundary + 32 < filtered.size - filterEdge) {
+                    for (i in (boundary - 32)..(boundary + 32)) boundaryValues.add(filtered[i])
+                }
+            }
+            assertTrue("expected boundary windows to be collected for ${cover.name}", boundaryValues.isNotEmpty())
+            val meanSquare = boundaryValues.sumOf { it * it } / boundaryValues.size
+            val boundaryRmsDbfs = 20.0 * log10(sqrt(meanSquare) / 32768.0 + 1e-300)
+
+            assertTrue(
+                "expected boundary-locked audible-band RMS on ${cover.name} to be below " +
+                    "$MFSK_CLICK_FIX_TARGET_DBFS dBFS (measured ${"%.2f".format(boundaryRmsDbfs)} dBFS) -- " +
+                    "see this test's KDoc for the before/after numbers this fix was tuned against",
+                boundaryRmsDbfs < MFSK_CLICK_FIX_TARGET_DBFS,
+            )
+        }
+    }
+
+    /**
+     * Windowed-sinc (Hamming) FIR low-pass filter, [FIR_LOWPASS_TAPS] taps, 16 kHz cutoff at
+     * [NightjarAcoustics.SAMPLE_RATE_HZ] -- used only to isolate the audible part of a residual
+     * signal for [mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget]'s measurement;
+     * MFSK's tones themselves live at [MFSK_BASE_BIN]..+7 (~19.7-20 kHz), comfortably above this
+     * cutoff, so what survives filtering is spectral splatter, not the tones' own energy.
+     */
+    private fun lowPassBelow16kHz(x: DoubleArray): DoubleArray {
+        val cutoffHz = 16000.0
+        val sampleRateHz = NightjarAcoustics.SAMPLE_RATE_HZ.toDouble()
+        val fc = cutoffHz / sampleRateHz
+        val m = FIR_LOWPASS_TAPS - 1
+        val taps = DoubleArray(FIR_LOWPASS_TAPS) { n ->
+            val k = n - m / 2.0
+            val sincValue = if (k == 0.0) 2 * fc else sin(2 * PI * fc * k) / (PI * k)
+            val window = 0.54 - 0.46 * cos(2 * PI * n / m) // Hamming
+            sincValue * window
+        }
+        val tapSum = taps.sum()
+        for (n in taps.indices) taps[n] /= tapSum
+
+        val half = taps.size / 2
+        return DoubleArray(x.size) { i ->
+            var acc = 0.0
+            for (j in taps.indices) {
+                val idx = i + j - half
+                if (idx in x.indices) acc += taps[j] * x[idx]
+            }
+            acc
+        }
+    }
+
     /** Shared MFSK clipping-fix test fixture: encodes [MFSK_CLIP_FIX_TEST_PAYLOAD] onto [cover]
      *  (or the already-synthesized [pcm], if the caller needs it too) and decodes the result --
      *  every clipping-fix test above needs this same encode/decode pair. */
@@ -722,5 +830,21 @@ class AudioStegoCarrierTest {
         /** 34 bytes, comfortably under MFSK's fixed ~37-byte capacity -- the same payload shape
          *  (a real ASCII string, not synthetic noise) the clipping fix was measured against. */
         private val MFSK_CLIP_FIX_TEST_PAYLOAD = "nightjar MFSK gain probe payload!!".toByteArray(Charsets.US_ASCII)
+
+        /**
+         * Taps for [lowPassBelow16kHz]'s FIR filter. 129 gives a transition band narrow enough
+         * (relative to the ~3.7 kHz gap between the 16 kHz cutoff and [MFSK_BASE_BIN]'s ~19.7 kHz)
+         * to cleanly separate audible-band splatter from the tones' own near-ultrasonic energy.
+         */
+        private const val FIR_LOWPASS_TAPS = 129
+
+        /**
+         * Bound [mfskClickFixReducesBoundaryLockedAudibleBandResidualBelowTarget] asserts:
+         * boundary-locked audible-band RMS must land below this. Matches the -70 dBFS target
+         * `MFSK_RAMP_SAMPLES`'s KDoc in AudioStegoCarrier.kt cites as the ramp-length tuning
+         * target; the actual measured values (see that test's KDoc) clear it by several dB on
+         * both bundled covers.
+         */
+        private const val MFSK_CLICK_FIX_TARGET_DBFS = -70.0
     }
 }
