@@ -143,12 +143,21 @@ import kotlin.math.sqrt
  * is summed on top of [cover]'s own samples for that block — the cover's own content survives
  * underneath, exactly matching "mixed into an existing carrier" the way [PHASE_INVERSION]'s
  * secondary signal is mixed in, rather than synthesizing a fresh transmission the way Module 3's
- * live modem does. Clipping fix (design-v5.md §12.2): rather than a plain saturating add, each
- * block's tone waveform and [cover] segment are each scaled by their own gain (`toneGain`,
- * `coverGain` in [encodeMfsk]) so the two can never sum past `Short` range in the first place —
- * see that function's inline comments for the tone-first budget split (the tone carries the
- * payload [decodeMfsk] has to detect; the cover doesn't, so it gives up amplitude first).
- * [MFSK_SAMPLE_CEILING] is the shared ceiling both gains are computed against.
+ * live modem does.
+ *
+ * Clipping fix (design-v5.md §12.2): [TONE_AMPLITUDE] × up to [MFSK_TONE_COUNT] simultaneous
+ * tones can sum past int16 range on its own. [encodeMfsk] computes the full (cover + tones)
+ * signal for the whole clip in floating point, unclamped, and — only if that signal's peak
+ * magnitude would exceed [MFSK_SAMPLE_CEILING] — applies a single constant gain to the *entire*
+ * clip before rounding to `Short`. The whole clip is quieter by that one factor when a gain is
+ * needed; [cover]'s own relative dynamics (including the untouched tail past the MFSK codeword)
+ * are otherwise unchanged — there is no per-block/per-sample scaling, so there's no block-seam
+ * artifact to introduce. (An earlier version of this fix used a per-block gain split instead;
+ * that ducked the cover to a different, sometimes-zero gain every ~21ms — an audible click/
+ * dropout pattern, and a real violation of "the cover's own content survives underneath" above —
+ * so it was replaced with this single-gain approach.) A uniform gain never changes [decodeMfsk]'s
+ * verdict either: its tone-vs-guard-bin-median margin is a *relative* comparison within each
+ * block's own FFT, so scaling every sample by the same constant leaves every margin unchanged.
  *
  * **Detection (decode)**: FFTs each candidate block (reusing [fft]) and reads tone channel `i` as
  * active if its magnitude exceeds the local noise floor (the median magnitude of a
@@ -601,22 +610,25 @@ class AudioStegoCarrier(
                 "unreachable once canEmbed holds"
         }
 
-        val out = cover.copyOf()
-        val toneSamples = DoubleArray(FRAME_SIZE) // reused per block, overwritten each iteration
+        // Clipping fix (design-v5.md §12.2, revised after rev-2 MAJOR): TONE_AMPLITUDE *
+        // MFSK_TONE_COUNT simultaneous active tones can sum past int16 range on its own -- for
+        // byteValue == 0xFF (all 8 tones active), the actual measured peak is ~47876, i.e.
+        // essentially the naive 8*TONE_AMPLITUDE bound (these 8 tones sit at adjacent FFT bins,
+        // 46.875 Hz apart, so they drift back into near-alignment well within one 1024-sample
+        // block) -- measured 96-141 saturated samples per stego on the two bundled covers
+        // pre-fix. A first version of this fix used a PER-BLOCK gain split (tone-first, cover
+        // fallback); that traded clipping for something worse -- 13-15 of 64 blocks ducking the
+        // cover to a *different* gain each time, including coverGain == 0.0 in several blocks,
+        // producing ~21ms-period block-boundary sample jumps up to 150x the cover's own natural
+        // jump (audible clicks/dropouts, and a real violation of "the cover's own content
+        // survives underneath" below). Pass 1: synthesize the full (cover + tones) signal for
+        // the whole clip in floating point, unclamped -- tones only inside the touched span,
+        // cover passed through unchanged everywhere else -- and find its single peak magnitude
+        // across the ENTIRE clip, not per block.
+        val combined = DoubleArray(cover.size) { i -> cover[i].toDouble() }
         for (blockIndex in 0 until MFSK_CODEWORD_BYTES) {
             val byteValue = codeword[blockIndex].toInt() and 0xFF
             val start = blockIndex * FRAME_SIZE
-
-            // Clipping fix (design-v5.md §12.2): TONE_AMPLITUDE * up to MFSK_TONE_COUNT
-            // simultaneous active tones can sum past int16 range on its own -- for byteValue ==
-            // 0xFF (all 8 tones active), the actual measured peak is ~47876, i.e. essentially the
-            // naive activeToneCount*TONE_AMPLITUDE bound (these 8 tones sit at adjacent FFT bins,
-            // 46.875 Hz apart, so they drift back into near-alignment well within one 1024-sample
-            // block) -- measured 96-141 saturated samples per stego on the two bundled covers
-            // before this fix. Pass 1: synthesize this block's tone waveform at full amplitude and
-            // record its own actual peak magnitude alongside the cover's.
-            var peakToneAbs = 0.0
-            var peakCoverAbs = 0
             for (i in 0 until FRAME_SIZE) {
                 var toneSample = 0.0
                 for (bit in 0 until MFSK_TONE_COUNT) {
@@ -626,41 +638,28 @@ class AudioStegoCarrier(
                         toneSample += sin(2.0 * PI * freqHz * i / NightjarAcoustics.SAMPLE_RATE_HZ) * TONE_AMPLITUDE
                     }
                 }
-                toneSamples[i] = toneSample
-                val toneAbs = abs(toneSample)
-                if (toneAbs > peakToneAbs) peakToneAbs = toneAbs
-                val coverAbs = abs(cover[start + i].toInt())
-                if (coverAbs > peakCoverAbs) peakCoverAbs = coverAbs
+                combined[start + i] += toneSample
             }
+        }
+        var peak = 0.0
+        for (value in combined) {
+            val a = abs(value)
+            if (a > peak) peak = a
+        }
 
-            // Pass 2: tone-first budget split, not an even split -- the tone carries the payload
-            // decode() has to detect, the cover doesn't, so the tone claims MFSK_SAMPLE_CEILING
-            // first and only ever gives up amplitude when it would saturate ALL BY ITSELF (only
-            // ever true for the highest-popcount byte values); the cover gets whatever budget is
-            // left over, attenuated harder when it must be, since a quieter ~21ms block is a far
-            // smaller cost than a weakened tone is to decode()'s margin-over-median-noise-floor
-            // detection. |cover[i]*coverGain + toneSamples[i]*toneGain| <=
-            // coverGain*peakCoverAbs + toneGain*peakToneAbs <= MFSK_SAMPLE_CEILING by construction
-            // (triangle inequality), regardless of the two signals' relative phase at any single
-            // sample. In the common case (this app's own covers, whose real energy sits far below
-            // the ~19.7kHz tone band, and any byteValue with a handful of bits set) both gains are
-            // 1.0 -- full tone amplitude, decode() keeps its usual margin untouched, exactly the
-            // discipline the class KDoc's "decoder must stay unchanged" note requires.
-            val toneGain = if (peakToneAbs <= MFSK_SAMPLE_CEILING || peakToneAbs == 0.0) {
-                1.0
-            } else {
-                MFSK_SAMPLE_CEILING / peakToneAbs
-            }
-            val coverBudget = (MFSK_SAMPLE_CEILING - toneGain * peakToneAbs).coerceAtLeast(0.0)
-            val coverGain = if (peakCoverAbs <= coverBudget || peakCoverAbs == 0) {
-                1.0
-            } else {
-                coverBudget / peakCoverAbs
-            }
-            for (i in 0 until FRAME_SIZE) {
-                val sum = cover[start + i] * coverGain + toneSamples[i] * toneGain
-                out[start + i] = roundToShort(sum)
-            }
+        // Pass 2: ONE constant gain for the whole clip -- 1.0 (no attenuation, the byte-exact
+        // common case) whenever the clip's own peak already fits under MFSK_SAMPLE_CEILING,
+        // otherwise ceiling/peak. Applying the same scalar to every sample (touched span AND the
+        // untouched tail alike) is what makes this safe: decode()'s tone-vs-guard-bin-median
+        // margin is relative, so a uniform gain never changes which bins read as "active," and
+        // there is no per-block seam left to click at -- every adjacent-sample jump in the
+        // output is bounded by `gain * (that jump in cover + that jump in the raw tone
+        // waveform) + 1` (rounding), the same relationship the ungained cover already had,
+        // just uniformly scaled. See [AudioStegoCarrierTest]'s no-discontinuity test.
+        val gain = if (peak <= MFSK_SAMPLE_CEILING || peak == 0.0) 1.0 else MFSK_SAMPLE_CEILING / peak
+        val out = ShortArray(cover.size)
+        for (i in combined.indices) {
+            out[i] = roundToShort(combined[i] * gain)
         }
         return out
     }
@@ -1014,28 +1013,30 @@ class AudioStegoCarrier(
         private const val MFSK_BASE_BIN = 420
 
         /**
-         * Ceiling amplitude of each active tone channel's sine contribution before
-         * [encodeMfsk]'s per-block `toneGain` scaling (summed across active channels onto the
-         * cover). Needs to clear [MFSK_DETECTION_MARGIN_DB] reliably against typical cover energy
-         * in this high band; 6000 (~18% of full-scale 32767) was sized against this class's own
-         * round-trip tests, comfortably larger than [MIX_AMPLITUDE] since detection here relies
-         * on an absolute presence/absence margin rather than a signed-sum trick.
-         * [MFSK_TONE_COUNT] simultaneous tones at this amplitude can sum past int16 range on
-         * their own (design-v5.md §12.2, measured 96-141 saturated samples per stego pre-fix,
-         * byteValue == 0xFF's actual measured peak is ~47876 -- essentially the full 8 *
-         * TONE_AMPLITUDE bound, since these 8 adjacent-bin tones drift back into near-alignment
-         * within one 1024-sample block), which is exactly why [encodeMfsk]'s `toneGain` exists --
-         * this constant is the amplitude used whenever a block's own actual tone peak allows it,
-         * not an unconditional one.
+         * Amplitude of each active tone channel's sine contribution before [encodeMfsk]'s
+         * whole-clip gain (summed across active channels onto the cover). Needs to clear
+         * [MFSK_DETECTION_MARGIN_DB] reliably against typical cover energy in this high band;
+         * 6000 (~18% of full-scale 32767) was sized against this class's own round-trip tests,
+         * comfortably larger than [MIX_AMPLITUDE] since detection here relies on an absolute
+         * presence/absence margin rather than a signed-sum trick. [MFSK_TONE_COUNT] simultaneous
+         * tones at this amplitude can sum past int16 range on their own (design-v5.md §12.2,
+         * measured 96-141 saturated samples per stego pre-fix; byteValue == 0xFF's actual
+         * measured peak is ~47876 -- essentially the full 8 * TONE_AMPLITUDE bound, since these 8
+         * adjacent-bin tones drift back into near-alignment within one 1024-sample block), which
+         * is exactly why [encodeMfsk]'s whole-clip gain exists -- this constant never changes;
+         * [MFSK_SAMPLE_CEILING] is what may attenuate its effective, post-gain amplitude.
          */
         private const val TONE_AMPLITUDE = 6000.0
 
         /**
-         * Ceiling every MFSK cover-plus-tones sample is kept at or under (in magnitude), used by
-         * [encodeMfsk]'s `toneGain`/`coverGain` to derive each block's gain split. Comfortably
-         * short of `Short.MAX_VALUE` (32767) so no legitimate (non-clipped) sum can land exactly
-         * on the int16 saturation boundary either -- only genuine out-of-range arithmetic would,
-         * and this fix's whole point is that it never happens.
+         * Ceiling the combined (cover + tones) signal's peak magnitude is kept at or under across
+         * the *whole* MFSK-encoded clip, used by [encodeMfsk] to derive its single whole-clip
+         * gain (`MFSK_SAMPLE_CEILING / peak`, applied uniformly, never per-block -- see that
+         * function's and the class KDoc's "Clipping fix" notes for why a uniform gain, not a
+         * per-block one, is required). Comfortably short of `Short.MAX_VALUE` (32767) so no
+         * legitimate (non-clipped) sum can land exactly on the int16 saturation boundary either --
+         * only genuine out-of-range arithmetic would, and this fix's whole point is that it never
+         * happens.
          */
         private const val MFSK_SAMPLE_CEILING = 32000.0
 

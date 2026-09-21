@@ -2,6 +2,9 @@ package dev.herakles.nightjar
 
 import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.sin
 import kotlin.random.Random
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -483,28 +486,27 @@ class AudioStegoCarrierTest {
         assertTrue(AudioStegoCarrier(mfskNoiseCover(3), AudioStegoTechnique.MFSK).canEmbed)
     }
 
-    // --- MFSK clipping fix (design-v5.md §12.2): TONE_AMPLITUDE * up to 8 simultaneous tones
-    // measurably exceeded int16 range pre-fix (96/141 saturated samples per stego on the two
-    // bundled covers). Uses the app's own real bundled covers (AudioStegoSampleCovers.kt), not
-    // synthetic noise, since that's exactly what was measured as clipping. correctedByteErrors
-    // == 0 doubles as an empirical proxy for "detection margin survived the per-block gain
-    // scaling" -- if the gain fix had starved any block's tones below the 15dB margin, that
-    // block's byte would decode wrong and Reed-Solomon would report a nonzero correction (or,
-    // past 8 wrong bytes, UNRECOVERABLE_FEC).
+    // --- MFSK clipping fix (design-v5.md §12.2, revised after rev-2 MAJOR): TONE_AMPLITUDE * up
+    // to 8 simultaneous tones measurably exceeded int16 range pre-fix (96/141 saturated samples
+    // per stego on the two bundled covers). Uses the app's own real bundled covers
+    // (AudioStegoSampleCovers.kt), not synthetic noise, since that's exactly what was measured as
+    // clipping, and a real ~34-byte payload -- the same shape the fix was actually measured
+    // against. [MFSK_BASE_BIN]/[MFSK_TONE_COUNT]/[MFSK_TONE_AMPLITUDE] below mirror
+    // AudioStegoCarrier's documented MFSK tone-synthesis constants exactly, the same way every
+    // other technique's tests recompute their own constants inline.
+    //
+    // The fix applies ONE constant gain to the entire clip (encodeMfsk's `gain`, AudioStegoCarrier
+    // .kt), not a per-block one -- a per-block version was tried first and rejected (rev-2 MAJOR):
+    // it ducked the cover to a different, sometimes-zero gain every ~21ms, an audible click/
+    // dropout pattern worse than the clipping it fixed. A uniform gain also leaves decode()'s
+    // detection margin *exactly* unchanged (not just "close enough"): its verdict is a ratio --
+    // tone-bin magnitude vs. guard-bin median magnitude, both in dB -- and scaling every sample
+    // (so every FFT bin, by linearity) by the same constant cancels out of that ratio entirely.
 
     @Test
     fun mfskEncodeOnBothBundledCoversNeverSaturatesASample() {
         for (cover in AudioSampleCover.entries) {
-            val pcm = synthesizeSampleCover(cover)
-            val carrier = AudioStegoCarrier(pcm, AudioStegoTechnique.MFSK)
-            // Short enough to fit MFSK's fixed ~37-byte capacity for either bundled cover's name.
-            val payload = "MFSK clip fix: ${cover.name}".toByteArray(Charsets.US_ASCII)
-            assertTrue(
-                "test payload (${payload.size}B) exceeds MFSK's fixed capacity (${carrier.maxPayloadBytes}B)",
-                payload.size <= carrier.maxPayloadBytes,
-            )
-
-            val stego = carrier.encode(payload)
+            val (stego, result) = encodeAndDecodeMfskProbePayload(cover)
 
             val saturatedCount = stego.count { it == Short.MAX_VALUE || it == Short.MIN_VALUE }
             assertEquals(
@@ -513,20 +515,133 @@ class AudioStegoCarrierTest {
                 saturatedCount,
             )
 
-            val result = carrier.decode(stego)
             assertTrue("expected Success but got $result for ${cover.name}", result is DecodeResult.Success)
-            assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
-            // The gain fix trades a little detection margin for zero clipping in the (rare,
-            // high-popcount-byte) blocks it actually attenuates -- real Reed-Solomon correction
-            // is exactly the designed-for safety net for that, not a failure. The regression
-            // guard that matters is staying comfortably under the correction bound
-            // (MFSK_RS_PARITY_BYTES / 2 = 8), not staying at zero.
-            assertTrue(
-                "expected well under the ${MFSK_RS_PARITY_BYTES / 2}-byte-error correction bound " +
-                    "on a clean encode of ${cover.name}, got ${result.correctedByteErrors}",
-                result.correctedByteErrors < MFSK_RS_PARITY_BYTES / 2,
+            // A uniform whole-clip gain cancels out of decode()'s tone-vs-guard-bin-median dB
+            // ratio exactly (see this section's header comment) -- unlike the rejected per-block
+            // approach (which needed a "< 8, the RS correction bound" allowance because it
+            // measurably degraded some blocks' margin), a clean encode should need no correction
+            // at all.
+            assertEquals(
+                "expected zero RS-corrected byte errors on a clean encode of ${cover.name} -- the " +
+                    "whole-clip gain should leave decode()'s margin untouched",
+                0,
+                (result as DecodeResult.Success).correctedByteErrors,
             )
         }
+    }
+
+    /**
+     * codec rev-2 MAJOR: the per-block gain version of the clipping fix ducked the cover to a
+     * different (sometimes zero) gain every ~21ms symbol block, producing block-boundary sample
+     * jumps 21-150x the cover's own typical jump -- audible clicks/dropouts, and worse than the
+     * clipping it fixed. The whole-clip-gain replacement applies one constant `g` to every
+     * sample, cover and tones alike, so there is no seam left at a block boundary to click at:
+     * empirically, on both bundled covers, the largest sample-to-sample jump AT a block boundary
+     * is smaller than the largest jump found anywhere else in the touched span (tone content
+     * near ~19.7kHz, close to the Nyquist bin, already produces large interior jumps on its own —
+     * this test only asserts boundaries aren't *additionally* anomalous on top of that).
+     */
+    @Test
+    fun mfskHasNoAnomalousBlockBoundaryJumpOnEitherBundledCover() {
+        for (cover in AudioSampleCover.entries) {
+            val (stego, _) = encodeAndDecodeMfskProbePayload(cover)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            var maxBoundaryDelta = 0
+            var maxInteriorDelta = 0
+            for (i in 1 until neededSamples) {
+                val delta = abs(stego[i].toInt() - stego[i - 1].toInt())
+                if (i % MFSK_FRAME_SIZE == 0) {
+                    if (delta > maxBoundaryDelta) maxBoundaryDelta = delta
+                } else {
+                    if (delta > maxInteriorDelta) maxInteriorDelta = delta
+                }
+            }
+
+            assertTrue(
+                "expected no block-boundary sample jump larger than the largest interior jump on " +
+                    "${cover.name} (maxBoundaryDelta=$maxBoundaryDelta, maxInteriorDelta=$maxInteriorDelta) " +
+                    "-- a larger boundary jump would mean the gain isn't actually uniform across blocks",
+                maxBoundaryDelta <= maxInteriorDelta,
+            )
+        }
+    }
+
+    /**
+     * The mathematical guarantee a single whole-clip gain gives for free: for ANY two adjacent
+     * samples, `stego[i] = round(g * (cover[i] + tone[i]))`, so `|Δstego| <= g*(|Δcover| +
+     * |Δtone|) + 1` (the `+1` covers up to ±0.5 rounding error on each of the two roundings).
+     * [g] is measured empirically from the largest-magnitude sample in the untouched tail (past
+     * the MFSK codeword span, where `tone == 0` and `stego[i] == round(g * cover[i])` exactly) --
+     * picking the largest magnitude keeps the rounding-derived relative error on that estimate
+     * negligible (well under 0.01%). [maxDeltaTone] is a safe analytic upper bound (not the
+     * actual per-codeword value, which depends on the real Reed-Solomon-encoded byte values this
+     * test doesn't reconstruct): `|Δ(A*sin(θ))| <= 2*A*|sin(halfStep)|` per active tone, summed
+     * across all [MFSK_TONE_COUNT] tone bins.
+     */
+    @Test
+    fun mfskWholeClipGainSatisfiesTheNoDiscontinuityBound() {
+        for (cover in AudioSampleCover.entries) {
+            val pcm = synthesizeSampleCover(cover)
+            val (stego, _) = encodeAndDecodeMfskProbePayload(cover, pcm)
+            val neededSamples = MFSK_CODEWORD_BYTES * MFSK_FRAME_SIZE
+
+            var maxDeltaCover = 0
+            for (i in 1 until pcm.size) {
+                val d = abs(pcm[i].toInt() - pcm[i - 1].toInt())
+                if (d > maxDeltaCover) maxDeltaCover = d
+            }
+
+            var bestTailIndex = -1
+            var bestTailAbs = 0
+            for (i in neededSamples until pcm.size) {
+                val a = abs(pcm[i].toInt())
+                if (a > bestTailAbs) {
+                    bestTailAbs = a
+                    bestTailIndex = i
+                }
+            }
+            assertTrue("expected an untouched tail sample to measure gain from for ${cover.name}", bestTailIndex >= 0)
+            val gain = stego[bestTailIndex].toDouble() / pcm[bestTailIndex].toDouble()
+
+            var maxDeltaTone = 0.0
+            for (bit in 0 until MFSK_TONE_COUNT) {
+                val freqHz = (MFSK_BASE_BIN + bit) * NightjarAcoustics.SAMPLE_RATE_HZ.toDouble() / MFSK_FRAME_SIZE
+                val halfStep = PI * freqHz / NightjarAcoustics.SAMPLE_RATE_HZ
+                maxDeltaTone += 2.0 * MFSK_TONE_AMPLITUDE * abs(sin(halfStep))
+            }
+
+            var maxDeltaStego = 0
+            for (i in 1 until neededSamples) {
+                val d = abs(stego[i].toInt() - stego[i - 1].toInt())
+                if (d > maxDeltaStego) maxDeltaStego = d
+            }
+
+            val bound = gain * (maxDeltaCover + maxDeltaTone) + 1
+            assertTrue(
+                "expected max|Δstego| ($maxDeltaStego) <= gain*(maxDeltaCover+maxDeltaTone)+1 " +
+                    "($bound) on ${cover.name} (gain=$gain, maxDeltaCover=$maxDeltaCover, " +
+                    "maxDeltaTone=$maxDeltaTone)",
+                maxDeltaStego <= bound,
+            )
+        }
+    }
+
+    /** Shared MFSK clipping-fix test fixture: encodes [MFSK_CLIP_FIX_TEST_PAYLOAD] onto [cover]
+     *  (or the already-synthesized [pcm], if the caller needs it too) and decodes the result --
+     *  every clipping-fix test above needs this same encode/decode pair. */
+    private fun encodeAndDecodeMfskProbePayload(
+        cover: AudioSampleCover,
+        pcm: PcmAudio = synthesizeSampleCover(cover),
+    ): Pair<PcmAudio, DecodeResult> {
+        val carrier = AudioStegoCarrier(pcm, AudioStegoTechnique.MFSK)
+        assertTrue(
+            "test payload (${MFSK_CLIP_FIX_TEST_PAYLOAD.size}B) exceeds MFSK's fixed capacity " +
+                "(${carrier.maxPayloadBytes}B)",
+            MFSK_CLIP_FIX_TEST_PAYLOAD.size <= carrier.maxPayloadBytes,
+        )
+        val stego = carrier.encode(MFSK_CLIP_FIX_TEST_PAYLOAD)
+        return stego to carrier.decode(stego)
     }
 
     // --- Test helpers ---
@@ -594,5 +709,18 @@ class AudioStegoCarrierTest {
 
         /** Mirrors AudioStegoCarrier's documented MFSK codeword size (data + parity bytes = symbol blocks). */
         private const val MFSK_CODEWORD_BYTES = MFSK_RS_DATA_BYTES + MFSK_RS_PARITY_BYTES
+
+        /** Mirrors AudioStegoCarrier's documented first MFSK tone bin. */
+        private const val MFSK_BASE_BIN = 420
+
+        /** Mirrors AudioStegoCarrier's documented MFSK simultaneous-tone-channel count. */
+        private const val MFSK_TONE_COUNT = 8
+
+        /** Mirrors AudioStegoCarrier's documented MFSK per-tone amplitude ceiling. */
+        private const val MFSK_TONE_AMPLITUDE = 6000.0
+
+        /** 34 bytes, comfortably under MFSK's fixed ~37-byte capacity -- the same payload shape
+         *  (a real ASCII string, not synthetic noise) the clipping fix was measured against. */
+        private val MFSK_CLIP_FIX_TEST_PAYLOAD = "nightjar MFSK gain probe payload!!".toByteArray(Charsets.US_ASCII)
     }
 }
