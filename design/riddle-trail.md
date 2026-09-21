@@ -94,13 +94,13 @@ the app, which has nothing to teach about a payload that never leaves the device
 also the simplest technique to show visually (the bit-plane toggle already exists and is the
 cleanest "here's literally where it hid" demonstration in the app).
 
-**Riddle payload** (166 bytes UTF-8, budget ≤ 200):
+**Riddle payload** (142 bytes UTF-8, budget ≤ 200):
 > i live in the last bit of red, green, and blue, never alpha, never loud enough to see. tip
-> the bit-plane and find me. the humming jar keeps a longer secret than mine.
+> the bit-plane and find me. next, a secret in sound.
 
 **Plain gloss** (ordinary UI copy, not part of the carrier, no byte budget):
-> hidden one bit at a time in the image's own colors. open the bit-plane view to see which
-> bits changed.
+> hidden one bit at a time in the image's own colors. open the bit-plane view to see the
+> layer where it hides.
 
 **Glows next:** the `look for fireflies` action row on the art jar's detail screen (existing
 row, existing verb — see `design/firefly-jar-identity.md` v6 addendum for the highlight
@@ -124,12 +124,12 @@ honesty work is actually about — the riddle gets to make a true, specific clai
 techniques can't back up as cleanly.
 
 **Riddle payload** (80 bytes UTF-8, budget ≤ 80):
-> above 1.5 khz, i nudge how loud a bin looks. silence gives me away. next: sound.
+> above 1.5 khz, i nudge how loud a bin looks. silence gives me away. now, a song.
 
-**Fallback riddle** (33 bytes UTF-8, budget ≤ 36 — for the bundled cover/strength combination
+**Fallback riddle** (34 bytes UTF-8, budget ≤ 36 — for the bundled cover/strength combination
 that lands closest to spectrogram-LSB's floor once W1-5 actually measures it; swap in if the
 primary doesn't fit):
-> silence gives me away. try sound.
+> silence gives me away. try a song.
 
 Both versions stay honest about the one thing gate-19/26 fought to get right: the nudge itself
 is sub-perceptual, but a silent stretch of the cover isn't — the codec has to add real,
@@ -156,15 +156,15 @@ WAV rather than a live listen (see § above). Reed-Solomon FEC and the header/CR
 the two facts worth surfacing — they're what makes this jar different from the other two (a
 lossy medium that has to correct for itself, not just hide in one).
 
-**Riddle payload** (78 bytes UTF-8, budget ≤ 80):
-> i'm tones, a pitch per bit, mended by reed-solomon. now: hold still and watch.
+**Riddle payload** (77 bytes UTF-8, budget ≤ 80):
+> i'm tones, one pitch for every four bits, mended by reed-solomon. now: watch.
 
-**Fallback riddle** (28 bytes UTF-8, budget ≤ 36):
-> tones carry bits. now watch.
+**Fallback riddle** (29 bytes UTF-8, budget ≤ 36):
+> four bits a pitch. now watch.
 
 **Plain gloss:**
-> hidden as tones above a normal ear's easy range. the meadow can hear the same tones,
-> watching for them.
+> sent out loud as tones between about 2 and 6 khz, each pitch standing for four bits.
+> the meadow listens for exactly these tones.
 
 **Glows next:** the `look for fireflies` action row on the singing jar's detail screen.
 
@@ -340,19 +340,20 @@ out-of-scope list).
 ```
 trail_riddle_art                  "i live in the last bit of red, green, and blue, never
                                     alpha, never loud enough to see. tip the bit-plane and
-                                    find me. the humming jar keeps a longer secret than mine."
+                                    find me. next, a secret in sound."
 trail_gloss_art                   "hidden one bit at a time in the image's own colors. open
-                                    the bit-plane view to see which bits changed."
+                                    the bit-plane view to see the layer where it hides."
 trail_riddle_humming              "above 1.5 khz, i nudge how loud a bin looks. silence
-                                    gives me away. next: sound."
-trail_riddle_humming_fallback     "silence gives me away. try sound."
+                                    gives me away. now, a song."
+trail_riddle_humming_fallback     "silence gives me away. try a song."
 trail_gloss_humming               "hidden in the loudness of frequencies above 1.5 khz. the
                                     difference view shows exactly which bins moved."
-trail_riddle_singing              "i'm tones, a pitch per bit, mended by reed-solomon. now:
-                                    hold still and watch."
-trail_riddle_singing_fallback     "tones carry bits. now watch."
-trail_gloss_singing               "hidden as tones above a normal ear's easy range. the
-                                    meadow can hear the same tones, watching for them."
+trail_riddle_singing              "i'm tones, one pitch for every four bits, mended by
+                                    reed-solomon. now: watch."
+trail_riddle_singing_fallback     "four bits a pitch. now watch."
+trail_gloss_singing               "sent out loud as tones between about 2 and 6 khz, each
+                                    pitch standing for four bits. the meadow listens for
+                                    exactly these tones."
 trail_meadow_honest_fallback      "the meadow can't always hear its own song on one phone —
                                     the speaker and mic don't always overlap enough. skip
                                     this step, or open the singing jar and try \"catch a
