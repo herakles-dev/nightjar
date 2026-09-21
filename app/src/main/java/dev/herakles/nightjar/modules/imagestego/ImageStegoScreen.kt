@@ -357,7 +357,7 @@ fun ImageStegoScreen(
 }
 
 /**
- * Task #12 — jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the framed jar",
+ * Task #12 — jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the art jar",
  * [dev.herakles.nightjar.picker.JarRole.CREATION]), hosted by `JarDetailScreen` as its
  * `moduleFlow` slot (design/screen-flow.md § Screen 7). `JarDetailScreen` already renders the
  * "back to the shelf" row, the jar name/caption, and the firefly swarm above whatever this

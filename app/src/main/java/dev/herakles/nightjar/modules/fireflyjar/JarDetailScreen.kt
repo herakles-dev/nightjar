@@ -1809,7 +1809,7 @@ private fun PreviewJarDetailSinging() {
     )
 }
 
-@Preview(name = "Framed jar (image steganography)", showBackground = true, backgroundColor = 0xFF161229)
+@Preview(name = "Art jar (image steganography)", showBackground = true, backgroundColor = 0xFF161229)
 @Composable
 private fun PreviewJarDetailFramed() {
     JarDetailContent(
@@ -1837,7 +1837,7 @@ private fun PreviewJarDetailHumming() {
     )
 }
 
-@Preview(name = "Watching jar (detector)", showBackground = true, backgroundColor = 0xFF161229)
+@Preview(name = "Meadow (detector)", showBackground = true, backgroundColor = 0xFF161229)
 @Composable
 private fun PreviewJarDetailWatching() {
     JarDetailContent(

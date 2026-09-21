@@ -169,14 +169,14 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
 
 /**
  * Task #14 — the Firefly Jar dispatcher's real flow for
- * [dev.herakles.nightjar.picker.Module.DETECTOR] ("the watching jar" —
+ * [dev.herakles.nightjar.picker.Module.DETECTOR] ("the meadow" —
  * [dev.herakles.nightjar.picker.JarRole.WATCHING]). Named `jarWatchFlow`, not
  * `jarCatchFlow` — this module is passive-only, no encode/transmit verb, matching the
  * distinction [dev.herakles.nightjar.picker.JarRole] draws. `JarCatchFlows.kt`'s
  * `catchFlowFor` dispatcher calls this directly.
  *
  * Re-skins [DetectorContent]'s existing live confidence readout + flagged-history list
- * (design/screen-flow.md § Screen 7 "the watching jar" wireframe) rather than showing
+ * (design/screen-flow.md § Screen 7 "the watching jar" wireframe, shown as "the meadow" since v6) rather than showing
  * firefly dots — this module never creates or receives a payload (architecture.md § 3,
  * spec.md INV-4), so it never calls [FireflyRepository.insert]; [repository] is accepted only for
  * signature symmetry with the other three modules' jar flows and is otherwise unused
@@ -286,7 +286,7 @@ private fun JarWatchContent(
             }
             if (micPermissionDenied) {
                 Text(
-                    text = "the jar needs microphone access to watch.",
+                    text = "the meadow needs microphone access to watch.",
                     style = JarType.Body,
                     color = JarTextSecondary,
                 )

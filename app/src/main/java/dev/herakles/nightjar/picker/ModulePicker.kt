@@ -62,9 +62,13 @@ enum class Module(
     val jarChannel: String,
 ) {
     ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION, "sound"),
-    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the framed jar", JarRole.CREATION, "a picture"),
-    DETECTOR("detector", "continuously listens for the modem's signal", "the watching jar", JarRole.WATCHING, "the air"),
+    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the art jar", JarRole.CREATION, "a picture"),
     AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION, "a recording"),
+    // v6 (owner direction, 2026-09-21): the detector is "the meadow", not a jar (it never keeps
+    // a firefly, it only notices them), and sits last so the three creating jars come first.
+    // Declaration order is display order for both the jar shelf and the workshop list; nothing
+    // persists an ordinal (records store `name`), so reordering is safe for stored fireflies.
+    DETECTOR("detector", "continuously listens for the modem's signal", "the meadow", JarRole.WATCHING, "the air"),
 }
 
 /**
