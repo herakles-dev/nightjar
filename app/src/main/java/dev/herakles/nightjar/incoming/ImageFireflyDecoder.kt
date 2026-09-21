@@ -25,14 +25,12 @@ interface ImageFireflyDecoder {
 }
 
 /**
- * The registration point itself (spec.md v6 receive-plumbing task W1-2): empty until task W1-1
- * lands the sturdy technique and adds its [ImageFireflyDecoder] here.
- * [IncomingRouter.routeImage] reads [decoders] by default; tests inject a fake list directly
- * (`routeImage(..., decoders = listOf(FakeDecoder))`) rather than mutating this object, since it
- * exposes an immutable `List`.
+ * The registration point itself (spec.md v6 receive-plumbing task W1-2): task W1-1 lands the
+ * sturdy technique here as [SturdyImageFireflyDecoder]. [IncomingRouter.routeImage] reads
+ * [decoders] by default; tests inject a fake list directly (`routeImage(...,
+ * decoders = listOf(FakeDecoder))`) rather than mutating this object, since it exposes an
+ * immutable `List`.
  */
 object ImageFireflyDecoderRegistry {
-    /** REGISTRATION POINT (task W1-1): add the sturdy technique's [ImageFireflyDecoder] here,
-     *  e.g. `listOf(SturdyImageFireflyDecoder())`. */
-    val decoders: List<ImageFireflyDecoder> = emptyList()
+    val decoders: List<ImageFireflyDecoder> = listOf(SturdyImageFireflyDecoder())
 }
