@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v6 receive-outcome copy (task W2-1): design/screen-flow.md's v6 "Receiving" section, the "five
+  outcomes" table (INV-12, gate-31/32), and design/firefly-jar-identity.md's v6 addendum on
+  send/receive tone. All new receive-surface copy lives here per gate-38's "all v6 copy lives in
+  strings.xml" (screen-flow.md's v6 section applies that same rule to the new send/receive
+  copy); res/values/strings.xml itself is left untouched by this task.
+
+  Jar voice throughout (design/firefly-jar-identity.md): lowercase, no exclamation, no emoji.
+  receive_squeezed_image_body/receive_squeezed_audio_body never assert a firefly was actually
+  sent, and name the transport ("whatever app carried this"), not a fault; the sending app can't
+  be identified from IncomingOutcome.Squeezed as this task found it (no source-package field),
+  so both use the design doc's own documented generic fallback rather than a named-app variant.
+-->
+<resources>
+    <string name="receive_caught_title">you caught one</string>
+    <string name="receive_caught_body">%1$d bytes, hidden in %2$s.</string>
+    <string name="receive_caught_open_action">open %1$s</string>
+
+    <string name="receive_squeezed_title">squeezed on the way</string>
+    <string name="receive_squeezed_image_body">whatever app carried this squeezed it on the way, so the exact bits didn\'t survive. ask them to send it as a file, or use a sturdy firefly next time.</string>
+    <string name="receive_squeezed_audio_body">whatever app carried this squeezed it on the way, so it doesn\'t decode cleanly — like a recording turned into a compressed voice note. ask them to send it as a file or document instead.</string>
+
+    <string name="receive_damaged_title">damaged on the way</string>
+    <string name="receive_damaged_body">this one got damaged on the way over. ask whoever sent it to send it again.</string>
+
+    <string name="receive_no_firefly_title">no firefly here</string>
+    <string name="receive_no_firefly_body">no firefly hiding in this file.</string>
+
+    <string name="receive_unsupported_title">can\'t read this one</string>
+    <string name="receive_unsupported_body">nightjar doesn\'t know this kind of file.</string>
+
+    <string name="receive_back_to_jar">back to the jar</string>
+    <string name="receive_catch_from_file_row">catch from a photo or file</string>
+</resources>
