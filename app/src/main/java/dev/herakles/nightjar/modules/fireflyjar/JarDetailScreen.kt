@@ -73,6 +73,7 @@ import dev.herakles.nightjar.R
 import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.StereoPolarity
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.incoming.IncomingOutcome
 import dev.herakles.nightjar.matchCover
 import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
@@ -132,7 +133,16 @@ import kotlinx.coroutines.withContext
  * instead.
  */
 @Composable
-fun JarDetailScreen(module: Module, repository: FireflyRepository, trailStore: TrailStateStore, onBack: () -> Unit) {
+fun JarDetailScreen(
+    module: Module,
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onBack: () -> Unit,
+    // v6 (task W2-1, gate-31): "catch from a photo or file" row result -- threaded through to
+    // catchFlowFor/jarCatchFlow below. Default no-op keeps every existing call site (and
+    // @Preview, if one is ever added for this stateful root) compiling unchanged.
+    onIncomingOutcome: (IncomingOutcome) -> Unit = {},
+) {
     val fireflyFlow = remember(repository, module) { repository.observeByModule(module.name) }
     val fireflies by fireflyFlow.collectAsState(initial = emptyList())
     // F-03 fix (dup M-07): saved by id, not the record itself -- FireflyRecord isn't Parcelable,
@@ -162,7 +172,15 @@ fun JarDetailScreen(module: Module, repository: FireflyRepository, trailStore: T
             if (selectedFireflyId == id) selectedFireflyId = null
         },
         onBack = onBack,
-        moduleFlow = { catchFlowFor(module = module, repository = repository, trailStore = trailStore, onExit = onBack) },
+        moduleFlow = {
+            catchFlowFor(
+                module = module,
+                repository = repository,
+                trailStore = trailStore,
+                onExit = onBack,
+                onIncomingOutcome = onIncomingOutcome,
+            )
+        },
         // Stage C2 (gate-18): the carrier viewer's one I/O hook. FireflyDetailContent stays a
         // pure composable with no FireflyDao/FireflyMediaStore reference of its own -- it just
         // gets handed a suspend function that already knows how to fetch bytes by mediaPath.

@@ -44,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +53,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -65,7 +67,10 @@ import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
@@ -365,10 +370,39 @@ fun AcousticModemScreen(
  * gets a cyan listening card with a real level meter and a "you spotted one" result card. This
  * function's own state/controller wiring is untouched; only [JarModemFlowContent] and its
  * private helpers below changed.
+ *
+ * v6 addition (task W2-1, gate-31): a third row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the system document picker
+ * (`ActivityResultContracts.OpenDocument`, any audio MIME type -- this jar's own carrier is
+ * audio; no permission added, INV-10) and routes the picked `Uri` through
+ * [IncomingPipeline.route] -- the same routing `MainActivity.kt` uses for a share-sheet/
+ * open-with `Intent`, never duplicated here. [onIncomingOutcome] hands the resulting
+ * [IncomingOutcome] back up to `MainActivity.kt` (via `JarDetailScreen`/`catchFlowFor`) to
+ * navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onExit: () -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    // v6 (task W2-1, gate-31): "catch from a photo or file". A null Uri means the operator
+    // backed out of the picker -- no-op, same as every other picker launcher in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
+    }
 
     var protocol by remember { mutableStateOf(NightjarAcoustics.Protocol.AUDIBLE) }
     var symbolRate by remember { mutableStateOf(NightjarAcoustics.SymbolRate.NORMAL) }
@@ -521,6 +555,7 @@ fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
             }
         },
         lookForFirefliesHighlighted = trailActive,
+        onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
     )
 }
 
@@ -557,6 +592,7 @@ private fun JarModemFlowContent(
     // "look for fireflies" row. Default keeps every existing @Preview call site compiling
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
+    onCatchFromFile: () -> Unit,
 ) {
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
@@ -606,6 +642,18 @@ private fun JarModemFlowContent(
                 highlighted = lookForFirefliesHighlighted,
             )
         }
+
+        // v6 (task W2-1, gate-31): "catch from a photo or file" -- last in the action group, per
+        // design/screen-flow.md's v6 wireframe. Cyan "receiving" tint, same as "look for
+        // fireflies" -- this row can land a firefly in ANY jar, not necessarily this one.
+        JarFlowRow(
+            label = stringResource(R.string.receive_catch_from_file_row),
+            accent = FireflyReceived,
+            fill = JarActionLookFill,
+            border = JarActionLookBorder,
+            enabled = idleEquivalent,
+            onClick = onCatchFromFile,
+        )
 
         if (micPermissionDenied) {
             Text(

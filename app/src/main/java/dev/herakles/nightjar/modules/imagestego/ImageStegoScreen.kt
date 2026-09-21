@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -59,6 +60,8 @@ import dev.herakles.nightjar.ImageSteganalysis
 import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.R
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
@@ -400,10 +403,24 @@ fun ImageStegoScreen(
  * `JarDetailScreen` already owns the one "back to the shelf" row that leaves this screen. Left
  * as a deliberate, documented decision rather than inventing a second, redundant back
  * affordance — worth a second look if that reading turns out wrong.
+ *
+ * v6 addition (task W2-1, gate-31): a fourth row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the Android Photo Picker
+ * (`ActivityResultContracts.PickVisualMedia`, image MIME types only -- no permission added,
+ * INV-10) and routes the picked `Uri` through [IncomingPipeline.route] -- the exact same
+ * routing `MainActivity.kt` uses for a share-sheet/open-with `Intent`, never duplicated here.
+ * [onIncomingOutcome] hands the resulting [IncomingOutcome] back up to `MainActivity.kt` (via
+ * `JarDetailScreen`/`catchFlowFor`) to navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onExit: () -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val controller = remember {
         ImageStegoController(
             carrierFactory = { cover -> ImageStegoCarrier(cover) },
@@ -411,6 +428,22 @@ fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
         )
     }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
+
+    // v6 (task W2-1, gate-31): "catch from a photo or file" -- Photo Picker, image MIME types
+    // only, matching the art jar's own carrier (this module never handles audio). A null Uri
+    // means the operator backed out of the picker -- no-op, same as every other picker launcher
+    // in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
+    }
 
     var coverChoice by remember { mutableStateOf(SampleCover.GRADIENT) }
     var payloadText by remember { mutableStateOf("") }
@@ -575,6 +608,11 @@ fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
         },
         onPeekInside = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
         lookForFirefliesHighlighted = trailActive,
+        onCatchFromFile = {
+            catchFromFileLauncher.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
     )
 }
 
@@ -606,6 +644,7 @@ private fun JarImageStegoContent(
     // "look for fireflies" row. Default keeps every existing @Preview call site compiling
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
+    onCatchFromFile: () -> Unit,
 ) {
     val idleEquivalent = status is StegoStatus.Idle ||
         status is StegoStatus.Embedded ||
@@ -699,6 +738,17 @@ private fun JarImageStegoContent(
                 fill = JarActionCheckFill,
                 border = JarActionCheckBorder,
                 onClick = onPeekInside,
+            )
+            // v6 (task W2-1, gate-31): "catch from a photo or file" -- last in the action group,
+            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint (identity.md: "cyan
+            // = received"), same as "look for fireflies" -- this row can land a firefly in ANY
+            // jar, not necessarily this one, so it shares that verb's tint rather than "catch"'s.
+            JarActionRow(
+                label = stringResource(R.string.receive_catch_from_file_row),
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onCatchFromFile,
             )
         }
 

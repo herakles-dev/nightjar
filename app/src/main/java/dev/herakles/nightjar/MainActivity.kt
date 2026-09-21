@@ -9,16 +9,11 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -35,7 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import dev.herakles.nightjar.incoming.IncomingOutcome
 import dev.herakles.nightjar.incoming.IncomingPipeline
-import dev.herakles.nightjar.incoming.SqueezedContainer
+import dev.herakles.nightjar.incoming.IncomingScreen
 import dev.herakles.nightjar.incoming.probeOutcomeName
 import dev.herakles.nightjar.modules.ModuleStubScreen
 import dev.herakles.nightjar.modules.acoustic.AcousticModemScreen
@@ -149,8 +144,10 @@ private sealed interface Screen {
 
     /**
      * Landed after routing a share/open-with/"catch from a photo or file" `Intent` through
-     * [IncomingPipeline] (v6 receive plumbing, gate-31/32). [IncomingPlaceholderScreen] renders
-     * [outcome] as plain text for now -- task W2-1 replaces this with the real jar-voice copy.
+     * [IncomingPipeline] (v6 receive plumbing, gate-31/32). Rendered by
+     * [dev.herakles.nightjar.incoming.IncomingScreen] (task W2-1) with the real jar-voice copy
+     * from design/screen-flow.md's "five outcomes" table -- replaces task W1-2's MINIMAL
+     * plain-text placeholder.
      */
     data class Incoming(val outcome: IncomingOutcome) : Screen
 }
@@ -366,6 +363,10 @@ fun NightjarApp(incomingIntent: Intent? = null) {
                 repository = fireflyRepository,
                 trailStore = trailStore,
                 onBack = { screen = Screen.JarShelf },
+                // v6 (task W2-1, gate-31): "catch from a photo or file" routes through
+                // IncomingPipeline from inside the jar's own catch flow, then lands here on the
+                // same Screen.Incoming outcome screen a share-sheet/open-with Intent would.
+                onIncomingOutcome = { outcome -> screen = Screen.Incoming(outcome) },
             )
             is Screen.Picker -> ModulePicker(
                 onSelect = { module ->
@@ -411,9 +412,10 @@ fun NightjarApp(incomingIntent: Intent? = null) {
                 module = current.module,
                 onBack = { screen = Screen.Picker },
             )
-            is Screen.Incoming -> IncomingPlaceholderScreen(
+            is Screen.Incoming -> IncomingScreen(
                 outcome = current.outcome,
                 onBack = { screen = Screen.JarShelf },
+                onOpenJar = { module -> screen = Screen.JarDetail(module) },
             )
         }
     }
@@ -440,37 +442,3 @@ private fun incomingStreamUri(intent: Intent): Uri? = when (intent.action) {
     else -> null
 }
 
-/**
- * MINIMAL placeholder for the v6 receive outcome screen (spec.md v6 receive-plumbing task W1-2:
- * "Render it with a MINIMAL placeholder composable (plain text of the outcome plus 'back to the
- * jar')"). Task W2-1 replaces this with the real jar-voice copy from
- * design/screen-flow.md's "five outcomes" table -- deliberately no styling work happens here.
- */
-@Composable
-private fun IncomingPlaceholderScreen(outcome: IncomingOutcome, onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(text = incomingPlaceholderText(outcome))
-        TextButton(onClick = onBack) {
-            Text(text = "back to the jar")
-        }
-    }
-}
-
-/** Plain-text rendering of [outcome] for [IncomingPlaceholderScreen] -- not jar-voice copy
- *  (task W2-1's job), just enough to verify each of INV-12's five outcomes on screen/logcat. */
-private fun incomingPlaceholderText(outcome: IncomingOutcome): String = when (outcome) {
-    is IncomingOutcome.Caught ->
-        "caught: ${outcome.technique} in ${outcome.module.jarName} -- ${outcome.payload.size} bytes"
-    is IncomingOutcome.Squeezed -> when (outcome.container) {
-        SqueezedContainer.LOSSY_IMAGE -> "squeezed: lossy image container, nothing decoded"
-        SqueezedContainer.COMPRESSED_AUDIO -> "squeezed: compressed audio container, nothing decoded"
-    }
-    is IncomingOutcome.Damaged -> "damaged" + (outcome.detail?.let { ": $it" } ?: "")
-    is IncomingOutcome.NoFirefly -> "no firefly"
-    is IncomingOutcome.Unsupported -> "unsupported" + (outcome.reason?.let { ": $it" } ?: "")
-}

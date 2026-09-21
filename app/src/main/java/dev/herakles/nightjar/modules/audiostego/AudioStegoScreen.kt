@@ -34,6 +34,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +60,8 @@ import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.R
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
@@ -319,10 +322,25 @@ fun AudioStegoScreen(
  * into a terminal status is a genuinely new sealed-class instance (there's always an
  * `Embedding`/`Extracting` step in between two terminal states), so the effect reliably fires
  * once per completed action rather than only once per distinct value.
+ *
+ * v6 addition (task W2-1, gate-31): a fourth row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the system document picker
+ * (`ActivityResultContracts.OpenDocument`, any audio MIME type -- this jar's own carrier is
+ * audio; no permission added, INV-10) and routes the picked `Uri` through
+ * [IncomingPipeline.route] -- the same routing `MainActivity.kt` uses for a share-sheet/
+ * open-with `Intent`, never duplicated here. [onIncomingOutcome] hands the resulting
+ * [IncomingOutcome] back up to `MainActivity.kt` (via `JarDetailScreen`/`catchFlowFor`) to
+ * navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onExit: () -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val controller = remember {
         AudioStegoController(
             carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) },
@@ -332,6 +350,20 @@ fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
     }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+
+    // v6 (task W2-1, gate-31): "catch from a photo or file". A null Uri means the operator
+    // backed out of the picker -- no-op, same as every other picker launcher in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
     }
 
     var technique by remember { mutableStateOf(AudioStegoTechnique.PHASE_INVERSION) }
@@ -506,6 +538,7 @@ fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
             }
         },
         onPeekInside = { controller.analyze() },
+        onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
         onExit = onExit,
         lookForFirefliesHighlighted = trailActive,
     )
@@ -549,6 +582,7 @@ private fun JarAudioStegoCatchFlowContent(
     onEmbed: () -> Unit,
     onExtract: () -> Unit,
     onPeekInside: () -> Unit,
+    onCatchFromFile: () -> Unit,
     onExit: () -> Unit,
     // W2-3 (gate-36/gate-38): true while this jar's trail step is the active one -- glows the
     // "look for fireflies" row. Default keeps every existing @Preview call site compiling
@@ -662,6 +696,16 @@ private fun JarAudioStegoCatchFlowContent(
                 fill = JarActionCheckFill,
                 border = JarActionCheckBorder,
                 onClick = onPeekInside,
+            )
+            // v6 (task W2-1, gate-31): "catch from a photo or file" -- last in the action group,
+            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint, same as "look for
+            // fireflies" -- this row can land a firefly in ANY jar, not necessarily this one.
+            JarFlowRow(
+                label = stringResource(R.string.receive_catch_from_file_row),
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onCatchFromFile,
             )
         }
 
