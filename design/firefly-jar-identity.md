@@ -243,10 +243,174 @@ itself should shift with the disguise, not stay a fixed color across both surfac
 
 ---
 
-## Change log
+## v6 addendum: guidance highlights, practice fireflies, send/receive tone, the meadow tile
+
+Scope: spec.md's v6 addition (sharing + first-use riddle trail), gates 33/36/38/39. The
+trail's own step-by-step content (which jar, which riddle, which action glows) lives in the
+new sibling doc `design/riddle-trail.md` — this addendum is where that trail's *visual
+mechanics* belong, since they're palette/motion-level decisions this doc already owns, plus
+the meadow tile's redesign and the tone rules for the new send/receive copy.
+
+**Naming note:** as of the owner's 2026-09-21 direction, "the framed jar" is "the art jar" and
+"the watching jar" is "the meadow" everywhere below and throughout this addendum — see
+`screen-flow.md`'s v6 section for the full rename note. The body of this document above this
+addendum (§ Palette, § Typography, § Motion) still uses the pre-rename names in its own
+historical examples and is left as-is, same reasoning `screen-flow.md` gives for not
+retro-editing its own Screen 6/7 sections.
+
+### Guidance-highlight rules (gate-38)
+
+The trail needs to mark "the one next thing to try" without inventing a second visual
+language on top of the one this doc already defines. Every rule below is a *reuse*
+instruction, not a new primitive:
+
+- **Which primitive, by surface:**
+  - **Shelf tile** (pointing at a whole jar, e.g. "try the humming jar"): reuse
+    `drawAmbientHalo` (`FireflyGlyphs.kt` :160) exactly as it already renders behind a jar that
+    holds fireflies — soft radial gradient, `glowColor` at low opacity fading to transparent.
+    The one deliberate exception: `drawAmbientHalo`'s existing rule is "callers with zero
+    fireflies never reach this function" (its own KDoc, § 4.4: "no halo div at all"). Trail
+    guidance is a second, explicit caller of the same function for the *target* tile
+    specifically, regardless of whether that jar holds a firefly yet — the halo is doing a
+    different job here (pointing, not indicating fullness), so it earns being called outside
+    the rule written for the other job. Color: `FireflyCreated` (the same amber every "catch/
+    embed" moment already uses) — never a new "guidance" hue.
+  - **Action row** (pointing at a specific verb, e.g. `look for fireflies`, `watch`, `send
+    this firefly`): reuse `fireflyAlpha` (`FireflyGlyphs.kt` :131) — the same soft-cubic
+    breathing curve every firefly dot already animates on — applied to that row's existing
+    fill/border opacity (`JarActionLookFill`/`JarActionLookBorder` for a look/watch target,
+    `JarActionCatchFill`/`JarActionCatchBorder` for a catch/send target) instead of those
+    tokens' normal fixed alpha. Call `fireflyAlpha(id = a fixed guidance id, t = clock)` with
+    the shared frame clock every other firefly already reads from
+    (`rememberFireflyClock()`/`withFrameNanos`, § Motion above) — not a new
+    `rememberInfiniteTransition`, not a new tween.
+  - **Wordmark subtitle** (the one-line "what's next" hint, `design/riddle-trail.md` § Wordmark
+    hint): plain text swap, `JarType.WordmarkSubtitle`/`JarTextTertiary` — the same style the
+    line already renders in. No glow on the text itself; the glow lives on the tile/row the
+    text is pointing at, not on the words describing it.
+- **One target at a time:** exactly one shelf tile OR one action row glows at any moment,
+  never both simultaneously and never more than one of either — this is what "one next step
+  glows at a time" (gate-38's own phrasing) means mechanically. The shelf shows a tile glow
+  when the user is looking at the shelf and the current step's jar isn't open yet; the moment
+  they open that jar's detail screen, the glow moves from the tile to the action row inside
+  it (the shelf tile stops glowing the instant its detail screen is the one on top — it isn't
+  drawn a second time on the way back either, once that step is done).
+- **Stops on tap:** the moment the user taps the glowing target (or, for the meadow step, the
+  moment a real detection fires — `design/riddle-trail.md` § Step 4), the glow for that target
+  is removed immediately, not faded out — an instant state change, consistent with this app's
+  standing motion doctrine (identity.md's "instant, not eased-out" rule, § Motion above: "the
+  transition IS the feedback," not a decorated one) even though the breathing animation itself
+  is an explicit, documented exception to that doctrine.
+- **Static under reduce-motion:** when the system's reduce-motion / disable-animations flag is
+  set, `fireflyAlpha`'s continuous breathing collapses to its own fixed midpoint (the function
+  already ranges `0.35 ± 0.3`; render at a flat `0.5` — roughly the loop's time-average, not
+  its peak, so a static highlight doesn't read louder than the moving one ever did) rather
+  than disappearing. A highlight that vanishes under reduce-motion isn't accessible guidance,
+  it's guidance that silently stops existing for exactly the users most likely to need a
+  motion-free interface — this is the specific failure mode identity.md's own reduce-motion
+  rule was written to prevent ("collapse to instant transitions; never 'ease-out but shorter'
+  as a compromise" — the same "never quietly remove the affordance" spirit, applied here to a
+  highlight instead of a screen transition).
+- **TalkBack:** every glowing element's existing `contentDescription`/semantics gains one
+  appended clause naming the guidance context — not a second, separate announcement. E.g. the
+  humming jar's shelf tile: `"the humming jar, 0 fireflies"` (existing) becomes `"the humming
+  jar, 0 fireflies, next step in the trail"` while it's the glow target; `look for fireflies`
+  becomes `"look for fireflies, next step in the trail"`. Closes gate-38's "every highlight ...
+  [has] TalkBack descriptions" requirement without inventing new semantics nodes.
+
+### Practice-firefly labelling
+
+A practice firefly is visually identical to a real one everywhere it appears as a dot (shelf
+tile, swarm) — no special color, no border, no badge on the glyph itself; the whole point of
+INV-11 is that it's a *real* firefly, caught through the *real* decode path, and treating it as
+a lesser or differently-drawn object on the shelf would undercut that. The one place it
+declares itself is the **firefly detail popup**, where a small caption appears above the
+existing metadata row, using the existing `JarTextTertiary` tier (the same one "your fireflies"
+/ tile captions already use — no new color):
+
+```
+a practice firefly from the trail
+```
+
+(`trail_practice_label`, `design/riddle-trail.md` § strings.xml keys). This sits above the
+timestamp/channel `MetaCard` row, never replacing it — a practice firefly still shows a real
+timestamp and a real channel, because it genuinely was caught at that time through that
+channel. Release works identically to any other firefly (`hold one to let it go` / `let this
+firefly go`, unchanged) — no separate "release practice fireflies" affordance exists, per
+`design/riddle-trail.md` § Release practice fireflies.
+
+### Send/receive tone
+
+New copy this addition introduces (the five receive outcomes, the two send flows —
+`screen-flow.md`'s v6 section has the full tables) follows the exact same voice contract every
+prior addition already holds itself to, with one specific note worth stating rather than
+assuming: **"hidden, not locked" is doing real work, not decoration.** Spec.md's own boundary
+list is explicit that nightjar has no encryption or passwords (v6, out of scope: "a firefly is
+hidden, not locked, and the copy says so") — so this phrase isn't a cute flourish, it's the one
+sentence in the send flow that keeps a user from assuming a caught firefly is private to
+whoever decodes it. It appears exactly once per send interaction (not repeated per screen), in
+`JarTextTertiary`, same weight as every other static advisory line this app already uses
+(Task #28's precedent: "static, always-visible, real-number-over-vague-copy"). The
+`squeezed` outcome's copy is the other tone-sensitive case worth naming directly: it names the
+sending app when the intent makes that recoverable, but it is never framed as that app's
+*fault* ("X squeezed this" states a fact about lossy transport, not a complaint) — matches
+this doctrine's existing "a decode failure isn't destructive" restraint, extended to a failure
+that happens to be a different app's doing rather than the user's own mistyped payload.
+
+### The meadow tile — dropping the jar glass
+
+**Recommendation: drop the jar-glass silhouette for the meadow tile specifically, replacing it
+with a low grass-line horizon and a handful of `distantBlink`-driven faint dots hovering above
+it — reusing `JarNightSky.kt`'s existing distant-firefly primitive (`distantBlink`, :119)
+rather than drawing new motion.**
+
+Reasoning:
+
+1. **Grammar follows the rename.** "The meadow" read against a dimmed jar silhouette doesn't
+   parse — a jar is a container; a meadow is the opposite of one. The tile's own shape should
+   agree with what the tile is now called, the same way `screen-flow.md`'s copy-audit work
+   makes sure the *text* agrees.
+2. **It draws `JarRole.WATCHING` more honestly than a jar ever could.** The current
+   `drawWatchingJar` (`FireflyGlyphs.kt` :260) is a dim, glass-outlined jar with a radar sweep
+   — but a jar, even an empty and dimmed one, still visually promises "a container that could
+   hold something." The meadow never can (spec.md: "it stays a passive one-way analyzer ...
+   its existing flagged-detection history is re-skinned, not modeled as a firefly"). An open
+   field with no vessel at all is the more accurate picture of "notices, never keeps."
+3. **It reuses a primitive instead of inventing one.** `distantBlink` already exists,
+   already implements the "two-flash cycle ... period varies per firefly so the field never
+   pulses in unison" behavior (its own KDoc, verbatim from `DESIGN_SPEC.md` §4.2), and already
+   renders in the exact `FireflyCreated`/`FireflyReceived` alternation the background starfield
+   uses. Reusing it for the meadow's up-close tile makes a genuine thematic point — the meadow
+   watches the same dark, open space the whole shelf's background already is, magnified,
+   rather than a differently-themed enclosure of its own. This is squarely inside this doc's
+   own § Anti-AI-tell status allowance ("data visualizations ... render a real measurement,"
+   extended here to "reused motion primitive," not new decoration) rather than a new glow
+   invented for this one tile.
+4. **It keeps the same restraint the rest of the shelf holds itself to.** This is a horizon
+   line and a few dim, unsynchronized blinks — not an illustrated landscape, not a mascot
+   scene. The bar stays "one shape, quiet," same as every jar silhouette already is.
+
+**What stays:** `JarWatchingDim`/`JarGlassWatching`'s cool lavender-gray family remains the
+meadow's own accent — the grass line itself, and the tile's border/fill tint
+(`JarTileFillDim`/`JarTileBorderWatching`, unchanged), keep using that palette so the tile
+still reads as the one dim, "asleep until tapped" surface on the shelf, distinct from the three
+warm/lit creating jars. Only the *shape* changes — the color language that already distinguishes
+"watching" from "creating" doesn't need to.
+
+**What this doesn't decide:** the exact geometry (how tall the grass line sits in the tile's
+box, how many distant blinks render, whether the radar-sweep glyph is dropped entirely or kept
+as a secondary "actively watching" cue layered over the new field) is asset/implementation
+work for `FireflyGlyphs.kt`'s eventual `drawMeadow` replacement, not fixed by this
+recommendation. The one hard constraint this addendum does set: whatever replaces
+`drawWatchingJar` must still fit the same call-site box every other jar glyph fits (the 56×68
+viewBox convention at shelf scale, the larger detail-hero scale on `JarDetailScreen`), so the
+shelf's row layout doesn't need touching for this one tile.
+
+### Change log
 
 | Date | Change | Reason |
 |---|---|---|
 | 2026-08-04 | Initial `firefly-jar-identity.md` — spec addition, Task #12 | New disguise-themed surface needs its own doctrine; identity.md stays authoritative for the technical screens underneath the long-press reveal. All values above are proposed starting points for the implementer/android-designer pass, same "placeholder pick pending user override" spirit `identity.md`'s own icon.md precedent uses — not locked. |
 | 2026-08-04 | **"Cozy Pixel Night" design package integrated** — sprint-09, tasks #10–#15 | The user-supplied design-team package (`firefly-app-design-refresh`, v1 explored three directions, v2 committed to "Cozy Pixel Night" across nine screens) is the "user override" the row above anticipated. Four reversals, each recorded in place: **(1) Typography** — Silkscreen replaces system Roboto on this surface only; § Typography. **(2) Palette** — two-stop sky becomes four-stop, `JarTextTertiary` added; § Palette. **(3) Motion** — bounded keyframe blink becomes a continuous parametric frame clock that also moves the fireflies; § Motion. **(4) Contrast** — two dim text tiers failed the AA bar this doc sets; confirmed on device, then corrected by lightness alone with the package's hue/saturation held. Extracted spec: `sessions/nightjar/artifacts/design-refresh/DESIGN_SPEC.md`. Notably the package stayed on-palette: `#FFC857`, `#39C5CF`, `#F5E6C8`, `#9B8FBF`, `#6B6690` and `#D9C9A3` were already this doc's tokens. |
 | 2026-09-21 | Data-visualization allowance made explicit — docs close-out (v5 review) | `JarDetailScreen.kt`/`CarrierInsightViews.kt` code comments had been citing a "data visualization, not decoration" framing as if quoted from this doc; the phrase was never actually here. Added a bullet to § Anti-AI-tell status saying so directly, so the citation is now true rather than paraphrase. |
+| 2026-09-21 | **v6 addendum** — sharing + riddle trail, W0-B | Added § Guidance-highlight rules (reuses `drawAmbientHalo`/`fireflyAlpha`/the shared frame clock for the trail's "one next step glows" mechanic — no new primitive), § Practice-firefly labelling (one caption in the detail popup, existing release gesture, no new glyph treatment), § Send/receive tone ("hidden, not locked" is a real disclosure, not flavor text; `squeezed` copy names the transport, not a fault), and § The meadow tile (recommendation: drop the jar-glass silhouette, reuse `JarNightSky.kt`'s `distantBlink` for an open-field treatment instead of a bespoke new glow). Full step-by-step trail content lives in the new sibling doc `design/riddle-trail.md`, not here. Reflects the owner's "the art jar"/"the meadow" rename (2026-09-21, landed directly on `feat/v6-sharing-trail` commit `f743f42`) throughout. |
