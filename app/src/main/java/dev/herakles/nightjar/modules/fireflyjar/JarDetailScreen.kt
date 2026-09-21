@@ -314,8 +314,9 @@ private fun jarDetailCaption(role: JarRole): String = when (role) {
 /**
  * The module's hero jar, centered — 140×170.dp for the singing jar (DESIGN_SPEC.md §3/§5 1b:
  * the acoustic modem's hub screen gets hero emphasis), 100×120.dp for the other three (§5
- * 1f/1g/1h). The watching jar's dim/radar variant is [FireflyGlyphs.drawJarGlyph]'s own branch
- * on [Module.DETECTOR] — this call site doesn't know or care it's rendering differently.
+ * 1f/1g/1h). The meadow's open-field variant (v6 addendum) is [FireflyGlyphs.drawJarGlyph]'s
+ * own branch on [Module.DETECTOR] — this call site doesn't know or care it's rendering
+ * differently.
  */
 @Composable
 private fun JarHero(module: Module, fireflies: List<FireflyRecord>) {

@@ -29,6 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.picker.Module
@@ -188,6 +190,12 @@ private fun JarTile(module: Module, fireflyCount: Int, onClick: () -> Unit) {
             .background(tint.fill)
             .border(width = 1.dp, color = tint.border, shape = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
+            // A bare Row's title/caption Text children would otherwise read as two separate
+            // TalkBack stops -- same "no text a screen reader can read" reasoning JarDetailScreen's
+            // FireflyDot semantics block already documents, applied to the tile as a whole.
+            .semantics(mergeDescendants = true) {
+                contentDescription = "${module.jarName}, ${fireflyCountLabel(module, fireflyCount)}"
+            }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
