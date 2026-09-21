@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v6 send plumbing (spec.md gate-33, amended INV-5): the FileProvider path-specs for the
+  `${applicationId}.outgoing` provider declared in AndroidManifest.xml.
+
+  Exposes ONLY `cacheDir/outgoing/` (a <cache-path>, which resolves against
+  Context.getCacheDir()) — nothing else under the app's cache directory, and no
+  <files-path>/<external-path>/<external-files-path>/<external-cache-path> entry, so this
+  provider can never be coerced into serving a Uri outside that one directory (INV-5, INV-10).
+  See dev.herakles.nightjar.share.FireflyShare, which is the only writer of that directory.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="outgoing" path="outgoing/" />
+</paths>

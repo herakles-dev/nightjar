@@ -13,6 +13,24 @@
         android:theme="@style/Theme.Nightjar"
         android:enableOnBackInvokedCallback="true">
 
+        <!-- v6 send plumbing (spec.md gate-33, amended INV-5): jar-mode "send this firefly" and
+             "hide one in a photo" hand the system share sheet a copy in a private cache
+             directory via this provider, never MediaStore, never shared storage. exported=false
+             plus grantUriPermissions=true is the standard FileProvider posture: no other app can
+             query this provider directly, and a Uri is only readable by whichever app the
+             chooser hands FLAG_GRANT_READ_URI_PERMISSION to. See
+             dev.herakles.nightjar.share.FireflyShare and res/xml/outgoing_paths.xml. No
+             permission accompanies this (INV-10). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.outgoing"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/outgoing_paths" />
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

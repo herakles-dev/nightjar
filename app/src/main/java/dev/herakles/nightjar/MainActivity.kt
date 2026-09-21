@@ -22,6 +22,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.lifecycleScope
 import dev.herakles.nightjar.modules.ModuleStubScreen
 import dev.herakles.nightjar.modules.acoustic.AcousticModemScreen
 import dev.herakles.nightjar.modules.audiostego.AudioStegoScreen
@@ -34,9 +35,11 @@ import dev.herakles.nightjar.modules.fireflyjar.JarShelfScreen
 import dev.herakles.nightjar.modules.imagestego.ImageStegoScreen
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
+import dev.herakles.nightjar.share.FireflyShare
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -53,6 +56,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // v6 send plumbing (gate-33): reclaim stale outgoing-cache files once per process start,
+        // off the main thread -- see FireflyShare.kt's KDoc for why this can't run eagerly right
+        // after a send instead.
+        lifecycleScope.launch(Dispatchers.IO) { FireflyShare.sweepOutgoing(applicationContext) }
         setContent {
             NightjarTheme {
                 NightjarApp()

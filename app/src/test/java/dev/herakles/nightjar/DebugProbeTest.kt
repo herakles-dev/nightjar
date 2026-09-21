@@ -17,10 +17,10 @@ import org.junit.Test
 class DebugProbeTest {
 
     @Test
-    fun `empty state serializes all four top-level fields as null`() {
+    fun `empty state serializes all six top-level fields as null`() {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
-                "\"stored_media\":null}",
+                "\"stored_media\":null,\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(DebugProbe.ProbeState()),
         )
     }
@@ -38,7 +38,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"ENCODE\"," +
                 "\"success\":true,\"timestamp_ms\":1700000000000}," +
-                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null}",
+                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(state),
         )
     }
@@ -56,7 +57,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"IMAGE_LSB_CODEC\",\"operation\":\"DECODE\"," +
                 "\"success\":false,\"timestamp_ms\":42}," +
-                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null}",
+                "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(state),
         )
     }
@@ -73,7 +75,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null," +
                 "\"detector_confidence\":{\"module\":\"ACOUSTIC_DETECTOR\",\"confidence\":0.73," +
-                "\"timestamp_ms\":999},\"screen\":null,\"stored_media\":null}",
+                "\"timestamp_ms\":999},\"screen\":null,\"stored_media\":null," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(state),
         )
     }
@@ -88,13 +91,14 @@ class DebugProbeTest {
     fun `screen serializes as a plain string`() {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
-                "\"screen\":\"module_stub:IMAGE_STEGANOGRAPHY\",\"stored_media\":null}",
+                "\"screen\":\"module_stub:IMAGE_STEGANOGRAPHY\",\"stored_media\":null," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(DebugProbe.ProbeState(screen = "module_stub:IMAGE_STEGANOGRAPHY")),
         )
     }
 
     @Test
-    fun `all four fields populated at once round-trip independently`() {
+    fun `all six fields populated at once round-trip independently`() {
         val state = DebugProbe.ProbeState(
             lastEncodeDecode = DebugProbe.EncodeDecodeResult(
                 ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, true, 111L,
@@ -107,6 +111,13 @@ class DebugProbeTest {
                 totalMediaBytes = 4_200_000L,
                 orphanFileCount = 1,
             ),
+            lastSend = DebugProbe.OutgoingSendState(
+                technique = "IMAGE_STURDY",
+                bytes = 51_200L,
+                authority = "dev.herakles.nightjar.outgoing",
+                timestampMs = 333L,
+            ),
+            outgoingFileCount = 2,
         )
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"DECODE\"," +
@@ -115,7 +126,10 @@ class DebugProbeTest {
                 "\"timestamp_ms\":222}," +
                 "\"screen\":\"module_stub:ACOUSTIC_MODEM\"," +
                 "\"stored_media\":{\"record_count\":7,\"records_with_media_count\":5," +
-                "\"total_media_bytes\":4200000,\"orphan_file_count\":1}}",
+                "\"total_media_bytes\":4200000,\"orphan_file_count\":1}," +
+                "\"last_send\":{\"technique\":\"IMAGE_STURDY\",\"bytes\":51200," +
+                "\"authority\":\"dev.herakles.nightjar.outgoing\",\"timestamp_ms\":333}," +
+                "\"outgoing_file_count\":2}",
             toJson(state),
         )
     }
@@ -132,7 +146,8 @@ class DebugProbeTest {
 
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
-                "\"screen\":\"$expectedEscaped\",\"stored_media\":null}",
+                "\"screen\":\"$expectedEscaped\",\"stored_media\":null," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             json,
         )
     }
@@ -152,7 +167,8 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
                 "\"stored_media\":{\"record_count\":12,\"records_with_media_count\":9," +
-                "\"total_media_bytes\":480000,\"orphan_file_count\":0}}",
+                "\"total_media_bytes\":480000,\"orphan_file_count\":0}," +
+                "\"last_send\":null,\"outgoing_file_count\":null}",
             toJson(state),
         )
     }
@@ -176,5 +192,39 @@ class DebugProbeTest {
                     "\"total_media_bytes\":0,\"orphan_file_count\":0}",
             ),
         )
+    }
+
+    // --- last_send / outgoing_file_count (v6 addition, gate-33 probe contract) ---
+
+    @Test
+    fun `last send serializes technique, bytes, authority, timestamp`() {
+        val state = DebugProbe.ProbeState(
+            lastSend = DebugProbe.OutgoingSendState(
+                technique = "AUDIO",
+                bytes = 88_200L,
+                authority = "dev.herakles.nightjar.outgoing",
+                timestampMs = 1_700_000_000_500L,
+            ),
+        )
+        assertEquals(
+            "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
+                "\"stored_media\":null," +
+                "\"last_send\":{\"technique\":\"AUDIO\",\"bytes\":88200," +
+                "\"authority\":\"dev.herakles.nightjar.outgoing\"," +
+                "\"timestamp_ms\":1700000000500},\"outgoing_file_count\":null}",
+            toJson(state),
+        )
+    }
+
+    @Test
+    fun `outgoing file count serializes as a real zero, not null`() {
+        val json = toJson(DebugProbe.ProbeState(outgoingFileCount = 0))
+        assertEquals(true, json.contains("\"outgoing_file_count\":0"))
+    }
+
+    @Test
+    fun `no send yet serializes last_send as an explicit null, not an omitted key`() {
+        val json = toJson(DebugProbe.ProbeState(screen = "jar_shelf"))
+        assertEquals(true, json.contains("\"last_send\":null"))
     }
 }

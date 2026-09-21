@@ -13,6 +13,11 @@ import android.util.Log
  *  - the current top-level screen ([reportScreen])
  *  - the Firefly Jar's stored-media state (v4 addition, gate-20): record count, count carrying
  *    media, total media bytes, and orphan-file count ([reportStoredMedia])
+ *  - the v6 addition's send state: the last outgoing send (technique, cache file bytes, the
+ *    FileProvider authority used, [reportOutgoingSend]) and the outgoing cache directory's
+ *    current file count ([reportOutgoingFileCount]) -- spec.md's v6 Runtime Verification
+ *    Surface addition, gate-33. Sourced from
+ *    [dev.herakles.nightjar.share.FireflyShare.prepareOutgoing]/`sweepOutgoing`.
  *
  * Deliberately small and injectable: any screen/controller can call a `report*` method
  * opportunistically as its own state changes, with no shared mutable coupling beyond this
@@ -65,12 +70,29 @@ object DebugProbe {
         val orphanFileCount: Int,
     )
 
+    /**
+     * Snapshot of the most recent [dev.herakles.nightjar.share.FireflyShare.prepareOutgoing]
+     * call (v6 addition, gate-33's probe contract: "the last send (technique, cache file bytes,
+     * authority used)"). [technique] carries whatever the caller's `OutgoingKind.name` was --
+     * this class stays a plain string so it has no compile-time dependency on the `share`
+     * package, same discipline [EncodeDecodeResult] already follows by taking [ModuleId] rather
+     * than importing a carrier type.
+     */
+    data class OutgoingSendState(
+        val technique: String,
+        val bytes: Long,
+        val authority: String,
+        val timestampMs: Long,
+    )
+
     /** Everything the `COVERT_DEBUG` dump reports, per spec.md's Runtime Verification Surface. */
     data class ProbeState(
         val lastEncodeDecode: EncodeDecodeResult? = null,
         val detector: DetectorState? = null,
         val screen: String? = null,
         val storedMedia: StoredMediaState? = null,
+        val lastSend: OutgoingSendState? = null,
+        val outgoingFileCount: Int? = null,
     )
 
     @Volatile
@@ -141,6 +163,34 @@ object DebugProbe {
         emit()
     }
 
+    /**
+     * Record an outgoing-send outcome (v6 addition, gate-33) and log the full updated state
+     * dump. No-op in release builds. Callers (currently only
+     * [dev.herakles.nightjar.share.FireflyShare.prepareOutgoing]) pass the values they already
+     * computed -- this never re-derives them itself, same discipline [reportEncodeDecodeResult]
+     * follows.
+     */
+    fun reportOutgoingSend(
+        technique: String,
+        bytes: Long,
+        authority: String,
+        timestampMs: Long = System.currentTimeMillis(),
+    ) {
+        if (!BuildConfig.DEBUG) return
+        state = state.copy(lastSend = OutgoingSendState(technique, bytes, authority, timestampMs))
+        emit()
+    }
+
+    /**
+     * Record the outgoing cache directory's current file count (v6 addition, gate-33) and log
+     * the full updated state dump. No-op in release builds.
+     */
+    fun reportOutgoingFileCount(count: Int) {
+        if (!BuildConfig.DEBUG) return
+        state = state.copy(outgoingFileCount = count)
+        emit()
+    }
+
     private fun emit() {
         Log.d(TAG, toJson(state))
     }
@@ -166,6 +216,10 @@ internal fun toJson(state: DebugProbe.ProbeState): String {
     appendJsonString(sb, state.screen)
     sb.append(",\"stored_media\":")
     appendStoredMedia(sb, state.storedMedia)
+    sb.append(",\"last_send\":")
+    appendOutgoingSend(sb, state.lastSend)
+    sb.append(",\"outgoing_file_count\":")
+    appendNullableInt(sb, state.outgoingFileCount)
     sb.append('}')
     return sb.toString()
 }
@@ -209,6 +263,25 @@ private fun appendStoredMedia(sb: StringBuilder, storedMedia: DebugProbe.StoredM
     sb.append(",\"total_media_bytes\":").append(storedMedia.totalMediaBytes)
     sb.append(",\"orphan_file_count\":").append(storedMedia.orphanFileCount)
     sb.append('}')
+}
+
+private fun appendOutgoingSend(sb: StringBuilder, send: DebugProbe.OutgoingSendState?) {
+    if (send == null) {
+        sb.append("null")
+        return
+    }
+    sb.append('{')
+    sb.append("\"technique\":")
+    appendJsonString(sb, send.technique)
+    sb.append(",\"bytes\":").append(send.bytes)
+    sb.append(",\"authority\":")
+    appendJsonString(sb, send.authority)
+    sb.append(",\"timestamp_ms\":").append(send.timestampMs)
+    sb.append('}')
+}
+
+private fun appendNullableInt(sb: StringBuilder, value: Int?) {
+    if (value == null) sb.append("null") else sb.append(value)
 }
 
 private fun appendJsonString(sb: StringBuilder, value: String?) {
