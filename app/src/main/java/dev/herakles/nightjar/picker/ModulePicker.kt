@@ -17,10 +17,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import kotlin.math.PI
@@ -87,7 +89,15 @@ enum class Module(
  * than stepping up one level within it.
  */
 @Composable
-fun ModulePicker(onSelect: (Module) -> Unit, onBack: () -> Unit) {
+fun ModulePicker(
+    onSelect: (Module) -> Unit,
+    onBack: () -> Unit,
+    // W2-3 (design/riddle-trail.md § Start the trail again): "start the trail again" footer
+    // link -- default no-op keeps this composable usable without a trail store in scope (there
+    // is no @Preview for this screen today, but this matches every other optional-hook default
+    // in this app's jar-mode screens).
+    onRestartTrail: () -> Unit = {},
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
@@ -106,6 +116,21 @@ fun ModulePicker(onSelect: (Module) -> Unit, onBack: () -> Unit) {
         )
         Module.entries.forEach { module ->
             ModuleRow(module = module, onClick = { onSelect(module) })
+        }
+        // W2-3: plain footer link, same labelLarge/TextSecondary styling the "back to the jar"
+        // link above already uses (design/riddle-trail.md § Start the trail again).
+        Box(
+            modifier = Modifier
+                .height(48.dp)
+                .clickable(onClick = onRestartTrail)
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = stringResource(R.string.trail_restart),
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
         }
     }
 }

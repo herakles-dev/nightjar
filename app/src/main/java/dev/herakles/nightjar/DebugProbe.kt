@@ -20,6 +20,8 @@ import android.util.Log
  *    [dev.herakles.nightjar.share.FireflyShare.prepareOutgoing]/`sweepOutgoing`.
  *  - the last incoming file the receive pipeline handled (v6 addition, gate-31/32): action,
  *    sniffed type, detected technique, and outcome ([reportIncoming])
+ *  - the riddle trail's own progress (v6 addition, gate-36): current step, steps done, and
+ *    whether the trail was skipped ([reportTrail])
  *
  * Deliberately small and injectable: any screen/controller can call a `report*` method
  * opportunistically as its own state changes, with no shared mutable coupling beyond this
@@ -106,6 +108,23 @@ object DebugProbe {
         val timestampMs: Long,
     )
 
+    /**
+     * Snapshot of the riddle trail's own progress (v6 addition, gate-36's probe contract --
+     * spec.md's Runtime Verification Surface: "the trail state (current step, steps done,
+     * skipped)"). Sourced from [dev.herakles.nightjar.trail.TrailStateStore.state], so a fresh
+     * install's step-1 start, "start the trail again," skip, and each step's own completion are
+     * all assertable as queryable state rather than judged from a screenshot. [currentStep]/
+     * [completedSteps] are already-resolved [dev.herakles.nightjar.trail.TrailStep.id] strings --
+     * this file stays free of a compile-time dependency on the trail package, same discipline
+     * [OutgoingSendState] already follows for `OutgoingKind`. No timestamp field: like
+     * [StoredMediaState], this is a plain state snapshot, not a discrete timestamped event.
+     */
+    data class TrailProbeState(
+        val currentStep: String?,
+        val completedSteps: List<String>,
+        val skipped: Boolean,
+    )
+
     /** Everything the `COVERT_DEBUG` dump reports, per spec.md's Runtime Verification Surface. */
     data class ProbeState(
         val lastEncodeDecode: EncodeDecodeResult? = null,
@@ -115,6 +134,7 @@ object DebugProbe {
         val lastSend: OutgoingSendState? = null,
         val outgoingFileCount: Int? = null,
         val incoming: IncomingState? = null,
+        val trail: TrailProbeState? = null,
     )
 
     @Volatile
@@ -232,6 +252,19 @@ object DebugProbe {
         emit()
     }
 
+    /**
+     * Record the riddle trail's current progress and log the updated state dump (v6 addition,
+     * gate-36's probe contract). No-op in release builds. Callers (
+     * [dev.herakles.nightjar.trail.TrailStateStore] via `MainActivity`'s own collector) pass
+     * already-resolved [dev.herakles.nightjar.trail.TrailStep.id] strings -- this never re-derives
+     * them itself, same discipline every other `report*` method here follows.
+     */
+    fun reportTrail(currentStep: String?, completedSteps: List<String>, skipped: Boolean) {
+        if (!BuildConfig.DEBUG) return
+        state = state.copy(trail = TrailProbeState(currentStep, completedSteps, skipped))
+        emit()
+    }
+
     private fun emit() {
         Log.d(TAG, toJson(state))
     }
@@ -263,6 +296,8 @@ internal fun toJson(state: DebugProbe.ProbeState): String {
     appendNullableInt(sb, state.outgoingFileCount)
     sb.append(",\"incoming\":")
     appendIncoming(sb, state.incoming)
+    sb.append(",\"trail\":")
+    appendTrail(sb, state.trail)
     sb.append('}')
     return sb.toString()
 }
@@ -342,6 +377,24 @@ private fun appendIncoming(sb: StringBuilder, incoming: DebugProbe.IncomingState
     sb.append(",\"outcome\":")
     appendJsonString(sb, incoming.outcome)
     sb.append(",\"timestamp_ms\":").append(incoming.timestampMs)
+    sb.append('}')
+}
+
+private fun appendTrail(sb: StringBuilder, trail: DebugProbe.TrailProbeState?) {
+    if (trail == null) {
+        sb.append("null")
+        return
+    }
+    sb.append('{')
+    sb.append("\"current_step\":")
+    appendJsonString(sb, trail.currentStep)
+    sb.append(",\"completed_steps\":[")
+    trail.completedSteps.forEachIndexed { index, step ->
+        if (index > 0) sb.append(',')
+        appendJsonString(sb, step)
+    }
+    sb.append(']')
+    sb.append(",\"skipped\":").append(trail.skipped)
     sb.append('}')
 }
 

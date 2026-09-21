@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,6 +76,10 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
 import dev.herakles.nightjar.modules.fireflyjar.JarGlyph
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
@@ -376,7 +381,12 @@ fun AcousticModemScreen(
  * navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOutcome: (IncomingOutcome) -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -414,6 +424,16 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
     var catchExpanded by remember { mutableStateOf(false) }
     var catchResultMessage: String? by remember { mutableStateOf(null) }
 
+    // W2-3 riddle trail (design/riddle-trail.md § Step 3, gate-36): while this jar's step is the
+    // active one, "look for fireflies" decodes the bundled practice WAV via
+    // [AcousticModemController.importAndDecode] -- the same "feed an existing signal to decode()"
+    // path the technical screen's own "import" action already establishes -- instead of a live
+    // speaker/mic round trip. [pendingPracticeCatch] doubles as the "was this a practice catch"
+    // signal for the DecodedSuccess handler below; reset on every look/listen dispatch.
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.SINGING
+    var pendingPracticeCatch by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -440,15 +460,14 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
     // read from a fixed controller field. Falls back to the existing media-less insert() when
     // there's no PCM (nothing transmitted/decoded yet) or it's empty -- never writes a zero-byte
     // file.
-    suspend fun insertFireflyWithCarrier(record: FireflyRecord, pcm: PcmAudio?) {
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord, pcm: PcmAudio?): Long {
         if (pcm == null || pcm.isEmpty()) {
-            repository.insert(record)
-            return
+            return repository.insert(record)
         }
         val wavBytes = withContext(Dispatchers.Default) {
             WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
         }
-        repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+        return repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
     }
 
     // Keyed on the status's class rather than the full value: ModemStatus.Listening carries a
@@ -471,8 +490,14 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
             )
             catchResultMessage = "you caught one — $bytes bytes"
         } else if (status is ModemStatus.DecodedSuccess) {
+            // W2-3 (gate-36): AcousticModemController.importAndDecode (the practice-decode path
+            // below) sets lastDecodedPcm to the same PCM it actually decoded before this status
+            // is ever reached, whether the decode came from a live listen or a practice import --
+            // no override needed here, unlike the art/humming jars' own working-bitmap/-audio
+            // ambiguity.
             val bytes = status.text.encodeToByteArray().size
-            insertFireflyWithCarrier(
+            val wasPractice = pendingPracticeCatch
+            val id = insertFireflyWithCarrier(
                 FireflyRecord(
                     moduleId = Module.ACOUSTIC_MODEM.name,
                     direction = "RECEIVED",
@@ -483,6 +508,11 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
                 ),
                 controller.lastDecodedPcm,
             )
+            if (wasPractice) {
+                trailStore.markPractice(id)
+                trailStore.advance(TrailStep.SINGING)
+            }
+            pendingPracticeCatch = false
         }
         previousStatus = status
     }
@@ -502,9 +532,18 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
         catchResultMessage = catchResultMessage,
         micPermissionDenied = micPermissionDenied,
         onToggleLook = {
-            if (controller.status is ModemStatus.Listening) {
+            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.SINGING)
+            if (trailActive && practiceFile.exists()) {
+                pendingPracticeCatch = true
+                controller.importAndDecode(Uri.fromFile(practiceFile))
+            } else if (controller.status is ModemStatus.Listening) {
+                pendingPracticeCatch = false
                 controller.stopListening()
             } else {
+                // Either the trail isn't pointing at this jar right now, or it is but the
+                // practice file hasn't finished generating yet -- either way this is an ordinary
+                // live listen, same as before the trail existed.
+                pendingPracticeCatch = false
                 val granted = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
                 if (granted) {
@@ -515,6 +554,7 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit, onIncomingOu
                 }
             }
         },
+        lookForFirefliesHighlighted = trailActive,
         onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
     )
 }
@@ -548,6 +588,10 @@ private fun JarModemFlowContent(
     catchResultMessage: String?,
     micPermissionDenied: Boolean,
     onToggleLook: () -> Unit,
+    // W2-3 (gate-36/gate-38): true while this jar's trail step is the active one -- glows the
+    // "look for fireflies" row. Default keeps every existing @Preview call site compiling
+    // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
+    lookForFirefliesHighlighted: Boolean = false,
     onCatchFromFile: () -> Unit,
 ) {
     val idleEquivalent = status is ModemStatus.Idle ||
@@ -595,6 +639,7 @@ private fun JarModemFlowContent(
                 border = JarActionLookBorder,
                 enabled = canToggleLook,
                 onClick = onToggleLook,
+                highlighted = lookForFirefliesHighlighted,
             )
         }
 
@@ -627,7 +672,17 @@ private fun JarModemFlowContent(
  *  [border] are the module's own accent-tinted tokens ([JarActionCatchFill]/[JarActionLookFill]
  *  and their border twins) — never a new inline color. */
 @Composable
-private fun JarFlowRow(label: String, accent: Color, fill: Color, border: Color, enabled: Boolean, onClick: () -> Unit) {
+private fun JarFlowRow(
+    label: String,
+    accent: Color,
+    fill: Color,
+    border: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    // W2-3: glows this row as the trail's current target (trail/TrailHighlight.kt) -- a no-op
+    // Modifier when false, so every existing call site keeps its default styling untouched.
+    highlighted: Boolean = false,
+) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -635,6 +690,7 @@ private fun JarFlowRow(label: String, accent: Color, fill: Color, border: Color,
             .background(fill)
             .border(width = 1.dp, color = border, shape = RoundedCornerShape(8.dp))
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .trailHighlight(active = highlighted, description = label)
             .padding(horizontal = 14.dp, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -820,8 +876,14 @@ private fun JarOptionRow(label: String, selected: Boolean, enabled: Boolean, onC
  * firefly-jar-identity.md's doctrine reversal explicitly allows a success color here, unlike this
  * file's own technical screen. [ModemStatus.Listening] is handled by [JarListeningCard] one level
  * up, not here, so it's `Unit` in this `when`. [ModemStatus.Importing]/[ModemStatus.ImportFailed]
- * can never actually occur in this flow (no import affordance — "look for fireflies" is listen-
- * only), but [ModemStatus] is sealed so the `when` still names them.
+ * used to never occur in this flow at all (no import affordance — "look for fireflies" was
+ * listen-only); W2-3's riddle trail now briefly passes through [ModemStatus.Importing] (and, on
+ * a read failure, [ModemStatus.ImportFailed]) while the singing jar's step is active and "look
+ * for fireflies" decodes the bundled practice WAV via [AcousticModemController.importAndDecode]
+ * instead of a live listen (design/riddle-trail.md § Step 3). Both stay `Unit`/near-silent here
+ * on purpose — the practice decode is near-instant for a few-second clip, and [ModemStatus
+ * .Decoding] right after it already shows "reading the light" — so no new copy was added for
+ * either state.
  */
 @Composable
 private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?) {

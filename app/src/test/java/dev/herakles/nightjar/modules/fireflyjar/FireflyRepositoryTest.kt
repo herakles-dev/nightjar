@@ -243,7 +243,7 @@ class FireflyRepositoryTest {
 
     /** Delegates every [FireflyDao] method to [delegate] except [insert], which always throws. */
     private class FailingInsertDao(private val delegate: FireflyDao) : FireflyDao by delegate {
-        override suspend fun insert(record: FireflyRecord) {
+        override suspend fun insert(record: FireflyRecord): Long {
             throw IllegalStateException("forced insert failure for test")
         }
     }
@@ -327,7 +327,7 @@ class FireflyRepositoryTest {
      * [rollbackWithAPreExistingSharerMustNotDeleteTheOtherRowsFile].
      */
     private class SharingThenFailingInsertDao(private val delegate: FireflyDao) : FireflyDao by delegate {
-        override suspend fun insert(record: FireflyRecord) {
+        override suspend fun insert(record: FireflyRecord): Long {
             delegate.insert(record.copy(payloadPreview = "pre-existing sharer"))
             throw IllegalStateException("forced insert failure for test")
         }

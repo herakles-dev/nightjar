@@ -20,6 +20,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -45,6 +46,8 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
 import dev.herakles.nightjar.share.FireflyShare
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
 import kotlinx.coroutines.Dispatchers
@@ -255,6 +258,26 @@ fun NightjarApp(incomingIntent: Intent? = null) {
     // three catch flows) now threads FireflyRepository throughout -- see FireflyRepository.kt's
     // file KDoc for the write-then-insert path.
     val fireflyRepository = remember { FireflyRepository(fireflyDao, FireflyMediaStore(context)) }
+    // W2-3 riddle trail (gate-36): one store for the whole app, constructed alongside the
+    // repository it releases practice fireflies through -- see TrailStateStore.kt's own KDoc.
+    val trailStore = remember { TrailStateStore(context, fireflyRepository) }
+    val trailState by trailStore.state.collectAsState()
+    val trailCoroutineScope = rememberCoroutineScope()
+
+    // Probe contract (v6 addition, spec.md's Runtime Verification Surface): "the trail state
+    // (current step, steps done, skipped)". TrailStep.ORDER.filter{}.map{} (not
+    // trailState.completedSteps.map{} directly) so the reported list has a stable, deterministic
+    // order regardless of Set iteration order -- gate-39's "nothing persists an enum ordinal"
+    // rule doesn't forbid reporting steps in trail order, only persisting a raw ordinal.
+    LaunchedEffect(trailState) {
+        DebugProbe.reportTrail(
+            currentStep = trailState.currentStep?.id,
+            completedSteps = TrailStep.ORDER
+                .filter { it in trailState.completedSteps }
+                .map { it.id },
+            skipped = trailState.skipped,
+        )
+    }
 
     // Task #5 (gate-20, INV-6): reclaim orphaned media files once per process, at start-up,
     // before the jar UI is reachable. Guarded by OrphanSweepGuard so activity recreation
@@ -331,12 +354,14 @@ fun NightjarApp(incomingIntent: Intent? = null) {
         when (val current = screen) {
             is Screen.JarShelf -> JarShelfScreen(
                 repository = fireflyRepository,
+                trailStore = trailStore,
                 onSelectModule = { module -> screen = Screen.JarDetail(module) },
                 onRevealTechnicalMode = { screen = Screen.Picker },
             )
             is Screen.JarDetail -> JarDetailScreen(
                 module = current.module,
                 repository = fireflyRepository,
+                trailStore = trailStore,
                 onBack = { screen = Screen.JarShelf },
                 // v6 (task W2-1, gate-31): "catch from a photo or file" routes through
                 // IncomingPipeline from inside the jar's own catch flow, then lands here on the
@@ -355,6 +380,10 @@ fun NightjarApp(incomingIntent: Intent? = null) {
                 // U-01 (gate-12): the picker's own visible "back to the jar" link -- same
                 // destination the BackHandler above already sends Screen.Picker to.
                 onBack = { screen = Screen.JarShelf },
+                // W2-3 (design/riddle-trail.md § Start the trail again): re-seeds one fresh
+                // practice firefly per creating jar and resets progress to step 1 -- lives here,
+                // not on the shelf, per the design doc's own placement reasoning.
+                onRestartTrail = { trailCoroutineScope.launch { trailStore.restart() } },
             )
             is Screen.AcousticModem -> AcousticModemScreen(
                 // Task #30: protocol/symbol-rate selector on the screen rebuilds the carrier

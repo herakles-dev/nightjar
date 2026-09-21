@@ -26,4 +26,12 @@
     <string name="trail_skip">skip the trail</string>
     <string name="trail_restart">start the trail again</string>
     <string name="trail_practice_label">a practice firefly from the trail</string>
+    <!-- W2-3 additions: not in design/riddle-trail.md's own suggested-keys block (written before
+         the UI build), but required by gate-38 ("all v6 copy lives in strings.xml") for the two
+         pieces of UI chrome this task adds: the highlight's appended TalkBack clause
+         (design/firefly-jar-identity.md v6 addendum, Guidance-highlight rules: "next step in
+         the trail") and the small label above a practice firefly's plain-gloss text (same
+         addendum, Practice-firefly labelling: "labelled as a gloss"). -->
+    <string name="trail_highlight_next_step">next step in the trail</string>
+    <string name="trail_gloss_label">gloss</string>
 </resources>

@@ -56,6 +56,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
@@ -68,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.LsbBitPlane
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.StereoPolarity
 import dev.herakles.nightjar.WavFile
@@ -78,6 +80,8 @@ import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.spectrogram
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.trailPracticeGlossRes
 import dev.herakles.nightjar.stegoDifference
 import dev.herakles.nightjar.stereoPolarity
 import dev.herakles.nightjar.ui.ExpandGlyph
@@ -132,6 +136,7 @@ import kotlinx.coroutines.withContext
 fun JarDetailScreen(
     module: Module,
     repository: FireflyRepository,
+    trailStore: TrailStateStore,
     onBack: () -> Unit,
     // v6 (task W2-1, gate-31): "catch from a photo or file" row result -- threaded through to
     // catchFlowFor/jarCatchFlow below. Default no-op keeps every existing call site (and
@@ -171,6 +176,7 @@ fun JarDetailScreen(
             catchFlowFor(
                 module = module,
                 repository = repository,
+                trailStore = trailStore,
                 onExit = onBack,
                 onIncomingOutcome = onIncomingOutcome,
             )
@@ -179,6 +185,10 @@ fun JarDetailScreen(
         // pure composable with no FireflyDao/FireflyMediaStore reference of its own -- it just
         // gets handed a suspend function that already knows how to fetch bytes by mediaPath.
         loadMedia = { path -> repository.readMedia(path) },
+        // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): a pure
+        // hook, same shape as [loadMedia] -- FireflyDetailContent still holds no TrailStateStore
+        // reference of its own.
+        isPracticeFirefly = { id -> trailStore.isPractice(id) },
     )
 }
 
@@ -207,6 +217,10 @@ fun JarDetailContent(
     // unchanged -- same "pure/previewable" reasoning this composable's own KDoc already states
     // for [moduleFlow].
     loadMedia: suspend (String) -> ByteArray? = { null },
+    // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): default
+    // `{ false }` keeps every existing @Preview call site compiling unchanged, same reasoning
+    // this composable's other optional hooks already follow.
+    isPracticeFirefly: (Long) -> Boolean = { false },
 ) {
     // G-01/F-02: shared confirm-delete state for both entry points -- a swarm tile's long-press
     // and the detail popup's explicit delete action. Only one of the two views below is ever
@@ -224,6 +238,7 @@ fun JarDetailContent(
                 onBack = onDismissDetail,
                 loadMedia = loadMedia,
                 onRequestDelete = { pendingDeleteId = selectedFirefly.id },
+                isPracticeFirefly = isPracticeFirefly(selectedFirefly.id),
             )
         } else {
             Column(
@@ -708,6 +723,10 @@ private fun FireflyDetailContent(
     // ([FireflyDot]/[FireflySwarmTile]) isn't discoverable on its own -- this is the popup's own
     // entry point into the same shared confirm-delete dialog ([JarDetailContent]).
     onRequestDelete: () -> Unit = {},
+    // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling, gate-36):
+    // true for a firefly caught from the trail's own practice carrier. Default `false` keeps
+    // every existing @Preview call site compiling unchanged.
+    isPracticeFirefly: Boolean = false,
 ) {
     val caught = firefly.direction == "CREATED"
     val accent = if (caught) FireflyCreated else FireflyReceived
@@ -769,6 +788,39 @@ private fun FireflyDetailContent(
                 Text(text = "message", style = JarType.MetaLabel, color = JarTextTertiary)
                 Text(text = preview, style = JarType.Body, color = JarTextPrimary)
             }
+        }
+
+        // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): the
+        // plain gloss sits beside the decoded riddle above, ordinary UI copy labelled as a gloss
+        // -- never the payload text itself, which is [preview] above, decoded like any other
+        // firefly's. [trailPracticeGlossRes] is null for a module that never holds a practice
+        // firefly (the meadow), so this never renders for that module regardless of
+        // [isPracticeFirefly].
+        if (isPracticeFirefly) {
+            trailPracticeGlossRes(module)?.let { glossRes ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(text = stringResource(R.string.trail_gloss_label), style = JarType.MetaLabel, color = JarTextTertiary)
+                    Text(text = stringResource(glossRes), style = JarType.Footer, color = JarTextSecondary)
+                }
+            }
+        }
+
+        // W2-3 (design/firefly-jar-identity.md v6 addendum): sits above the metadata row below,
+        // never replacing it -- a practice firefly still shows a real timestamp and channel.
+        if (isPracticeFirefly) {
+            Text(
+                text = stringResource(R.string.trail_practice_label),
+                style = JarType.Footer,
+                color = JarTextTertiary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 8.dp),
+            )
         }
 
         Row(
