@@ -34,6 +34,7 @@ import dev.herakles.nightjar.modules.fireflyjar.JarShelfScreen
 import dev.herakles.nightjar.modules.imagestego.ImageStegoScreen
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.picker.ModulePicker
+import dev.herakles.nightjar.trail.PracticeFireflies
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.NightjarTheme
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,9 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v6 riddle trail (W1-5): idempotent, backgrounded -- generates the three practice
+        // carrier files on Dispatchers.IO only if any is missing (see PracticeFireflies.kt).
+        PracticeFireflies.ensureGenerated(applicationContext)
         enableEdgeToEdge()
         setContent {
             NightjarTheme {
