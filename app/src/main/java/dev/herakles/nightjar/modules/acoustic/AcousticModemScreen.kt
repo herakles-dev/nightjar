@@ -7,21 +7,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -59,11 +53,14 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.AcousticCarrier
 import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.DebugProbe
 import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DecodeResult
+import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
@@ -96,14 +93,18 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.coroutineContext
 import kotlin.math.log10
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -190,6 +191,16 @@ sealed interface ModemStatus {
      * problem that never reaches `decode()` at all.
      */
     data class ImportFailed(val message: String) : ModemStatus
+
+    /**
+     * mic-2 fix: [AcousticModemController.startListening]'s AudioRecord failed to initialize
+     * (every [MicCapture.openBestAudioRecord] tier busy/unavailable), or `startRecording()` threw
+     * once initialized — surfaced as a plain "mic busy" message instead of the uncaught
+     * IllegalStateException this used to crash on. Distinct from [ImportFailed] (a transport/
+     * format problem with a *picked file*, never touching the mic) and from [DecodedFailure] (a
+     * well-formed capture that simply didn't decode).
+     */
+    data class ListenFailed(val message: String) : ModemStatus
 }
 
 /**
@@ -201,9 +212,6 @@ sealed interface ModemStatus {
  * starting immediately. The user can also stop early by tapping "stop".
  */
 private const val MAX_LISTEN_SECONDS = 20.0
-
-/** Logcat tag for AudioRecord source/effect fallback diagnostics (Task #26). */
-private const val TAG = "AcousticModem"
 
 /**
  * Task #27: floor for the live input-level readout, in dBFS relative to full-scale PCM16
@@ -250,6 +258,11 @@ fun AcousticModemScreen(
     val controller = remember(carrier) { AcousticModemController(carrier, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-5: stop in-flight listen capture / transmit playback when the app is backgrounded,
+    // rather than leaving the mic capturing or the speaker playing behind a closed/minimized app.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopForBackground()
     }
 
     var payloadText by remember { mutableStateOf("") }
@@ -360,6 +373,11 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val controller = remember(carrier) { AcousticModemController(carrier, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-5: stop in-flight listen capture / transmit playback when the app is backgrounded,
+    // rather than leaving the mic capturing or the speaker playing behind a closed/minimized app.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopForBackground()
     }
 
     var payloadText by remember { mutableStateOf("") }
@@ -503,7 +521,8 @@ private fun JarModemFlowContent(
 ) {
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
-        status is ModemStatus.DecodedFailure
+        status is ModemStatus.DecodedFailure ||
+        status is ModemStatus.ListenFailed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
     val canToggleLook = idleEquivalent || status is ModemStatus.Listening
@@ -781,6 +800,11 @@ private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?
             color = JarTextSecondary,
         )
         is ModemStatus.ImportFailed -> Unit
+        is ModemStatus.ListenFailed -> Text(
+            text = status.message,
+            style = JarType.Body,
+            color = JarTextSecondary,
+        )
     }
 }
 
@@ -971,7 +995,8 @@ fun AcousticModemContent(
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
         status is ModemStatus.DecodedFailure ||
-        status is ModemStatus.ImportFailed
+        status is ModemStatus.ImportFailed ||
+        status is ModemStatus.ListenFailed
     val payloadBytes = payloadText.encodeToByteArray().size
     val canTransmit = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
     val canImport = idleEquivalent
@@ -1249,6 +1274,13 @@ private fun StatusBlock(status: ModemStatus) {
             style = MaterialTheme.typography.bodyLarge,
             color = TextSecondary,
         )
+        // mic-2: mic failed to initialize or startRecording() threw — same informational
+        // treatment as ImportFailed/DecodedFailure, not destructive-red.
+        is ModemStatus.ListenFailed -> Text(
+            text = status.message,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
     }
 }
 
@@ -1399,6 +1431,10 @@ class AcousticModemController(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val listening = AtomicBoolean(false)
 
+    /** [transmit]'s currently in-flight job, if any — tracked so [stopForBackground] can cancel
+     *  just the transmit playback without tearing down [scope] itself (mic-5). */
+    private var transmitJob: Job? = null
+
     /** True while idle, or holding a terminal decode result — the shared "not busy" gate for
      * [transmit]/[saveToDevice]/[shareFromDevice], all of which run their own one-shot [encode]. */
     private fun isIdleEquivalent(): Boolean =
@@ -1407,7 +1443,7 @@ class AcousticModemController(
     /** Encode [payloadText] and play it over the speaker. No-op while busy. */
     fun transmit(payloadText: String) {
         if (!isIdleEquivalent()) return
-        scope.launch {
+        transmitJob = scope.launch {
             status = ModemStatus.Encoding
             val pcm = try {
                 carrier.encode(payloadText.encodeToByteArray())
@@ -1591,15 +1627,28 @@ class AcousticModemController(
     fun startListening() {
         if (status is ModemStatus.Listening) return
         listening.set(true)
+        // mic-6 fix: status flips to Listening synchronously, before scope.launch, instead of as
+        // the first line inside the launched coroutine. Previously there was a window between the
+        // `listening` flag going true and `status` actually reading Listening where a double-tap
+        // could slip past this method's own `if (status is Listening) return` guard above and open
+        // a second concurrent AudioRecord. Mirrors DetectorController.startListening()'s
+        // `isListening` flag, which already does this correctly. levelDb starts null (nothing
+        // captured yet); remainingSeconds starts at the full window so the countdown is visible
+        // the instant "listen" is tapped, before the first AudioRecord.read() chunk has even
+        // returned (Task #27).
+        status = ModemStatus.Listening(levelDb = null, remainingSeconds = MAX_LISTEN_SECONDS)
         scope.launch {
-            // levelDb starts null (nothing captured yet); remainingSeconds starts at the full
-            // window so the countdown is visible the instant "listen" is tapped, before the
-            // first AudioRecord.read() chunk has even returned (Task #27).
-            status = ModemStatus.Listening(levelDb = null, remainingSeconds = MAX_LISTEN_SECONDS)
             val captureResult = try {
                 capturePcm()
             } catch (permissionRevoked: SecurityException) {
                 status = ModemStatus.Idle
+                return@launch
+            } catch (micBusy: IllegalStateException) {
+                // mic-2 fix: MicCapture.openBestAudioRecord() returned null, or startRecording()
+                // itself threw once initialized — either way, surface it instead of crashing (this
+                // used to be an uncaught IllegalStateException from openBestAudioRecord()'s last
+                // resort `error(...)` call).
+                status = ModemStatus.ListenFailed("the microphone is busy — a call or another app is using it.")
                 return@launch
             }
             lastDecodedPcm = captureResult.pcm
@@ -1620,6 +1669,27 @@ class AcousticModemController(
     /** Ends the capture window early; the in-flight coroutine finishes the decode itself. */
     fun stopListening() {
         listening.set(false)
+    }
+
+    /**
+     * mic-5 fix: stops in-flight listen capture and/or transmit playback when the app is
+     * backgrounded (`LifecycleEventEffect(Lifecycle.Event.ON_STOP)` in every composable that owns
+     * this controller). Distinct from [dispose]: this leaves [scope] alive, so the controller is
+     * still usable once the app returns to the foreground — it only tears down whichever op is
+     * currently running. [stopListening]'s existing graceful stop (`listening.set(false)`, letting
+     * the in-flight coroutine exit its own read loop and finish the decode) already covers the
+     * listen case; transmit has no equivalent cooperative flag — [playPcm] is a single blocking
+     * `delay()` for the tone's playback duration — so cancelling [transmitJob] is what actually
+     * interrupts it (cancellation propagates through that `delay()` call, running `playPcm`'s own
+     * `finally { audioTrack.stop(); audioTrack.release() }`).
+     */
+    fun stopForBackground() {
+        stopListening()
+        val job = transmitJob
+        if (job != null && job.isActive) {
+            job.cancel()
+            status = ModemStatus.Idle
+        }
     }
 
     /** Cancels any in-flight transmit/listen work. Call from `DisposableEffect.onDispose`. */
@@ -1675,8 +1745,13 @@ class AcousticModemController(
         )
         val recordBufferBytes = if (minBufBytes > 0) minBufBytes * 4 else NightjarAcoustics.FRAME_SAMPLES * 8
 
-        val audioRecord = openBestAudioRecord(recordBufferBytes)
-        val disabledEffects = disablePlatformAudioEffects(audioRecord.audioSessionId)
+        // mic-2 fix: MicCapture.openBestAudioRecord() returns null (never throws) when every
+        // AudioSource tier fails to initialize (mic held by a call or another app). That used to
+        // be an uncaught IllegalStateException thrown straight out of a private `error(...)` last
+        // resort; now it's thrown once, here, at a boundary startListening()'s own try/catch
+        // already has a handler for (ModemStatus.ListenFailed) instead of crashing the app.
+        val audioRecord = MicCapture.openBestAudioRecord(appContext, recordBufferBytes)
+            ?: throw IllegalStateException("AudioRecord failed to initialize — mic busy or unavailable")
 
         val maxSamples = (MAX_LISTEN_SECONDS * NightjarAcoustics.SAMPLE_RATE_HZ).toInt()
         val out = ShortArray(maxSamples)
@@ -1686,7 +1761,14 @@ class AcousticModemController(
         // readout, applied here so the input-level/countdown UI recomposes a few times a second
         // instead of on every ~21ms analysis frame (Task #27).
         val chunk = ShortArray(NightjarAcoustics.FRAME_SAMPLES * LEVEL_UPDATE_CHUNK_FRAMES)
+        // mic-8 fix: disablePlatformAudioEffects() now runs from inside this try — right after the
+        // AudioRecord it operates on is already in hand — instead of before it. A throwing OEM
+        // effect factory used to be able to skip straight past audioRecord.release() below and
+        // leak the record; disabledEffects simply stays empty (nothing to release) if the disable
+        // call itself throws.
+        var disabledEffects: List<AudioEffect> = emptyList()
         try {
+            disabledEffects = MicCapture.disablePlatformAudioEffects(audioRecord.audioSessionId)
             audioRecord.startRecording()
             while (listening.get() && written < maxSamples) {
                 val n = audioRecord.read(chunk, 0, chunk.size)
@@ -1697,7 +1779,12 @@ class AcousticModemController(
                 publishListeningReadout(chunk, n, written, maxSamples)
             }
         } finally {
-            audioRecord.stop()
+            // mic-1 precedent applied here too: only call stop() if the record actually reached
+            // RECORDSTATE_RECORDING — calling it otherwise (e.g. startRecording() itself threw)
+            // throws its own IllegalStateException and would mask whatever failure got us here.
+            if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord.stop()
+            }
             audioRecord.release()
             disabledEffects.forEach { it.release() }
         }
@@ -1718,114 +1805,9 @@ class AcousticModemController(
         status = ModemStatus.Listening(levelDb = dbfsLevel(chunk, n), remainingSeconds = remainingSeconds)
     }
 
-    /**
-     * Task #26: picks a capture source that avoids platform speech-tuned DSP (noise
-     * suppression / AGC / echo cancellation), which is well documented to distort or
-     * destroy pure-tone FSK/PSK signals like this modem's. Tiered fallback, each tier
-     * verified by actually constructing the [AudioRecord] and checking
-     * [AudioRecord.STATE_INITIALIZED] rather than trusting the source constant alone:
-     *
-     * 1. [MediaRecorder.AudioSource.UNPROCESSED] — raw samples, no DSP at all — only
-     *    attempted when [AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED] reports
-     *    device support.
-     * 2. [MediaRecorder.AudioSource.VOICE_RECOGNITION] — much more broadly supported,
-     *    also bypasses most speech-tuned processing (ggwave, the real prior art this
-     *    design follows, uses the same workaround).
-     * 3. [MediaRecorder.AudioSource.MIC] — last resort; logs a warning since this source
-     *    is the one most likely to run the phone's call/voice DSP over the signal.
-     */
-    private fun openBestAudioRecord(recordBufferBytes: Int): AudioRecord {
-        val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-        val unprocessedSupported = audioManager
-            ?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true"
-
-        if (unprocessedSupported) {
-            buildAudioRecord(MediaRecorder.AudioSource.UNPROCESSED, recordBufferBytes)?.let {
-                Log.i(TAG, "capture: using AudioSource.UNPROCESSED")
-                return it
-            }
-        }
-        buildAudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, recordBufferBytes)?.let {
-            Log.i(TAG, "capture: using AudioSource.VOICE_RECOGNITION")
-            return it
-        }
-        Log.w(
-            TAG,
-            "capture: falling back to AudioSource.MIC — UNPROCESSED/VOICE_RECOGNITION " +
-                "unavailable on this device; platform speech DSP (noise suppression / AGC / " +
-                "echo cancellation) may distort the FSK/PSK tones",
-        )
-        return buildAudioRecord(MediaRecorder.AudioSource.MIC, recordBufferBytes)
-            ?: error("AudioRecord failed to initialize on AudioSource.MIC")
-    }
-
-    /** Constructs an [AudioRecord] on [source]; returns null (never throws) if unsupported. */
-    private fun buildAudioRecord(source: Int, recordBufferBytes: Int): AudioRecord? {
-        return try {
-            val record = AudioRecord.Builder()
-                .setAudioSource(source)
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(NightjarAcoustics.SAMPLE_RATE_HZ)
-                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(recordBufferBytes)
-                .build()
-            if (record.state == AudioRecord.STATE_INITIALIZED) {
-                record
-            } else {
-                record.release()
-                null
-            }
-        } catch (unsupported: UnsupportedOperationException) {
-            null
-        } catch (invalid: IllegalArgumentException) {
-            null
-        }
-    }
-
-    /**
-     * Task #26 belt-and-suspenders: some OEMs apply NoiseSuppressor/AGC/AEC even on
-     * VOICE_RECOGNITION (or, rarely, UNPROCESSED), so the source choice above isn't
-     * sufficient on its own. Explicitly disables each effect if present on this capture
-     * session. Callers must `.release()` the returned list once capture stops.
-     */
-    private fun disablePlatformAudioEffects(sessionId: Int): List<AudioEffect> {
-        val disabled = mutableListOf<AudioEffect>()
-        disableEffectIfPresent("NoiseSuppressor", NoiseSuppressor.isAvailable(), disabled) {
-            NoiseSuppressor.create(sessionId)
-        }
-        disableEffectIfPresent("AutomaticGainControl", AutomaticGainControl.isAvailable(), disabled) {
-            AutomaticGainControl.create(sessionId)
-        }
-        disableEffectIfPresent("AcousticEchoCanceler", AcousticEchoCanceler.isAvailable(), disabled) {
-            AcousticEchoCanceler.create(sessionId)
-        }
-        return disabled
-    }
-
-    /** Logs availability/creation/disable outcome per effect type so field reports are diagnosable. */
-    private inline fun disableEffectIfPresent(
-        name: String,
-        availableOnDevice: Boolean,
-        disabled: MutableList<AudioEffect>,
-        create: () -> AudioEffect?,
-    ) {
-        if (!availableOnDevice) {
-            Log.i(TAG, "effects: $name not available on this device")
-            return
-        }
-        val effect = create()
-        if (effect == null) {
-            Log.i(TAG, "effects: $name available but create() returned null for this session")
-            return
-        }
-        effect.setEnabled(false)
-        disabled += effect
-        Log.i(TAG, "effects: $name found on this session, disabled")
-    }
+    // mic-1/mic-2/mic-3/mic-8: AudioRecord source-fallback + platform-DSP-effect suppression
+    // moved out to the shared dev.herakles.nightjar.MicCapture helper (used by DetectorController
+    // too) — see capturePcm() above and MicCapture.kt's own KDoc.
 }
 
 // --- Task #32: "import" file reading — plain (non-composable, non-member) functions, matching
@@ -1859,7 +1841,7 @@ private const val CODEC_TIMEOUT_US = 10_000L
  * read/parse failure: unreadable Uri, corrupt/unsupported container, no audio track, or a WAV
  * whose `fmt ` isn't PCM16 ([WavFile.decodePcm16]'s own failure contract).
  */
-private fun readAudioFile(context: Context, uri: Uri): ImportedAudio? =
+private suspend fun readAudioFile(context: Context, uri: Uri): ImportedAudio? =
     if (sniffIsWav(context, uri)) {
         val bytes = readBoundedBytes(context, uri, MAX_IMPORT_FILE_BYTES) ?: return null
         val parsed = WavFile.decodePcm16(bytes) ?: return null
@@ -1926,7 +1908,7 @@ private fun readBoundedBytes(context: Context, uri: Uri, maxBytes: Int): ByteArr
  *
  * Returns `null` on any failure to open/demux/decode the file, or if it has no audio track.
  */
-private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
+private suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
     val extractor = MediaExtractor()
     return try {
         extractor.setDataSource(context, uri, null)
@@ -1958,6 +1940,14 @@ private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudi
         null
     } catch (invalid: IllegalArgumentException) {
         null
+    } catch (cancelled: CancellationException) {
+        // mic-9: decodeSelectedTrack()'s drain loop now checks coroutineContext.ensureActive()
+        // per iteration, so backing out of the app mid-import throws this here. It must NOT be
+        // swallowed by the broad `catch (codecFailure: Exception)` below (CancellationException
+        // is a RuntimeException) — that would break structured cancellation and leave the
+        // coroutine thinking the import "completed" with a null result instead of actually
+        // stopping.
+        throw cancelled
     } catch (codecFailure: Exception) {
         // MediaCodec/OEM decoder implementations are documented to throw a wide variety of
         // unchecked exceptions (IllegalStateException, MediaCodec.CodecException, ...) on a
@@ -1976,8 +1966,13 @@ private fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudi
  * [IMPORT_DECODE_TIMEOUT_MS] wall-clock time so a stalled decoder can't hang forever. Output
  * bytes are the platform decoder's native PCM16 little-endian samples (Android's audio decoders
  * emit `ENCODING_PCM_16BIT` by default).
+ *
+ * mic-9: also checks [coroutineContext] for cancellation once per iteration — before this fix,
+ * backing out of the import screen mid-decode (which cancels [AcousticModemController]'s `scope`,
+ * e.g. via [AcousticModemController.dispose]) had no effect on this loop; it would keep polling
+ * the codec for up to [IMPORT_DECODE_TIMEOUT_MS] (30s) after the operator had already left.
  */
-private fun decodeSelectedTrack(
+private suspend fun decodeSelectedTrack(
     extractor: MediaExtractor,
     format: MediaFormat,
     mime: String,
@@ -1998,6 +1993,7 @@ private fun decodeSelectedTrack(
         val deadlineMs = System.currentTimeMillis() + IMPORT_DECODE_TIMEOUT_MS
 
         while (!sawOutputEos) {
+            coroutineContext.ensureActive()
             if (System.currentTimeMillis() > deadlineMs) return null
 
             if (!sawInputEos) {
