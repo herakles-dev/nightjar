@@ -73,6 +73,12 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
+    // v6 send plumbing (gate-33): androidx.core.content.FileProvider for FireflyShare.kt's
+    // private-cache share Uris. Was only a transitive dependency (pinned to 1.13.1 by other
+    // androidx libs above) before this task made it a direct one -- this project has no
+    // gradle/libs.versions.toml, so it's declared the same direct-string way every other
+    // dependency here is.
+    implementation("androidx.core:core-ktx:1.13.1")
 
     // Firefly Jar (gate-11) persistence layer — FireflyLog.kt
     implementation("androidx.room:room-runtime:2.7.2")
