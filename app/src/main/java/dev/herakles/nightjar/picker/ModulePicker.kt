@@ -3,10 +3,12 @@ package dev.herakles.nightjar.picker
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
@@ -69,15 +71,34 @@ enum class Module(
  * Home screen. Dense, scannable list — no cards, no icons, no dividers (matches the
  * whisper-voice-app Zeus-picker row precedent). Exactly 4 rows; nothing to sort by
  * frequency yet since the list is fixed at this scope.
+ *
+ * U-01 (spec.md gate-12): this is the entry point of the long-press reveal from the jar
+ * shelf's wordmark, and until now the only way back to the jar was the system/predictive
+ * back gesture — no plain, visible affordance, unlike every screen underneath it (each
+ * already has its own "back" link back to here). [onBack] adds that same link, styled
+ * exactly like the technical screens' own ("back" link -- e.g. `ImageStegoScreen.kt`'s
+ * `ImageStegoContent`: a 48dp-tall tap target, [MaterialTheme.typography.labelLarge] in
+ * [TextSecondary]), labeled "back to the jar" rather than the bare "back" those screens use,
+ * since this is the one link that actually crosses back over the disguise boundary rather
+ * than stepping up one level within it.
  */
 @Composable
-fun ModulePicker(onSelect: (Module) -> Unit) {
+fun ModulePicker(onSelect: (Module) -> Unit, onBack: () -> Unit) {
     Column(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .height(48.dp)
+                .clickable(onClick = onBack)
+                .padding(horizontal = 24.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(text = "back to the jar", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+        }
         Text(
             text = "nightjar",
             style = MaterialTheme.typography.displayLarge,
             color = TextPrimary,
-            modifier = Modifier.padding(start = 24.dp, top = 24.dp, end = 24.dp, bottom = 8.dp),
+            modifier = Modifier.padding(start = 24.dp, top = 8.dp, end = 24.dp, bottom = 8.dp),
         )
         Module.entries.forEach { module ->
             ModuleRow(module = module, onClick = { onSelect(module) })

@@ -245,6 +245,9 @@ fun NightjarApp() {
                         Module.AUDIO_STEGANOGRAPHY -> Screen.AudioSteganography
                     }
                 },
+                // U-01 (gate-12): the picker's own visible "back to the jar" link -- same
+                // destination the BackHandler above already sends Screen.Picker to.
+                onBack = { screen = Screen.JarShelf },
             )
             is Screen.AcousticModem -> AcousticModemScreen(
                 // Task #30: protocol/symbol-rate selector on the screen rebuilds the carrier
