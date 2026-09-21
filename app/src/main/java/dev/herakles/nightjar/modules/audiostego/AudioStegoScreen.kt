@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +63,10 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.ui.theme.AccentSignal
 import dev.herakles.nightjar.ui.theme.BgBase
 import dev.herakles.nightjar.ui.theme.BorderDefault
@@ -316,7 +321,7 @@ fun AudioStegoScreen(
  * once per completed action rather than only once per distinct value.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
+fun jarCatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onExit: () -> Unit) {
     val context = LocalContext.current
     val controller = remember {
         AudioStegoController(
@@ -333,6 +338,19 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     var cover by remember { mutableStateOf(AudioSampleCover.SPOKEN_WORD) }
     var payloadText by remember { mutableStateOf("") }
     var catchExpanded by remember { mutableStateOf(false) }
+
+    // W2-3 riddle trail (design/riddle-trail.md § Step 2, gate-36): while this jar's step is the
+    // active one, "look for fireflies" decodes the SPECTROGRAM_LSB practice carrier
+    // PracticeFireflies wrote, not whatever technique/cover the selector is currently showing.
+    // [pendingLookTechniqueOverride] carries the technique actually used for the decode -- and
+    // doubles as the "was this a practice catch" signal -- from dispatch time through to the
+    // ExtractedSuccess handler below, deliberately WITHOUT touching the `technique`/`cover`
+    // selector state vars themselves: changing either would retrigger the `LaunchedEffect
+    // (coverAudio, technique)` below and overwrite `controller.workingAudio` back to the selected
+    // sample cover before `extract()` ever runs. Reset on every dispatch (practice or not).
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.HUMMING
+    var pendingLookTechniqueOverride by remember { mutableStateOf<AudioStegoTechnique?>(null) }
 
     // S-02: the image jar flow's time-based debounce (ImageStegoScreen.kt's
     // `debounceCatchDispatch`), ported here — this flow had no equivalent, so a double-tap
@@ -384,12 +402,11 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     // PHASE_INVERSION) or 2 (`embed` for PHASE_INVERSION). Guarded anyway rather than assumed, so
     // a future technique with a different channel count degrades to a media-less insert instead
     // of guessing an encoder.
-    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord): Long {
         val pcm = controller.workingAudio
         val channelCount = controller.workingChannelCount
         if (pcm.isEmpty() || (channelCount != 1 && channelCount != 2)) {
-            repository.insert(record)
-            return
+            return repository.insert(record)
         }
         val wavBytes = withContext(Dispatchers.Default) {
             if (channelCount == 2) {
@@ -398,7 +415,7 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
                 WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
             }
         }
-        repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+        return repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
     }
 
     LaunchedEffect(fireflyStatus) {
@@ -418,16 +435,33 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
                     payloadPreview = payloadText.take(40),
                 ),
             )
-            is AudioStegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
-                FireflyRecord(
-                    moduleId = Module.AUDIO_STEGANOGRAPHY.name,
-                    direction = "RECEIVED",
-                    timestampMillis = System.currentTimeMillis(),
-                    payloadSizeBytes = fireflyStatus.text.encodeToByteArray().size,
-                    technique = technique.name,
-                    payloadPreview = fireflyStatus.text.take(40),
-                ),
-            )
+            is AudioStegoStatus.ExtractedSuccess -> {
+                // W2-3 (gate-36): controller.workingAudio/[workingChannelCount] are already the
+                // practice PCM by this point -- this jarCatchFlow's own onExtract dispatch below
+                // called controller.selectCover(practicePcm) then controller.extract(...)
+                // synchronously, and extract() captures `workingAudio` into a local before ever
+                // suspending (AudioStegoController.extract's own KDoc), so no later selector
+                // change can race it. [pendingLookTechniqueOverride] only needs to correct the
+                // *label* on the persisted record (the UI's own `technique` selector state was
+                // deliberately left untouched -- see this file's jarCatchFlow KDoc above) and to
+                // signal that this was a practice catch.
+                val practiceTechnique = pendingLookTechniqueOverride
+                val id = insertFireflyWithCarrier(
+                    FireflyRecord(
+                        moduleId = Module.AUDIO_STEGANOGRAPHY.name,
+                        direction = "RECEIVED",
+                        timestampMillis = System.currentTimeMillis(),
+                        payloadSizeBytes = fireflyStatus.text.encodeToByteArray().size,
+                        technique = (practiceTechnique ?: technique).name,
+                        payloadPreview = fireflyStatus.text.take(40),
+                    ),
+                )
+                if (practiceTechnique != null) {
+                    trailStore.markPractice(id)
+                    trailStore.advance(TrailStep.HUMMING)
+                }
+                pendingLookTechniqueOverride = null
+            }
             else -> Unit
         }
     }
@@ -447,10 +481,33 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
             debounceCatchDispatch { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) }
         },
         onExtract = {
-            debounceCatchDispatch { controller.extract(technique) }
+            debounceCatchDispatch {
+                if (trailActive) {
+                    val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.HUMMING)
+                    val practicePcm = if (practiceFile.exists()) {
+                        WavFile.decodePcm16(practiceFile.readBytes())
+                    } else {
+                        null
+                    }
+                    if (practicePcm != null) {
+                        pendingLookTechniqueOverride = AudioStegoTechnique.SPECTROGRAM_LSB
+                        controller.selectCover(practicePcm.samples)
+                        controller.extract(AudioStegoTechnique.SPECTROGRAM_LSB)
+                    } else {
+                        // Practice file not generated/readable yet -- degrade to the normal
+                        // decode rather than doing nothing; the trail step just doesn't complete.
+                        pendingLookTechniqueOverride = null
+                        controller.extract(technique)
+                    }
+                } else {
+                    pendingLookTechniqueOverride = null
+                    controller.extract(technique)
+                }
+            }
         },
         onPeekInside = { controller.analyze() },
         onExit = onExit,
+        lookForFirefliesHighlighted = trailActive,
     )
 }
 
@@ -493,6 +550,10 @@ private fun JarAudioStegoCatchFlowContent(
     onExtract: () -> Unit,
     onPeekInside: () -> Unit,
     onExit: () -> Unit,
+    // W2-3 (gate-36/gate-38): true while this jar's trail step is the active one -- glows the
+    // "look for fireflies" row. Default keeps every existing @Preview call site compiling
+    // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
+    lookForFirefliesHighlighted: Boolean = false,
 ) {
     val idleEquivalent = status is AudioStegoStatus.Idle ||
         status is AudioStegoStatus.Embedded ||
@@ -593,6 +654,7 @@ private fun JarAudioStegoCatchFlowContent(
                 fill = JarActionLookFill,
                 border = JarActionLookBorder,
                 onClick = onExtract,
+                highlighted = lookForFirefliesHighlighted,
             )
             JarFlowRow(
                 label = "peek inside",
@@ -630,6 +692,9 @@ private fun JarFlowRow(
     border: Color,
     onClick: () -> Unit,
     radius: Dp = 8.dp,
+    // W2-3: glows this row as the trail's current target (trail/TrailHighlight.kt) -- a no-op
+    // Modifier when false, so every existing call site keeps its default styling untouched.
+    highlighted: Boolean = false,
 ) {
     Box(
         modifier = Modifier
@@ -638,6 +703,7 @@ private fun JarFlowRow(
             .background(fill)
             .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .trailHighlight(active = highlighted, description = label)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {

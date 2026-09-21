@@ -17,11 +17,11 @@ import org.junit.Test
 class DebugProbeTest {
 
     @Test
-    fun `empty state serializes all seven top-level fields as null`() {
+    fun `empty state serializes all eight top-level fields as null`() {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
                 "\"stored_media\":null,\"last_send\":null,\"outgoing_file_count\":null," +
-                "\"incoming\":null}",
+                "\"incoming\":null,\"trail\":null}",
             toJson(DebugProbe.ProbeState()),
         )
     }
@@ -40,7 +40,7 @@ class DebugProbeTest {
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"ENCODE\"," +
                 "\"success\":true,\"timestamp_ms\":1700000000000}," +
                 "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             toJson(state),
         )
     }
@@ -59,7 +59,7 @@ class DebugProbeTest {
             "{\"last_encode_decode\":{\"module\":\"IMAGE_LSB_CODEC\",\"operation\":\"DECODE\"," +
                 "\"success\":false,\"timestamp_ms\":42}," +
                 "\"detector_confidence\":null,\"screen\":null,\"stored_media\":null," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             toJson(state),
         )
     }
@@ -77,7 +77,7 @@ class DebugProbeTest {
             "{\"last_encode_decode\":null," +
                 "\"detector_confidence\":{\"module\":\"ACOUSTIC_DETECTOR\",\"confidence\":0.73," +
                 "\"timestamp_ms\":999},\"screen\":null,\"stored_media\":null," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             toJson(state),
         )
     }
@@ -93,13 +93,13 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
                 "\"screen\":\"module_stub:IMAGE_STEGANOGRAPHY\",\"stored_media\":null," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             toJson(DebugProbe.ProbeState(screen = "module_stub:IMAGE_STEGANOGRAPHY")),
         )
     }
 
     @Test
-    fun `all seven fields populated at once round-trip independently`() {
+    fun `all eight fields populated at once round-trip independently`() {
         val state = DebugProbe.ProbeState(
             lastEncodeDecode = DebugProbe.EncodeDecodeResult(
                 ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, true, 111L,
@@ -126,6 +126,11 @@ class DebugProbeTest {
                 outcome = "caught",
                 timestampMs = 333L,
             ),
+            trail = DebugProbe.TrailProbeState(
+                currentStep = "humming",
+                completedSteps = listOf("art"),
+                skipped = false,
+            ),
         )
         assertEquals(
             "{\"last_encode_decode\":{\"module\":\"ACOUSTIC_MODEM\",\"operation\":\"DECODE\"," +
@@ -139,7 +144,9 @@ class DebugProbeTest {
                 "\"authority\":\"dev.herakles.nightjar.outgoing\",\"timestamp_ms\":333}," +
                 "\"outgoing_file_count\":2," +
                 "\"incoming\":{\"action\":\"SEND\",\"sniffed_type\":\"PNG\"," +
-                "\"technique\":\"EXACT_LSB\",\"outcome\":\"caught\",\"timestamp_ms\":333}}",
+                "\"technique\":\"EXACT_LSB\",\"outcome\":\"caught\",\"timestamp_ms\":333}," +
+                "\"trail\":{\"current_step\":\"humming\",\"completed_steps\":[\"art\"]," +
+                "\"skipped\":false}}",
             toJson(state),
         )
     }
@@ -157,7 +164,7 @@ class DebugProbeTest {
         assertEquals(
             "{\"last_encode_decode\":null,\"detector_confidence\":null," +
                 "\"screen\":\"$expectedEscaped\",\"stored_media\":null," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             json,
         )
     }
@@ -178,7 +185,7 @@ class DebugProbeTest {
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
                 "\"stored_media\":{\"record_count\":12,\"records_with_media_count\":9," +
                 "\"total_media_bytes\":480000,\"orphan_file_count\":0}," +
-                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"last_send\":null,\"outgoing_file_count\":null,\"incoming\":null,\"trail\":null}",
             toJson(state),
         )
     }
@@ -221,7 +228,8 @@ class DebugProbeTest {
                 "\"stored_media\":null," +
                 "\"last_send\":{\"technique\":\"AUDIO\",\"bytes\":88200," +
                 "\"authority\":\"dev.herakles.nightjar.outgoing\"," +
-                "\"timestamp_ms\":1700000000500},\"outgoing_file_count\":null,\"incoming\":null}",
+                "\"timestamp_ms\":1700000000500},\"outgoing_file_count\":null,\"incoming\":null," +
+                "\"trail\":null}",
             toJson(state),
         )
     }
@@ -255,7 +263,8 @@ class DebugProbeTest {
             "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
                 "\"stored_media\":null,\"last_send\":null,\"outgoing_file_count\":null," +
                 "\"incoming\":{\"action\":\"SEND\",\"sniffed_type\":\"WAV\"," +
-                "\"technique\":\"ACOUSTIC_MODEM\",\"outcome\":\"caught\",\"timestamp_ms\":555}}",
+                "\"technique\":\"ACOUSTIC_MODEM\",\"outcome\":\"caught\",\"timestamp_ms\":555}," +
+                "\"trail\":null}",
             toJson(state),
         )
     }
@@ -280,5 +289,64 @@ class DebugProbeTest {
                     "\"technique\":null,\"outcome\":\"squeezed\",\"timestamp_ms\":666}",
             ),
         )
+    }
+
+    // --- trail (v6 addition, gate-36 probe contract) ---
+
+    @Test
+    fun `trail serializes current step, completed steps, and skipped`() {
+        val state = DebugProbe.ProbeState(
+            trail = DebugProbe.TrailProbeState(
+                currentStep = "meadow",
+                completedSteps = listOf("art", "humming", "singing"),
+                skipped = false,
+            ),
+        )
+        assertEquals(
+            "{\"last_encode_decode\":null,\"detector_confidence\":null,\"screen\":null," +
+                "\"stored_media\":null,\"last_send\":null,\"outgoing_file_count\":null," +
+                "\"incoming\":null," +
+                "\"trail\":{\"current_step\":\"meadow\"," +
+                "\"completed_steps\":[\"art\",\"humming\",\"singing\"],\"skipped\":false}}",
+            toJson(state),
+        )
+    }
+
+    @Test
+    fun `trail with no completed steps yet serializes as an empty array, not null`() {
+        val json = toJson(
+            DebugProbe.ProbeState(
+                trail = DebugProbe.TrailProbeState(currentStep = "art", completedSteps = emptyList(), skipped = false),
+            ),
+        )
+        assertEquals(
+            true,
+            json.contains("\"trail\":{\"current_step\":\"art\",\"completed_steps\":[],\"skipped\":false}"),
+        )
+    }
+
+    @Test
+    fun `a skipped trail with no current step serializes current_step as null and skipped as true`() {
+        val json = toJson(
+            DebugProbe.ProbeState(
+                trail = DebugProbe.TrailProbeState(
+                    currentStep = null,
+                    completedSteps = listOf("art"),
+                    skipped = true,
+                ),
+            ),
+        )
+        assertEquals(
+            true,
+            json.contains(
+                "\"trail\":{\"current_step\":null,\"completed_steps\":[\"art\"],\"skipped\":true}",
+            ),
+        )
+    }
+
+    @Test
+    fun `no trail progress yet serializes trail as an explicit null, not an omitted key`() {
+        val json = toJson(DebugProbe.ProbeState(screen = "jar_shelf"))
+        assertEquals(true, json.contains("\"trail\":null"))
     }
 }
