@@ -1227,15 +1227,19 @@ internal fun audioStegoTagline(): String =
 
 /**
  * Static honesty line appended to every "check for hidden data" verdict on the technical screen
- * (design-v5.md §2.7's `AnalyzedBlock` copy, plus the Gate 8 owner note that any anti-phase
- * stereo — not only this app's own phase-inversion output — reads as flagged). `internal` so
- * [AudioStegoScreenTest] can assert it matches [AudioStegDetectorTest]'s tested evasion matrix
- * (SLSB re-level/trim, MFSK low-pass) rather than drifting out of sync with it.
+ * (design-v5.md §2.7's `AnalyzedBlock` copy, plus the Gate 8 owner note that anti-phase stereo
+ * with a surviving residual — not only this app's own phase-inversion output — reads as flagged;
+ * a plain polarity flip with nothing mixed in reads clear, per
+ * [AudioStegDetectorTest.cleanCoversAndStereoVariantsAreNotFlagged]'s "pure-inverted stereo"
+ * case). `internal` so [AudioStegoScreenTest] can assert it matches [AudioStegDetectorTest]'s
+ * tested evasion matrix (SLSB re-level/off-grid trim, MFSK low-pass) rather than drifting out of
+ * sync with it.
  */
 internal const val DETECTOR_CAVEAT =
-    "knows this app's three techniques only. re-levelled, trimmed or re-compressed clips slip " +
-        "past it. any anti-phase stereo reads as phase-inversion, not just this app's own. " +
-        "clear means none of those three, not nothing hidden."
+    "knows this app's three techniques only. re-levelled, off-grid-trimmed or re-compressed " +
+        "clips slip past it. anti-phase stereo with something left in the mix reads as " +
+        "phase-inversion too, not just this app's own — a plain flip alone reads clear. clear " +
+        "means none of those three, not nothing hidden."
 
 /** The humming jar's shorter honesty line for "peek inside" (design-v5.md §2.7). */
 internal const val JAR_PEEK_CAVEAT = "it only knows this jar's own three tricks."

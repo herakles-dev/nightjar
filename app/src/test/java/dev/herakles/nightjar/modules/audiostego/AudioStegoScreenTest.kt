@@ -1,9 +1,14 @@
 package dev.herakles.nightjar.modules.audiostego
 
+import dev.herakles.nightjar.AudioStegDetector
 import dev.herakles.nightjar.AudioStegoCarrier
 import dev.herakles.nightjar.AudioStegoTechnique
 import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DetectionResult
+import dev.herakles.nightjar.NightjarAcoustics
+import dev.herakles.nightjar.WavFile
+import kotlin.math.roundToInt
+import kotlin.random.Random
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -99,16 +104,94 @@ class AudioStegoScreenTest {
     }
 
     // ==========================================================================================
-    // Detector caveats: must match AudioStegDetectorTest's tested evasion matrix, and must say
-    // any anti-phase stereo (not just this app's own output) reads as phase-inversion.
+    // Detector caveats: must match AudioStegDetectorTest's tested evasion matrix, and must not
+    // overclaim past what AudioStegDetectorTest actually measures -- a prior copy pass claimed
+    // "any anti-phase stereo reads as phase-inversion" (false: a plain polarity flip with
+    // nothing mixed in reads clear per cleanCoversAndStereoVariantsAreNotFlagged's
+    // "pure-inverted stereo" case) and "trimmed clips slip past it" (over-general: only an
+    // off-grid trim evades per slsbOffGridTrimOf100SamplesEvadesDetection -- an on-grid,
+    // frame-aligned trim is still flagged per slsbOnGridTrimOf1024SamplesIsStillFlagged). The
+    // old `.contains("anti-phase")` / `.contains("re-levelled")` checks below would have passed
+    // on both false claims, which is exactly what let the drift ship -- these assertions check
+    // the caveat's actual claims, not just that a keyword appears somewhere in it.
     // ==========================================================================================
 
     @Test
     fun detectorCaveatStatesTargetedEvasionsAndAntiPhaseCaveat() {
         assertTrue("should say it only knows this app's three techniques", DETECTOR_CAVEAT.contains("three techniques"))
-        assertTrue("should match the tested re-level/trim/re-compress evasions", DETECTOR_CAVEAT.contains("re-levelled"))
-        assertTrue("should say any anti-phase stereo flags, not just this app's own", DETECTOR_CAVEAT.contains("anti-phase"))
+        assertTrue("should match the tested re-level evasion", DETECTOR_CAVEAT.contains("re-levelled"))
         assertTrue("clear must not be overstated as 'nothing hidden'", DETECTOR_CAVEAT.contains("not nothing hidden"))
+
+        // Trim evasion is real only off-grid (slsbOffGridTrimOf100SamplesEvadesDetection); an
+        // on-grid trim is still flagged (slsbOnGridTrimOf1024SamplesIsStillFlagged), so the
+        // caveat must name "off-grid" specifically and must not claim trims in general slip past
+        // it.
+        assertTrue("should name off-grid trims specifically, not trims in general", DETECTOR_CAVEAT.contains("off-grid"))
+        assertFalse(
+            "must not claim ALL trims slip past it -- only off-grid ones do",
+            DETECTOR_CAVEAT.contains(", trimmed") || DETECTOR_CAVEAT.contains(" trimmed "),
+        )
+
+        // Anti-phase: must not claim ANY/a plain anti-phase flip is flagged, and must say a
+        // plain flip reads clear (cleanCoversAndStereoVariantsAreNotFlagged's "pure-inverted
+        // stereo" case).
+        assertTrue("should mention anti-phase stereo", DETECTOR_CAVEAT.contains("anti-phase"))
+        assertFalse(
+            "must not overclaim that ANY/a plain anti-phase flip is flagged",
+            DETECTOR_CAVEAT.contains("any anti-phase"),
+        )
+        assertTrue(
+            "should explicitly say a plain flip alone reads clear",
+            DETECTOR_CAVEAT.contains("plain flip") && DETECTOR_CAVEAT.contains("reads clear"),
+        )
+    }
+
+    /**
+     * Ties [DETECTOR_CAVEAT]'s anti-phase claim directly to [AudioStegDetector]'s real behavior
+     * (rather than trusting the copy's wording), mirroring
+     * [dev.herakles.nightjar.AudioStegDetectorTest.cleanCoversAndStereoVariantsAreNotFlagged]'s
+     * "pure-inverted stereo" case and
+     * [dev.herakles.nightjar.AudioStegDetectorTest.antiPhaseStereoWithNoiseResidualIsFlagged].
+     * If the detector's behavior on these two cases ever changes, this test -- not just the
+     * string-content one above -- fails, so copy drift can't hide behind a passing keyword check.
+     */
+    @Test
+    fun detectorCaveatAntiPhaseClaimMatchesRealDetectorBehavior() {
+        val detector = AudioStegDetector()
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+
+        // Plain polarity flip: R = -L exactly, nothing mixed in.
+        val plainFlip = ShortArray(cover.size * 2)
+        for (i in cover.indices) {
+            plainFlip[2 * i] = cover[i]
+            plainFlip[2 * i + 1] =
+                (-cover[i].toInt()).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+        val plainResult = detector.analyze(
+            WavFile.ParsedWav(sampleRateHz = NightjarAcoustics.SAMPLE_RATE_HZ, numChannels = 2, samples = plainFlip),
+        )
+        assertFalse(
+            "a plain polarity flip with nothing mixed in should read clear, matching the caveat's " +
+                "'a plain flip alone reads clear' claim: $plainResult",
+            plainResult.flagged,
+        )
+
+        // Anti-phase with a surviving residual mixed into L+R.
+        val rng = Random(2024)
+        val residualFlip = ShortArray(cover.size * 2)
+        for (i in cover.indices) {
+            residualFlip[2 * i] = cover[i]
+            val r = (-0.97 * cover[i]) + rng.nextInt(-100, 101)
+            residualFlip[2 * i + 1] = r.roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+        val residualResult = detector.analyze(
+            WavFile.ParsedWav(sampleRateHz = NightjarAcoustics.SAMPLE_RATE_HZ, numChannels = 2, samples = residualFlip),
+        )
+        assertTrue(
+            "anti-phase stereo with something left in the mix should read flagged, matching the " +
+                "caveat's claim: $residualResult",
+            residualResult.flagged,
+        )
     }
 
     @Test

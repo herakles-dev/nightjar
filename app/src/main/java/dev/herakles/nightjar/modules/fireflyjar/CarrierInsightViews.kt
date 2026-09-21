@@ -52,9 +52,11 @@ import kotlin.math.roundToInt
  * (the honest-labels doctrine, design-v5.md C1: every claim a caption makes is backed by a
  * test). `CarrierInsightCaptionsTest.kt` is that test file.
  *
- * Neither composable is wired into `JarDetailScreen.kt` yet — that is a later task
- * (design-v5.md §11, V5-7). This file only defines the two views and their pure builders, and
- * documents (in each composable's own KDoc) exactly what a caller needs to pass in.
+ * Both composables are wired into `JarDetailScreen.kt` (V5-7, design-v5.md §11) and render live
+ * there, as two of the four `AudioCarrierView` picker options ([StegoDifferenceView] for
+ * `AudioCarrierView.DIFFERENCE`, [StereoPolarityView] for `AudioCarrierView.POLARITY`, alongside
+ * the existing spectrogram/waveform views). This file defines the two views and their pure
+ * builders, and documents (in each composable's own KDoc) exactly what a caller needs to pass in.
  */
 
 // ---------------------------------------------------------------------------------------------
