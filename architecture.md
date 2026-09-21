@@ -440,6 +440,17 @@ review of this task:
   unreachable-but-present. Verified via a dedicated test that deliberately corrupts symbol blocks
   and confirms both the correction path and the give-up-cleanly path.
 
+**Gate-35 correction (task W0-C, measured):** an earlier draft of this section's own reasoning —
+and `AudioStegoCarrier.kt`'s class KDoc, and the technical screen's technique label — described
+MFSK as "genuinely lossy-channel-robust." Measured against real codecs, that overclaims: MFSK
+round-trips through AAC-LC ≥ 128 kbps and MP3 128 kbps, but fails after Opus 16–64 kbps (voip and
+audio modes) and AAC 64–96 kbps. AAC at 64 kbps removes the near-ultrasonic tone band entirely;
+the other failures are quantization noise past Reed-Solomon's correction capacity, not a clean
+"recompressed = fails" rule. Real-world messaging voice notes are compressed audio in exactly the
+range this doesn't survive, which is why `AudioStegoScreen.kt`'s v6 "open a recording" action
+(gate-34) never attempts a decode on a non-WAV file at all rather than silently failing against a
+doomed codec.
+
 Gate-8 (fidelity — cover vs. stego indistinguishable by ear) and gate-9 (safety-scope +
 anti-AI-tell close-out) remain open; both need a human listening pass, not something an agent can
 self-certify.

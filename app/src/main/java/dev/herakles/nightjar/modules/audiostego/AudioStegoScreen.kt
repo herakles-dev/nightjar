@@ -1,5 +1,13 @@
 package dev.herakles.nightjar.modules.audiostego
 
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -46,6 +56,7 @@ import dev.herakles.nightjar.DetectionResult
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.WavFile
 import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
@@ -70,6 +81,11 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -136,6 +152,54 @@ sealed interface AudioStegoStatus {
 enum class PlaybackTarget { COVER, WORKING }
 
 /**
+ * Task #36 (gate-34). Whether [AudioStegoController.saveToDevice]/[shareFromDevice]'s async
+ * MediaStore write is currently in flight, and which one — rendered as a bare status word under
+ * the action rows, the same "saving"/"sharing" busy-word convention
+ * [dev.herakles.nightjar.modules.acoustic.AcousticModemScreen]'s own save/share actions
+ * established (see that file's `fileActionBusyLabel` KDoc).
+ */
+enum class FileActionKind { SAVING, SHARING }
+
+/**
+ * Outcome of the most recently completed [AudioStegoController.saveToDevice]/[shareFromDevice]
+ * write — cleared back to `null` implicitly by a fresh [FileActionKind] busy label taking over
+ * the same display slot while the next write runs (mirrors the acoustic modem screen's
+ * `fileActionMessage` shape, split into a sealed result here instead of a raw string since this
+ * screen's new copy has to live in `strings_workshop_audio.xml`, not an inline literal).
+ */
+sealed interface FileActionResult {
+    data object Saved : FileActionResult
+    data object WriteFailed : FileActionResult
+}
+
+/**
+ * Task #36 (gate-34). Outcome of [AudioStegoController.openRecording] — "open a recording" tries
+ * every [AudioStegoTechnique] against a picked WAV and reports which one (if any) matched, or
+ * that the picked file wasn't a WAV at all ([Compressed] — an m4a/ogg/opus/mp3/amr voice note
+ * arrived compressed and this screen never attempts to decode one, per gate-35's measured MFSK
+ * codec survival). Deliberately not folded into [AudioStegoStatus]: unlike `embed`/`extract`,
+ * this action tries three techniques and has its own honest "couldn't read this as audio at all"
+ * outcome that doesn't correspond to any existing [AudioStegoStatus] case, and keeping it out of
+ * that sealed interface means [dev.herakles.nightjar.modules.fireflyjar.JarDetailScreen]'s jar
+ * flow (which shares [AudioStegoStatus] but has no "open a recording" verb) never has to branch
+ * on states it can't produce.
+ */
+sealed interface OpenRecordingResult {
+    /** [technique] decoded [text] successfully out of the picked WAV. */
+    data class Matched(val technique: AudioStegoTechnique, val text: String) : OpenRecordingResult
+
+    /** The file was a real WAV, but none of the three techniques' headers matched it. */
+    data object NoMatch : OpenRecordingResult
+
+    /** Not a WAV — a compressed container (m4a/ogg/opus/mp3/amr, ...), never attempted. */
+    data object Compressed : OpenRecordingResult
+
+    /** Couldn't even read/parse the picked file as audio (I/O failure, or a WAV whose `fmt ` this
+     *  app's [WavFile.decodePcm16] can't parse). */
+    data object ReadFailed : OpenRecordingResult
+}
+
+/**
  * Stateful root: owns the [AudioStegoController], the technique/cover selection, and the payload
  * text field. [AudioStegoContent] below is the pure/previewable UI (no side effects, no
  * `Context`, no audio synthesis/playback).
@@ -146,7 +210,10 @@ fun AudioStegoScreen(
     detector: CovertDetector<WavFile.ParsedWav>,
     onBack: () -> Unit,
 ) {
-    val controller = remember(carrierFactory, detector) { AudioStegoController(carrierFactory, detector) }
+    val context = LocalContext.current
+    val controller = remember(carrierFactory, detector) {
+        AudioStegoController(carrierFactory, detector, context.applicationContext)
+    }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
     }
@@ -176,6 +243,17 @@ fun AudioStegoScreen(
         controller.selectCover(coverAudio)
     }
 
+    // Task #36 (gate-34): "open a recording" — Storage Access Framework pick, any audio/* mime,
+    // matching `AcousticModemScreen.kt`'s own import launcher exactly. No runtime permission
+    // needed; SAF grants read access to whatever the operator selects.
+    val openLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            controller.openRecording(uri)
+        }
+    }
+
     AudioStegoContent(
         status = controller.status,
         technique = technique,
@@ -192,6 +270,14 @@ fun AudioStegoScreen(
         onEmbed = { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) },
         onExtract = { controller.extract(technique) },
         onCheck = { controller.analyze() },
+        canSaveOrShare = controller.hasEmbeddedContent,
+        onSave = { controller.saveToDevice() },
+        onShare = { controller.shareFromDevice() },
+        fileActionBusyLabel = controller.fileActionBusyLabel,
+        fileActionResult = controller.fileActionResult,
+        onOpenRecording = { openLauncher.launch(arrayOf("audio/*")) },
+        openBusy = controller.openBusy,
+        openResult = controller.openResult,
         onBack = onBack,
     )
 }
@@ -231,10 +317,12 @@ fun AudioStegoScreen(
  */
 @Composable
 fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
+    val context = LocalContext.current
     val controller = remember {
         AudioStegoController(
             carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) },
             detector = AudioStegDetector(),
+            appContext = context.applicationContext,
         )
     }
     DisposableEffect(controller) {
@@ -687,6 +775,14 @@ fun AudioStegoContent(
     onEmbed: () -> Unit,
     onExtract: () -> Unit,
     onCheck: () -> Unit,
+    canSaveOrShare: Boolean,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    fileActionBusyLabel: FileActionKind?,
+    fileActionResult: FileActionResult?,
+    onOpenRecording: () -> Unit,
+    openBusy: Boolean,
+    openResult: OpenRecordingResult?,
     onBack: () -> Unit,
 ) {
     val idleEquivalent = status is AudioStegoStatus.Idle ||
@@ -852,17 +948,90 @@ fun AudioStegoContent(
                 )
             }
 
-            Column {
+            // Task #36 (gate-34): 3 clusters via spacing alone (12dp between, 0dp within), same
+            // grouping discipline `AcousticModemScreen.kt`'s own action rows use — embed alone;
+            // save+share (both act on the current stego working clip); open+extract+check (all
+            // three read a carrier rather than write one, "open a recording" being an alternative
+            // input source to the working clip "extract"/"check" already operate on).
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column {
+                    Text(
+                        text = "embed hides text in the clip, extract reads it back, " +
+                            "check looks for hidden data without reading it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
+                }
+                Column {
+                    // gate-34: "save"/"share" write the current working clip (after a successful
+                    // embed) to Music/Nightjar via MediaStore, matching
+                    // AcousticModemScreen.kt's own save/share behaviour and styling. Gated on
+                    // canSaveOrShare (idle-equivalent AND an embed has actually produced a stego
+                    // clip this session) rather than idleEquivalent alone — otherwise these rows
+                    // would happily save the pristine, nothing-hidden cover and call it a "stego
+                    // WAV," which isn't true until embed() has run.
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_save),
+                        enabled = canSaveOrShare,
+                        onClick = onSave,
+                    )
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_share),
+                        enabled = canSaveOrShare,
+                        onClick = onShare,
+                    )
+                }
+                Column {
+                    // gate-34: "open a recording" picks an existing WAV via the Storage Access
+                    // Framework and tries all three techniques against it, naming which matched —
+                    // an alternative to "extract"'s single-selected-technique read of the working
+                    // clip. Gated on idleEquivalent alone, same as "extract"/"check" (no payload
+                    // field to also validate).
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_open),
+                        enabled = idleEquivalent,
+                        onClick = onOpenRecording,
+                    )
+                    ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
+                    ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
+                }
+            }
+
+            // gate-34: last save/share outcome ("saved to Music/Nightjar", "save failed", ...),
+            // null until the first save/share action runs. While a write is actually in flight,
+            // [fileActionBusyLabel] ("saving"/"sharing") takes this same spot instead — same
+            // labelSmall/TextSecondary vocabulary AcousticModemScreen.kt's own fileActionMessage/
+            // fileActionBusyLabel pair uses.
+            if (fileActionBusyLabel != null) {
                 Text(
-                    text = "embed hides text in the clip, extract reads it back, " +
-                        "check looks for hidden data without reading it",
+                    text = when (fileActionBusyLabel) {
+                        FileActionKind.SAVING -> stringResource(R.string.workshop_audio_busy_saving)
+                        FileActionKind.SHARING -> stringResource(R.string.workshop_audio_busy_sharing)
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
-                    modifier = Modifier.padding(bottom = 8.dp),
                 )
-                ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
-                ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
-                ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
+            } else if (fileActionResult != null) {
+                Text(
+                    text = when (fileActionResult) {
+                        FileActionResult.Saved -> stringResource(R.string.workshop_audio_saved)
+                        FileActionResult.WriteFailed -> stringResource(R.string.workshop_audio_save_failed)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+
+            // gate-34: "open a recording"'s outcome — bodyLarge/TextPrimary-or-TextSecondary,
+            // matching how a decoded payload is weighted everywhere else on this screen
+            // (ExtractedSuccess/ExtractedFailure in StatusBlock below), since this is structurally
+            // an "extract, but against a picked file instead of the working clip" result.
+            if (openBusy) {
+                StatusWord(stringResource(R.string.workshop_audio_busy_opening))
+            } else if (openResult != null) {
+                OpenRecordingBlock(result = openResult)
             }
 
             StatusBlock(status = status)
@@ -1100,11 +1269,20 @@ private fun PlaybackVerb(label: String, enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Display copy for [AudioStegoTechnique]. Kept local to this screen — not codec state. */
+/**
+ * Display copy for [AudioStegoTechnique]. Kept local to this screen — not codec state.
+ *
+ * gate-35 fix: MFSK previously read "mfsk (robust)" here. Measured against real codecs (task
+ * W0-C), MFSK round-trips AAC-LC >= 128 kbps and MP3 128 kbps but fails after Opus 16-64 kbps and
+ * AAC 64-96 kbps — narrower than "robust" implies, and not something a five-word row label can
+ * state honestly in-line. The qualifier is dropped rather than replaced with a shorter, still-
+ * misleading one; [techniqueExplainer]'s own "?" popout is where the real, measured tradeoff
+ * lives, matching [AudioStegDetector]'s own bare `"mfsk"` label (no qualifier there either).
+ */
 private fun techniqueLabel(technique: AudioStegoTechnique): String = when (technique) {
     AudioStegoTechnique.PHASE_INVERSION -> "phase inversion"
     AudioStegoTechnique.SPECTROGRAM_LSB -> "spectrogram lsb"
-    AudioStegoTechnique.MFSK -> "mfsk (robust)"
+    AudioStegoTechnique.MFSK -> "mfsk"
 }
 
 @Composable
@@ -1155,6 +1333,44 @@ private fun StatusWord(word: String) {
         style = MaterialTheme.typography.labelLarge,
         color = TextSecondary,
     )
+}
+
+/**
+ * Task #36 (gate-34). "open a recording"'s result — bodyLarge, TextPrimary for a genuine match
+ * (mirrors [AudioStegoStatus.ExtractedSuccess] in [StatusBlock] above) or TextSecondary for
+ * every honest non-match outcome (mirrors [AudioStegoStatus.ExtractedFailure]'s message line).
+ * [OpenRecordingResult.Compressed]'s copy is gate-35's honesty correction reaching the "open a
+ * recording" surface: this screen never attempts a compressed-container decode, so it says so
+ * plainly instead of silently failing or guessing.
+ */
+@Composable
+private fun OpenRecordingBlock(result: OpenRecordingResult) {
+    when (result) {
+        is OpenRecordingResult.Matched -> Text(
+            text = stringResource(
+                R.string.workshop_audio_open_matched,
+                techniqueLabel(result.technique),
+                result.text,
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextPrimary,
+        )
+        is OpenRecordingResult.NoMatch -> Text(
+            text = stringResource(R.string.workshop_audio_open_no_match),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        is OpenRecordingResult.Compressed -> Text(
+            text = stringResource(R.string.workshop_audio_open_compressed),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        is OpenRecordingResult.ReadFailed -> Text(
+            text = stringResource(R.string.workshop_audio_open_read_failed),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+    }
 }
 
 /**
@@ -1256,10 +1472,18 @@ internal const val JAR_PEEK_CAVEAT = "it only knows this jar's own three tricks.
  * `Dispatchers.IO`), while [playbackScope] runs on [Dispatchers.IO] (genuinely I/O-adjacent
  * `AudioTrack` construction/`write()`/`play()` inside [fireflyPlayer], mirroring
  * `AcousticModemController.playPcm`).
+ *
+ * Task #36 (gate-34) adds a third scope, [fileScope], also [Dispatchers.IO], for
+ * [saveToDevice]/[shareFromDevice]/[openRecording]'s `MediaStore`/`ContentResolver` I/O — kept
+ * separate from [playbackScope] so a save/share/open never shares a lifecycle with in-flight
+ * playback, and separate from [codecScope] because file I/O, unlike embed/extract/analyze, isn't
+ * CPU-bound. [openRecording] hops onto [codecScope]'s dispatcher via `withContext` for its own
+ * FFT/Reed-Solomon-heavy technique trials, same reasoning as the split above.
  */
 class AudioStegoController(
     private val carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
     private val detector: CovertDetector<WavFile.ParsedWav>,
+    private val appContext: Context,
 ) {
     var status: AudioStegoStatus by mutableStateOf(AudioStegoStatus.Idle)
         private set
@@ -1286,7 +1510,37 @@ class AudioStegoController(
 
     private val codecScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fileScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var playbackJob: Job? = null
+
+    /**
+     * Task #36 (gate-34). True once a successful [embed] has made [workingAudio] a genuine stego
+     * clip, since the last [selectCover] reset — [saveToDevice]/[shareFromDevice] gate on this
+     * (in addition to [idleEquivalent]) so they only ever write a real "current stego WAV," never
+     * the pristine, nothing-hidden cover mislabeled as one. Stays `true` across a subsequent
+     * `extract`/`analyze` (neither touches [workingAudio]), and resets to `false` the moment
+     * either selector changes and [selectCover] fires again.
+     */
+    var hasEmbeddedContent: Boolean by mutableStateOf(false)
+        private set
+
+    /** See [FileActionKind]'s KDoc. `null` when no save/share write is in flight. */
+    var fileActionBusyLabel: FileActionKind? by mutableStateOf(null)
+        private set
+
+    /** Outcome of the most recently completed [saveToDevice]/[shareFromDevice] write. `null`
+     *  until the first one runs. */
+    var fileActionResult: FileActionResult? by mutableStateOf(null)
+        private set
+
+    /** True while [openRecording]'s read-and-try-three-techniques work is in flight. */
+    var openBusy: Boolean by mutableStateOf(false)
+        private set
+
+    /** Outcome of the most recently completed [openRecording] call. `null` until the first one
+     *  runs. */
+    var openResult: OpenRecordingResult? by mutableStateOf(null)
+        private set
 
     /** Lifted playback transport (Stage C) -- owns the `AudioTrack` construction/stop machinery
      *  this controller used to keep as its own `activeAudioTrack`/`stopActiveTrack`/
@@ -1309,6 +1563,7 @@ class AudioStegoController(
     fun selectCover(cover: PcmAudio) {
         workingAudio = cover
         workingChannelCount = 1
+        hasEmbeddedContent = false
         status = AudioStegoStatus.Idle
     }
 
@@ -1346,6 +1601,7 @@ class AudioStegoController(
             DebugProbe.reportEncodeDecodeResult(ModuleId.AUDIO_STEGO_CODEC, DebugProbe.Operation.ENCODE, success = true)
             workingAudio = stego
             workingChannelCount = if (technique == AudioStegoTechnique.PHASE_INVERSION) 2 else 1
+            hasEmbeddedContent = true
             status = AudioStegoStatus.Embedded(payload.size)
         }
     }
@@ -1435,13 +1691,253 @@ class AudioStegoController(
         }
     }
 
-    /** Cancels any in-flight embed/extract work and stops/releases playback. Call from
-     *  `DisposableEffect.onDispose`. */
+    /**
+     * Task #36 (gate-34). Writes the current [workingAudio] (respecting [workingChannelCount]) to
+     * `MediaStore.Audio` under `Music/Nightjar/` with a neutral `AUD_yyyyMMdd_HHmmss.wav`
+     * basename (spec.md INV-5: "the technical screens' save/share may write to ...
+     * `Music/Nightjar`"). No-op while busy or before a real stego clip exists
+     * ([hasEmbeddedContent]). [fileActionBusyLabel] carries [FileActionKind.SAVING] for the
+     * duration of the write, matching `AcousticModemScreen.kt`'s own save/share status-word
+     * treatment.
+     */
+    fun saveToDevice() {
+        if (!idleEquivalent || !hasEmbeddedContent) return
+        val pcm = workingAudio
+        val channelCount = workingChannelCount
+        fileScope.launch {
+            fileActionBusyLabel = FileActionKind.SAVING
+            val uri = writeWorkingAudioToMediaStore(pcm, channelCount)
+            fileActionBusyLabel = null
+            if (uri != null) {
+                fileActionResult = FileActionResult.Saved
+            }
+        }
+    }
+
+    /**
+     * Task #36 (gate-34). Same write as [saveToDevice], then opens Android's share sheet
+     * (`Intent.ACTION_SEND`) on the resulting MediaStore `content://` Uri — matches
+     * `AcousticModemScreen.kt`'s `shareFromDevice` exactly, including leaving
+     * [fileActionResult] untouched on a successful share (the share sheet itself is its own
+     * confirmation; only a write failure sets [FileActionResult.WriteFailed]).
+     */
+    fun shareFromDevice() {
+        if (!idleEquivalent || !hasEmbeddedContent) return
+        val pcm = workingAudio
+        val channelCount = workingChannelCount
+        fileScope.launch {
+            fileActionBusyLabel = FileActionKind.SHARING
+            val uri = writeWorkingAudioToMediaStore(pcm, channelCount)
+            fileActionBusyLabel = null
+            if (uri == null) return@launch
+            withContext(Dispatchers.Main) {
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "audio/wav"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val chooser = Intent.createChooser(
+                    sendIntent,
+                    appContext.getString(R.string.workshop_audio_share_chooser_title),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // appContext is not an Activity
+                appContext.startActivity(chooser)
+            }
+        }
+    }
+
+    /**
+     * Shared wrap-and-write path for [saveToDevice]/[shareFromDevice]: wraps [pcm] (at
+     * [channelCount]) in a standard WAV container via [WavFile] and writes it to a new
+     * `MediaStore.Audio` row. Sets [fileActionResult] to [FileActionResult.WriteFailed] and
+     * returns `null` on any failure — mirrors `AcousticModemScreen.kt`'s
+     * `encodeAndWriteWav`/`writeWavToMediaStore` split, minus the encode step (this screen's
+     * [workingAudio] is already the encoded stego clip, not raw payload text to re-encode).
+     */
+    private suspend fun writeWorkingAudioToMediaStore(pcm: PcmAudio, channelCount: Int): Uri? =
+        withContext(Dispatchers.IO) {
+            val wavBytes = if (channelCount == 2) {
+                WavFile.encodePcm16Stereo(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            } else {
+                WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            }
+            val uri = writeWavToMediaStore(appContext, wavBytes)
+            if (uri == null) {
+                fileActionResult = FileActionResult.WriteFailed
+            }
+            uri
+        }
+
+    /**
+     * Task #36 (gate-34). Reads [uri] (picked via `ActivityResultContracts.OpenDocument`, any
+     * `audio/`-prefixed mime type) and, if it's a WAV, tries every [AudioStegoTechnique] against
+     * it via [tryAllTechniques] — an alternative input source to [extract]'s single-selected-
+     * technique read of [workingAudio], and deliberately independent of it: this never touches
+     * [status]/[workingAudio]/[hasEmbeddedContent], so opening a recording can never disturb an
+     * embed/extract/check flow already in progress on this screen. No-op while busy.
+     *
+     * gate-35's measured MFSK codec-survival result is why this never attempts a compressed-
+     * container decode the way `AcousticModemScreen.kt`'s own import does: unlike the modem's
+     * single always-real-tones protocol, MFSK's tone band only survives a narrow slice of real
+     * messaging codecs (AAC-LC >= 128 kbps, MP3 128 kbps — see [AudioStegoCarrier]'s class KDoc),
+     * and a voice note is compressed audio regardless of which of the three techniques (if any)
+     * it might otherwise have carried. Rather than run a `MediaCodec` decode that would usually
+     * just hand a doomed clip to [tryAllTechniques], the file's own magic bytes decide up front:
+     * WAV gets a real three-technique attempt, anything else gets an honest
+     * [OpenRecordingResult.Compressed] and no decode attempt at all.
+     */
+    fun openRecording(uri: Uri) {
+        if (!idleEquivalent) return
+        openBusy = true
+        openResult = null
+        fileScope.launch {
+            val bytes = readBoundedAudioBytes(appContext, uri)
+            if (bytes == null) {
+                openBusy = false
+                openResult = OpenRecordingResult.ReadFailed
+                return@launch
+            }
+            if (!isWavMagic(bytes)) {
+                openBusy = false
+                openResult = OpenRecordingResult.Compressed
+                return@launch
+            }
+            val parsed = WavFile.decodePcm16(bytes)
+            if (parsed == null) {
+                openBusy = false
+                openResult = OpenRecordingResult.ReadFailed
+                return@launch
+            }
+            val result = withContext(Dispatchers.Default) {
+                tryAllTechniques(carrierFactory, parsed.samples)
+            }
+            openBusy = false
+            openResult = result
+        }
+    }
+
+    /** Cancels any in-flight embed/extract/save/share/open work and stops/releases playback.
+     *  Call from `DisposableEffect.onDispose`. */
     fun dispose() {
         codecScope.cancel()
         playbackJob?.cancel()
         playbackScope.cancel()
+        fileScope.cancel()
         fireflyPlayer.release()
+    }
+}
+
+// --- Task #36 (gate-34): "open a recording" / save-to-device helpers — plain (non-composable,
+// non-member) functions, matching how `AcousticModemScreen.kt` keeps its own import/save file
+// I/O outside its controller class. ---
+
+/**
+ * Tries [AudioStegoTechnique.entries] against [samples], in enum declaration order (phase-
+ * inversion, spectrogram-LSB, MFSK), stopping at the first technique whose [CovertCarrier.decode]
+ * succeeds — gate-34's "trying all three techniques and naming which matched." Pure and
+ * synchronous: no Android dependency, no coroutine of its own, so [AudioStegoController.openRecording]
+ * is free to run it on whichever dispatcher it likes, and it's directly unit-testable
+ * (`AudioStegoScreenTest`) without a Compose/Robolectric harness. A wrong-technique attempt never
+ * throws — every [AudioStegoCarrier] decode path fails cleanly (header magic/CRC mismatch) on
+ * structurally mismatched input, the same "receiving never guesses" discipline INV-12 already
+ * requires everywhere else in this app — so trying all three against arbitrary picked bytes is
+ * safe even when [samples]' real channel layout only matches one of them.
+ */
+internal fun tryAllTechniques(
+    carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
+    samples: PcmAudio,
+): OpenRecordingResult {
+    for (technique in AudioStegoTechnique.entries) {
+        val trialCarrier = carrierFactory(samples, technique)
+        val decoded = trialCarrier.decode(samples)
+        if (decoded is DecodeResult.Success) {
+            return OpenRecordingResult.Matched(technique, decoded.payload.decodeToString())
+        }
+    }
+    return OpenRecordingResult.NoMatch
+}
+
+/**
+ * True if [bytes] begins with a RIFF/WAVE magic — the same container-vs-compressed sniff
+ * `AcousticModemScreen.kt`'s `sniffIsWav` performs (there, streamed off the first 12 bytes before
+ * deciding whether to read the rest; here, checked against bytes already fully read, since this
+ * screen never attempts a compressed-container decode the way the modem's import does — see
+ * [AudioStegoController.openRecording]'s KDoc). Pure byte comparison, unit-tested directly.
+ */
+internal fun isWavMagic(bytes: ByteArray): Boolean =
+    bytes.size >= 12 &&
+        String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+        String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE"
+
+/**
+ * Size cap on a picked recording read fully into memory — same bound and reasoning as
+ * `AcousticModemScreen.kt`'s own `MAX_IMPORT_FILE_BYTES`: generous headroom for a real device
+ * recording while still bounding worst-case memory use for an accidentally-huge pick.
+ */
+private const val MAX_OPEN_RECORDING_BYTES = 64 * 1024 * 1024
+
+/**
+ * Reads all of [uri]'s bytes, bounded to [MAX_OPEN_RECORDING_BYTES]. Returns `null` on any I/O
+ * failure or if the file exceeds the bound — mirrors `AcousticModemScreen.kt`'s
+ * `readBoundedBytes`.
+ */
+private fun readBoundedAudioBytes(context: Context, uri: Uri): ByteArray? = try {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        val out = ByteArrayOutputStream()
+        val chunk = ByteArray(64 * 1024)
+        var total = 0
+        while (true) {
+            val n = stream.read(chunk)
+            if (n < 0) break
+            total += n
+            if (total > MAX_OPEN_RECORDING_BYTES) return null
+            out.write(chunk, 0, n)
+        }
+        out.toByteArray()
+    }
+} catch (ioFailure: IOException) {
+    null
+} catch (denied: SecurityException) {
+    null
+}
+
+/**
+ * Inserts a new row into `MediaStore.Audio` (`Music/Nightjar/AUD_<timestamp>.wav`) and writes
+ * [wavBytes] into it. Scoped storage (API 29+; this app's minSdk is 31) means no
+ * `WRITE_EXTERNAL_STORAGE` permission is needed. Returns the new row's Uri, or `null` on any
+ * insert/write failure — cleans up a successfully-inserted row if the write itself then fails, so
+ * a failed save never leaves a zero-byte/partial file behind. Mirrors
+ * `AcousticModemScreen.kt`'s own `writeWavToMediaStore` exactly, except for the basename: the
+ * task's own instruction calls for a neutral `AUD_yyyyMMdd_HHmmss.wav` here rather than that
+ * function's `nightjar_<millis>.wav` (the file still lands inside the `Music/Nightjar` folder
+ * INV-5 already names — this is about the basename alone, not hiding which app made it).
+ */
+private fun writeWavToMediaStore(appContext: Context, wavBytes: ByteArray): Uri? {
+    val resolver = appContext.contentResolver
+    // A fresh SimpleDateFormat per call, not a shared instance -- SimpleDateFormat is not
+    // thread-safe, and this runs on a shared IO dispatcher where two saves/shares could otherwise
+    // land on different threads at once (see AudioStegoController's KDoc: nothing here gates a
+    // second save/share tap against a first one still in flight, same permissiveness
+    // AcousticModemScreen.kt's own save/share already has).
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    val displayName = "AUD_$timestamp.wav"
+    val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+        put(MediaStore.MediaColumns.MIME_TYPE, "audio/wav")
+        put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/Nightjar")
+    }
+    val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val uri = resolver.insert(collection, values) ?: return null
+    return try {
+        val stream = resolver.openOutputStream(uri)
+        if (stream == null) {
+            resolver.delete(uri, null, null)
+            return null
+        }
+        stream.use { it.write(wavBytes) }
+        uri
+    } catch (writeFailed: IOException) {
+        resolver.delete(uri, null, null)
+        null
     }
 }
 
@@ -1467,6 +1963,14 @@ private fun PreviewIdle() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }
@@ -1492,6 +1996,14 @@ private fun PreviewEmbedded() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }
@@ -1517,6 +2029,14 @@ private fun PreviewExtractedSuccess() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }
@@ -1545,6 +2065,14 @@ private fun PreviewExtractedFailure() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }
@@ -1578,6 +2106,14 @@ private fun PreviewAnalyzedFlagged() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }
@@ -1611,6 +2147,14 @@ private fun PreviewAnalyzedClear() {
             onEmbed = {},
             onExtract = {},
             onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
             onBack = {},
         )
     }

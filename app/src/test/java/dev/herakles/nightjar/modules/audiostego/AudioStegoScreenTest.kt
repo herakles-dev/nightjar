@@ -3,12 +3,15 @@ package dev.herakles.nightjar.modules.audiostego
 import dev.herakles.nightjar.AudioStegDetector
 import dev.herakles.nightjar.AudioStegoCarrier
 import dev.herakles.nightjar.AudioStegoTechnique
+import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DetectionResult
 import dev.herakles.nightjar.NightjarAcoustics
+import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.WavFile
 import kotlin.math.roundToInt
 import kotlin.random.Random
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -229,5 +232,91 @@ class AudioStegoScreenTest {
                 AudioStegoStatus.ExtractedFailure(reason = DecodeFailure.NO_PAYLOAD_FOUND, detail = null),
             ),
         )
+    }
+
+    // ==========================================================================================
+    // gate-34: "open a recording" -- tryAllTechniques (technique-trial ordering/result mapping)
+    // and isWavMagic (compressed-container detection by magic bytes), the two pieces of pure
+    // logic W1-4 extracted out of AudioStegoController.openRecording so they're unit-testable
+    // without a Compose/Robolectric harness.
+    // ==========================================================================================
+
+    private val realCarrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio> =
+        { cover, technique -> AudioStegoCarrier(cover, technique) }
+
+    @Test
+    fun tryAllTechniquesMatchesPhaseInversionAndRecoversThePayload() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+        val stego = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_INVERSION)
+            .encode("ravens".encodeToByteArray())
+
+        val result = tryAllTechniques(realCarrierFactory, stego)
+
+        assertTrue("expected a match, got $result", result is OpenRecordingResult.Matched)
+        val matched = result as OpenRecordingResult.Matched
+        assertEquals(AudioStegoTechnique.PHASE_INVERSION, matched.technique)
+        assertEquals("ravens", matched.text)
+    }
+
+    @Test
+    fun tryAllTechniquesMatchesSpectrogramLsbAndRecoversThePayload() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+        val stego = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB)
+            .encode("the ravens have landed".encodeToByteArray())
+
+        val result = tryAllTechniques(realCarrierFactory, stego)
+
+        assertTrue("expected a match, got $result", result is OpenRecordingResult.Matched)
+        val matched = result as OpenRecordingResult.Matched
+        assertEquals(AudioStegoTechnique.SPECTROGRAM_LSB, matched.technique)
+        assertEquals("the ravens have landed", matched.text)
+    }
+
+    @Test
+    fun tryAllTechniquesMatchesMfskAndRecoversThePayload() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SOFT_SYNTH)
+        val stego = AudioStegoCarrier(cover, AudioStegoTechnique.MFSK)
+            .encode("hi".encodeToByteArray())
+
+        val result = tryAllTechniques(realCarrierFactory, stego)
+
+        assertTrue("expected a match, got $result", result is OpenRecordingResult.Matched)
+        val matched = result as OpenRecordingResult.Matched
+        assertEquals(AudioStegoTechnique.MFSK, matched.technique)
+        assertEquals("hi", matched.text)
+    }
+
+    @Test
+    fun tryAllTechniquesReturnsNoMatchForAnUnembeddedCover() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+
+        val result = tryAllTechniques(realCarrierFactory, cover)
+
+        assertTrue("a plain cover with nothing hidden must never report a match: $result", result is OpenRecordingResult.NoMatch)
+    }
+
+    @Test
+    fun isWavMagicTrueForARealWavHeader() {
+        val wav = WavFile.encodePcm16Mono(ShortArray(10), NightjarAcoustics.SAMPLE_RATE_HZ)
+        assertTrue(isWavMagic(wav))
+    }
+
+    @Test
+    fun isWavMagicFalseForCompressedContainerMagicBytes() {
+        // ID3 (mp3 tag), OggS (ogg/opus), and a bare ftyp box (m4a/aac) -- none of these are
+        // RIFF/WAVE, which is exactly the point: "open a recording" must route them to the
+        // honest "arrived compressed" outcome instead of attempting a WAV parse.
+        val id3 = "ID3".toByteArray(Charsets.US_ASCII) + ByteArray(20)
+        val oggS = "OggS".toByteArray(Charsets.US_ASCII) + ByteArray(20)
+        val ftyp = ByteArray(4) + "ftyp".toByteArray(Charsets.US_ASCII) + ByteArray(12)
+        assertFalse(isWavMagic(id3))
+        assertFalse(isWavMagic(oggS))
+        assertFalse(isWavMagic(ftyp))
+    }
+
+    @Test
+    fun isWavMagicFalseForEmptyOrTooShortBytes() {
+        assertFalse(isWavMagic(ByteArray(0)))
+        assertFalse(isWavMagic(ByteArray(11))) // one byte short of the 12-byte RIFF....WAVE magic
     }
 }

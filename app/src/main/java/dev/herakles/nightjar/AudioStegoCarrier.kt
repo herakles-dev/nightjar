@@ -124,12 +124,20 @@ import kotlin.math.sqrt
  *
  * ## MFSK technique
  *
- * The "robustness mode": trades capacity for resilience against a noisy/lossy carrier, via
- * multi-frequency on/off tone keying additively mixed into [cover] plus real Reed-Solomon
- * forward error correction (reusing [dev.herakles.nightjar.ReedSolomon], the same GF(2^8)
- * implementation Module 3's [AcousticCarrier] already uses and tests) — unlike
- * [PHASE_INVERSION]/[SPECTROGRAM_LSB], this is genuinely lossy-channel-robust, not just
- * bit-exact-round-trip-robust.
+ * Trades capacity for resilience against in-clip noise/corruption, via multi-frequency on/off
+ * tone keying additively mixed into [cover] plus real Reed-Solomon forward error correction
+ * (reusing [dev.herakles.nightjar.ReedSolomon], the same GF(2^8) implementation Module 3's
+ * [AcousticCarrier] already uses and tests) — unlike [PHASE_INVERSION]/[SPECTROGRAM_LSB], this
+ * recovers a codeword with some symbol blocks corrupted, not just bit-exact round trips.
+ *
+ * **Measured lossy-codec survival (gate-35, task W0-C) — narrower than "robust" implies:** MFSK
+ * round-trips through AAC-LC >= 128 kbps and MP3 128 kbps, but fails after Opus 16-64 kbps (both
+ * voip and audio modes) and AAC 64-96 kbps. AAC at 64 kbps removes the near-ultrasonic tone band
+ * ([MFSK_BASE_BIN] onward) entirely; the other failures are quantization noise beyond
+ * Reed-Solomon's correction, not a clean binary pass/fail on "was it recompressed." This is why
+ * `AudioStegoScreen.kt`'s "open a recording" never attempts a decode on a compressed file at
+ * all — the earlier draft's "genuinely lossy-channel-robust" framing overclaimed relative to this
+ * measurement, and has been replaced here and in that screen's copy.
  *
  * **Modulation**: [cover] is split into non-overlapping [FRAME_SIZE]-sample symbol blocks (the
  * same block size [SPECTROGRAM_LSB] uses). Each block carries exactly one byte via
