@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.DiffCell
@@ -129,7 +131,14 @@ fun StegoDifferenceView(insight: StegoDifferenceInsight?, accent: Color, modifie
             Canvas(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(96.dp),
+                    .height(96.dp)
+                    // gate-38 (v6): this canvas had no semantics at all -- TalkBack skipped it
+                    // entirely, landing on the withheld/readout/caption Text nodes around it with
+                    // no idea a grid sat between them. contentDescription built from the same
+                    // StegoDifferenceMap drawStegoDifferenceCells paints, never a new claim.
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = stegoDifferenceContentDescription(insight.map)
+                    },
             ) {
                 drawStegoDifferenceCells(insight.map, accent)
             }
@@ -267,6 +276,38 @@ fun stegoDifferenceCaption(map: StegoDifferenceMap): String {
     return caption.toString()
 }
 
+/**
+ * gate-38 (v6 addition, closes deferred follow-up #12) — [StegoDifferenceView]'s cell-grid canvas
+ * had no text of its own for TalkBack to reach: a bare [androidx.compose.foundation.Canvas] with
+ * no semantics is skipped entirely, not announced as blank, so a screen-reader user swiping
+ * through this view landed on the readout/caption [androidx.compose.material3.Text]s around it
+ * with no idea a grid sat between them. Built from the same [StegoDifferenceMap]
+ * [drawStegoDifferenceCells] paints, never a second computation on the raw cells.
+ *
+ * "`changedFrames` of `totalFrames` frames changed, all in the embedded region" is true by
+ * construction, not an estimate: [StegoDifferenceMap.kinds] only ever holds rows for the
+ * [StegoDifferenceMap.firstChangedFrame]..[StegoDifferenceMap.lastChangedFrame] window (that
+ * class's own KDoc; [drawStegoDifferenceCells]'s "one frame of blank context" comment), and every
+ * frame outside that window was scanned by [dev.herakles.nightjar.stegoDifference] end to end and
+ * found unchanged — so every row this function counts really is "in the embedded region", and
+ * [StegoDifferenceMap.totalFrames] is the honest denominator, not just the analyzed window.
+ * "Changed" means "the row has a lit ([DiffCell.NUDGED] or [DiffCell.CREATED]) cell in the drawn
+ * grid" — the same thing a sighted viewer sees, never a sample-domain claim the canvas doesn't
+ * paint. This states a count only, nothing about location or audibility beyond what
+ * [stegoDifferenceCaption] already claims (v5/v6 honesty rules, gate-19/24/26/38).
+ *
+ * The `firstChangedFrame == -1` case (cover and stego bit-identical; [drawStegoDifferenceCells]
+ * itself draws nothing) gets its own honest line, same reasoning [stegoDifferenceCaption] already
+ * applies there.
+ */
+internal fun stegoDifferenceContentDescription(map: StegoDifferenceMap): String {
+    if (map.firstChangedFrame == -1 || map.kinds.isEmpty()) {
+        return "difference view: cover and stego are identical, nothing changed."
+    }
+    val changedFrames = map.kinds.count { row -> row.any { it != DiffCell.UNCHANGED } }
+    return "difference view: $changedFrames of ${map.totalFrames} frames changed, all in the embedded region."
+}
+
 // ---------------------------------------------------------------------------------------------
 // L/R polarity view (design-v5.md §4)
 // ---------------------------------------------------------------------------------------------
@@ -301,7 +342,13 @@ fun StereoPolarityView(polarity: StereoPolarity, accent: Color, modifier: Modifi
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(64.dp)
+                // gate-38 (v6): the overlay canvas had no semantics -- TalkBack skipped it
+                // entirely. Reuses the same correlation figure stereoPolarityReadout already
+                // prints as visible text, so the graphic's spoken claim can never drift from it.
+                .semantics(mergeDescendants = true) {
+                    contentDescription = stereoPolarityOverlayContentDescription(polarity)
+                },
         ) {
             drawZoomTrace(polarity.zoomLeft, accent)
             drawZoomTrace(polarity.zoomRight, JarTextSecondary)
@@ -310,7 +357,13 @@ fun StereoPolarityView(polarity: StereoPolarity, accent: Color, modifier: Modifi
         Canvas(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(32.dp),
+                .height(32.dp)
+                // gate-38 (v6): the residual-strip canvas had no semantics either -- a second,
+                // distinct description (not a repeat of the overlay's) so TalkBack doesn't hear
+                // the same sentence twice back to back.
+                .semantics(mergeDescendants = true) {
+                    contentDescription = stereoPolarityResidualContentDescription(polarity)
+                },
         ) {
             drawResidualStrip(polarity.residualWindowMean, accent)
         }
@@ -441,5 +494,40 @@ fun stereoPolarityCaption(polarity: StereoPolarity): String {
             "recording can look exactly like that mirror image with nothing hidden in it. add " +
             "them together and the cover cancels out; the steps left over are the hidden " +
             "message, one every 10 ms."
+    }
+}
+
+/**
+ * gate-38 (v6 addition, closes deferred follow-up #12) — the L/R overlay canvas's spoken label:
+ * the mirror-image shape plus the same real, measured correlation
+ * [stereoPolarityReadout] already prints as visible text, at the identical 4-decimal precision
+ * (that function's own KDoc: a real worst-case measured correlation of `-0.9994` must never round
+ * to a false-looking `-1.000`). This never states the anti-phase caveat
+ * [stereoPolarityCaption] carries — that sentence is a swipe away as its own [Text] node, not
+ * duplicated here — only what this specific canvas draws: the two traces' shape and the number
+ * behind it.
+ */
+internal fun stereoPolarityOverlayContentDescription(polarity: StereoPolarity): String {
+    val correlationText = String.format(Locale.US, "%.4f", polarity.correlation)
+    return "the left and right channels over a short window: the right one is the left one " +
+        "turned upside down. channel correlation $correlationText."
+}
+
+/**
+ * gate-38 (v6 addition, closes deferred follow-up #12) — the residual-strip canvas's spoken
+ * label, a distinct sentence from [stereoPolarityOverlayContentDescription] (so TalkBack doesn't
+ * read the same claim twice back to back) and a paraphrase, never an overclaim, of
+ * [stereoPolarityCaption]'s own silent/nonsilent branch — same [StereoPolarity.residualWindowMean]
+ * field, same `all { it == 0f }` condition, same "one every 10 ms" figure that caption already
+ * states unconditionally for this app's fixed [dev.herakles.nightjar.NightjarAcoustics
+ * .SAMPLE_RATE_HZ] clips.
+ */
+internal fun stereoPolarityResidualContentDescription(polarity: StereoPolarity): String {
+    val residualIsSilent = polarity.residualWindowMean.all { it == 0f }
+    return if (residualIsSilent) {
+        "residual after adding left and right together: flat at zero. nothing survives the sum."
+    } else {
+        "residual after adding left and right together: a step roughly every 10 milliseconds. " +
+            "that's the hidden message."
     }
 }
