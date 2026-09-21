@@ -1,10 +1,11 @@
 package dev.herakles.nightjar.modules.detector
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
+import android.media.audiofx.AudioEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -36,10 +37,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.AcousticDetector
 import dev.herakles.nightjar.CovertDetector
 import dev.herakles.nightjar.DebugProbe
 import dev.herakles.nightjar.DetectionResult
+import dev.herakles.nightjar.MicCapture
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
@@ -114,9 +118,15 @@ private const val MAX_HISTORY_ENTRIES = 50
 @Composable
 fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
     val context = LocalContext.current
-    val controller = remember(detector) { DetectorController(detector) }
+    val controller = remember(detector) { DetectorController(detector, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-4: stop the passive listen loop when the app is backgrounded, rather than leaving the
+    // mic capturing (and the live confidence readout burning battery) behind a closed/minimized
+    // app. No time bound is needed on the loop itself once it reliably stops here.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopListening()
     }
 
     var micPermissionDenied by remember { mutableStateOf(false) }
@@ -138,6 +148,7 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
         history = controller.history,
         flagThreshold = detector.flagThreshold,
         micPermissionDenied = micPermissionDenied,
+        micError = controller.micError,
         onToggleListen = {
             if (controller.isListening) {
                 controller.stopListening()
@@ -186,9 +197,15 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
 fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     val context = LocalContext.current
     val detector = remember { AcousticDetector() }
-    val controller = remember(detector) { DetectorController(detector) }
+    val controller = remember(detector) { DetectorController(detector, context.applicationContext) }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    // mic-4: stop the passive listen loop when the app is backgrounded, rather than leaving the
+    // mic capturing behind a closed/minimized app. No time bound is needed on the loop itself
+    // once it reliably stops here.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        controller.stopListening()
     }
 
     var micPermissionDenied by remember { mutableStateOf(false) }
@@ -209,6 +226,7 @@ fun jarWatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
         result = controller.lastResult,
         history = controller.history,
         micPermissionDenied = micPermissionDenied,
+        micError = controller.micError,
         onToggleWatch = {
             if (controller.isListening) {
                 controller.stopListening()
@@ -243,6 +261,7 @@ private fun JarWatchContent(
     result: DetectionResult?,
     history: List<DetectionHistoryEntry>,
     micPermissionDenied: Boolean,
+    micError: String?,
     onToggleWatch: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
@@ -271,6 +290,10 @@ private fun JarWatchContent(
                     style = JarType.Body,
                     color = JarTextSecondary,
                 )
+            }
+            // mic-1: visible instead of crashing when every AudioSource tier fails to initialize.
+            if (micError != null) {
+                Text(text = micError, style = JarType.Body, color = JarTextSecondary)
             }
         }
 
@@ -388,6 +411,7 @@ private fun PreviewJarWatchNeverWatched() {
         result = null,
         history = emptyList(),
         micPermissionDenied = false,
+        micError = null,
         onToggleWatch = {},
     )
 }
@@ -403,6 +427,7 @@ private fun PreviewJarWatchSomethingOutThere() {
             DetectionHistoryEntry(timestampMillis = System.currentTimeMillis() - 60_000, confidence = 0.4f),
         ),
         micPermissionDenied = false,
+        micError = null,
         onToggleWatch = {},
     )
 }
@@ -437,6 +462,7 @@ fun DetectorContent(
     history: List<DetectionHistoryEntry>,
     flagThreshold: Float,
     micPermissionDenied: Boolean,
+    micError: String?,
     onToggleListen: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -484,6 +510,16 @@ fun DetectorContent(
                 if (micPermissionDenied) {
                     Text(
                         text = "microphone permission needed to listen.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = TextSecondary,
+                    )
+                }
+
+                // mic-1: visible instead of crashing when every AudioSource tier fails to
+                // initialize (mic held by a call or another app).
+                if (micError != null) {
+                    Text(
+                        text = micError,
                         style = MaterialTheme.typography.bodyLarge,
                         color = TextSecondary,
                     )
@@ -642,7 +678,7 @@ private fun HistoryRow(entry: DetectionHistoryEntry) {
  * analysis frame. The live confidence/flagged readout updates continuously regardless;
  * only the history list is edge-triggered.
  */
-class DetectorController(private val detector: CovertDetector<PcmAudio>) {
+class DetectorController(private val detector: CovertDetector<PcmAudio>, private val appContext: Context) {
 
     var isListening: Boolean by mutableStateOf(false)
         private set
@@ -651,6 +687,17 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         private set
 
     var history: List<DetectionHistoryEntry> by mutableStateOf(emptyList())
+        private set
+
+    /**
+     * mic-1 fix: set when [captureLoop] can't get a working [android.media.AudioRecord] — every
+     * [MicCapture.openBestAudioRecord] tier busy/unavailable, or `startRecording()` itself
+     * throwing once initialized — instead of the uncaught `IllegalStateException` this used to
+     * crash on (this controller previously built a bare `AudioSource.MIC` record directly, with
+     * no state check and only a `SecurityException` catch). Cleared at the start of every
+     * [startListening] call.
+     */
+    var micError: String? by mutableStateOf(null)
         private set
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -662,12 +709,19 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         if (isListening) return
         listening.set(true)
         isListening = true
+        micError = null
         scope.launch {
             try {
                 captureLoop()
             } catch (permissionRevoked: SecurityException) {
                 // Falls through to the finally block; the live readout just stops
                 // updating, same silent-stop treatment as a manual "stop" tap.
+            } catch (micBusy: IllegalStateException) {
+                // mic-1 fix: startRecording() threw once the record was already initialized —
+                // surface a visible reason instead of crashing. (The "returns null" half of this
+                // finding is handled directly inside captureLoop() below, with no exception at
+                // all.)
+                micError = "the microphone is busy — a call or another app is using it."
             } finally {
                 listening.set(false)
                 isListening = false
@@ -693,17 +747,17 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
             AudioFormat.ENCODING_PCM_16BIT,
         )
         val recordBufferBytes = if (minBufBytes > 0) minBufBytes * 4 else NightjarAcoustics.FRAME_SAMPLES * 8
-        val audioRecord = AudioRecord.Builder()
-            .setAudioSource(MediaRecorder.AudioSource.MIC)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(NightjarAcoustics.SAMPLE_RATE_HZ)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                    .build(),
-            )
-            .setBufferSizeInBytes(recordBufferBytes)
-            .build()
+
+        // mic-1/mic-3 fix: shares AcousticModemController's UNPROCESSED -> VOICE_RECOGNITION ->
+        // MIC AudioSource fallback (avoids platform speech DSP distorting the tone-grid energy
+        // this detector measures — spec.md INV-4) and its NoiseSuppressor/AGC/AEC suppression,
+        // instead of the bare `AudioSource.MIC` AudioRecord this loop used to build directly with
+        // neither and no STATE_INITIALIZED check.
+        val audioRecord = MicCapture.openBestAudioRecord(appContext, recordBufferBytes)
+        if (audioRecord == null) {
+            micError = "the microphone is busy — a call or another app is using it."
+            return@withContext
+        }
 
         // Read a few frames at a time (~85ms of audio) rather than one FRAME_SAMPLES chunk
         // (~21ms) per read: detector.analyze() internally re-slices into FRAME_SAMPLES-sized
@@ -711,7 +765,12 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
         // only throttles how often the live readout recomposes — smooth enough to read
         // without writing Compose state every ~21ms.
         val chunk = ShortArray(NightjarAcoustics.FRAME_SAMPLES * 4)
+        // mic-8 precedent applied here too: effects are disabled from inside this try, right
+        // after the AudioRecord they operate on is already in hand, so a throwing OEM effect
+        // factory can't skip past the record's own release() below.
+        var disabledEffects: List<AudioEffect> = emptyList()
         try {
+            disabledEffects = MicCapture.disablePlatformAudioEffects(audioRecord.audioSessionId)
             audioRecord.startRecording()
             while (listening.get()) {
                 val n = audioRecord.read(chunk, 0, chunk.size)
@@ -721,8 +780,14 @@ class DetectorController(private val detector: CovertDetector<PcmAudio>) {
                 onResult(result)
             }
         } finally {
-            audioRecord.stop()
+            // mic-1 fix: only call stop() if the record actually reached RECORDSTATE_RECORDING —
+            // calling it otherwise (e.g. startRecording() itself threw) throws its own
+            // IllegalStateException and would mask whatever failure got us here.
+            if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                audioRecord.stop()
+            }
             audioRecord.release()
+            disabledEffects.forEach { it.release() }
         }
     }
 
@@ -752,6 +817,7 @@ private fun PreviewNeverListened() {
             history = emptyList(),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )
@@ -768,6 +834,7 @@ private fun PreviewClear() {
             history = emptyList(),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )
@@ -792,6 +859,7 @@ private fun PreviewFlagged() {
             ),
             flagThreshold = 0.2f,
             micPermissionDenied = false,
+            micError = null,
             onToggleListen = {},
             onBack = {},
         )
