@@ -7,19 +7,19 @@
   copy); res/values/strings.xml itself is left untouched by this task.
 
   Jar voice throughout (design/firefly-jar-identity.md): lowercase, no exclamation, no emoji.
-  receive_squeezed_image_body/receive_squeezed_audio_body never assert a firefly was actually
-  sent, and name the transport ("whatever app carried this"), not a fault; the sending app can't
-  be identified from IncomingOutcome.Squeezed as this task found it (no source-package field),
-  so both use the design doc's own documented generic fallback rather than a named-app variant.
+  receive_squeezed_* (INV-12, never guess): Squeezed only means the file arrived in a lossy
+  container and nothing decoded, so the copy states that known fact ("arrived compressed") and
+  keeps the firefly conditional ("if someone hid a firefly in it"). An ordinary photo or voice
+  note lands here too, and the copy must stay true for it.
 -->
 <resources>
     <string name="receive_caught_title">you caught one</string>
     <string name="receive_caught_body">%1$d bytes, hidden in %2$s.</string>
     <string name="receive_caught_open_action">open %1$s</string>
 
-    <string name="receive_squeezed_title">squeezed on the way</string>
-    <string name="receive_squeezed_image_body">whatever app carried this squeezed it on the way, so the exact bits didn\'t survive. ask them to send it as a file, or use a sturdy firefly next time.</string>
-    <string name="receive_squeezed_audio_body">whatever app carried this squeezed it on the way, so it doesn\'t decode cleanly — like a recording turned into a compressed voice note. ask them to send it as a file or document instead.</string>
+    <string name="receive_squeezed_title">no firefly came through</string>
+    <string name="receive_squeezed_image_body">this picture arrived compressed. if someone hid a firefly in it, the app it traveled through may have squeezed it away. ask them to send it as a file, or to use a sturdy firefly.</string>
+    <string name="receive_squeezed_audio_body">this recording arrived compressed, the way voice notes are. if someone hid a firefly in it, the compression may have squeezed it away. ask them to send it as a file or document.</string>
 
     <string name="receive_damaged_title">damaged on the way</string>
     <string name="receive_damaged_body">this one got damaged on the way over. ask whoever sent it to send it again.</string>
