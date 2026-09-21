@@ -5,6 +5,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -232,6 +233,47 @@ class AcousticCarrierTest {
         // buffer now, instead of the old fixed ~8s cap — assert it still finishes promptly rather
         // than silently letting decode() become slow as a side effect of this fix.
         assertTrue("decode() on a 20s buffer took ${elapsedMs}ms, expected well under 5s", elapsedMs < 5_000)
+    }
+
+    @Test
+    fun `decode's checkCancelled overload propagates a thrown cancellation instead of returning a result`() {
+        // codec-M03 follow-up: decode() is a single synchronous call with no suspension point of
+        // its own -- the coarse search's cost is linear in the carrier buffer's length (decode()'s
+        // own KDoc "Cost" note), so a long, transmission-free import (this app accepts files up to
+        // MAX_IMPORT_FILE_BYTES, ~11 minutes at 48kHz mono in AcousticModemScreen.kt) needs an
+        // actual way to stop mid-search when the operator backs out -- not a shorter fixed cap,
+        // which would just re-break late-starting transmissions in long imports the same way the
+        // old MAX_START_SEARCH_SECONDS cap did (see the "starts about 12s" test above). This test
+        // simulates a coroutine's `{ ctx.ensureActive() }` checkCancelled (AcousticModemScreen.kt's
+        // decodeCancellable) by throwing CancellationException directly, without a real coroutine.
+        val carrier = AcousticCarrier(protocol, symbolRate)
+        // 5000 frames of silence: comfortably longer than the ~6 candidate checks below need
+        // (checkCancelled fires every 64 candidates -- see decode()'s coarse-search loop), so if
+        // cancellation weren't propagating promptly this would instead keep scanning for dozens
+        // more calls and eventually return a NO_PAYLOAD_FOUND Failure.
+        val longSilence = PcmAudio(NightjarAcoustics.FRAME_SAMPLES * 5_000)
+        var calls = 0
+        val cancelAfterCalls = 5
+        var result: DecodeResult? = null
+
+        val thrown = try {
+            result = carrier.decode(longSilence) {
+                calls++
+                if (calls > cancelAfterCalls) throw CancellationException("test-triggered cancel")
+            }
+            null
+        } catch (cancelled: CancellationException) {
+            cancelled
+        }
+
+        assertTrue("a throwing checkCancelled must propagate out of decode(), not be swallowed", thrown != null)
+        assertNull("decode() must not still produce a result once checkCancelled has thrown", result)
+        assertEquals(
+            "checkCancelled should stop being invoked the moment it throws (throttled every 64 " +
+                "candidate frames, so the 6th call is the first where calls > cancelAfterCalls)",
+            cancelAfterCalls + 1,
+            calls,
+        )
     }
 
     @Test

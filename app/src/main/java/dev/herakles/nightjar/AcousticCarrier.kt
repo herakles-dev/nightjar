@@ -170,8 +170,38 @@ class AcousticCarrier(
      *
      * `correctedByteErrors` on a [DecodeResult.Success] sums the RS-corrected byte count across the
      * header block and every payload block.
+     *
+     * **Cost**: step 1a's coarse search is one FFT per candidate frame, and its candidate range is
+     * linear in `carrier`'s own length (codec-M03 derives it from the buffer, not a fixed time
+     * cap — see step 1a above). Steps 2/4/5's loops are bounded by [maxPayloadBytes] regardless of
+     * `carrier.size`, so they're not the concern. For a short, bounded capture (e.g.
+     * [dev.herakles.nightjar.modules.acoustic.AcousticModemController]'s live listen window,
+     * `MAX_LISTEN_SECONDS = 20.0`) this is fast either way (~100ms). For a long, uncontrolled input
+     * — an imported file, which this app accepts up to 64MB (~11 minutes at 48kHz mono
+     * PCM16) — a transmission-free or badly-clipped buffer scans the *whole* thing with no
+     * suspension point of its own to cancel at, since this plain (non-`suspend`) function is a
+     * single synchronous call from whatever coroutine invokes it. Callers on long inputs should use
+     * the [decode] overload below that takes a `checkCancelled` callback instead of this one, so a
+     * cancelled coroutine actually stops the search instead of running to completion regardless.
      */
-    override fun decode(carrier: PcmAudio): DecodeResult {
+    override fun decode(carrier: PcmAudio): DecodeResult = decode(carrier) {}
+
+    /**
+     * [decode] with cooperative cancellation: [checkCancelled] is invoked every 64 coarse-search
+     * candidate frames (step 1a — the only loop whose length scales with `carrier.size` rather
+     * than [maxPayloadBytes]) and once per iteration of the header/payload demodulation and
+     * RS-decode loops (steps 2/4/5 — already bounded, but cheap to check too). A [checkCancelled]
+     * that throws (e.g. `{ coroutineContext.ensureActive() }`, throwing `CancellationException`)
+     * unwinds this call immediately instead of letting it run to completion, which matters for a
+     * long, uncontrolled input like an imported file (see [decode]'s own KDoc "Cost" note).
+     *
+     * Deliberately not part of [CovertCarrier] — every implementation of that interface
+     * (`AudioStegoCarrier`, `ImageStegoCarrier`) would need a matching parameter for a change only
+     * this carrier's search actually needs. Callers holding this carrier through the interface
+     * reach this overload via a narrow, documented runtime type check instead — see
+     * `AcousticModemScreen.kt`'s `decodeCancellable`.
+     */
+    fun decode(carrier: PcmAudio, checkCancelled: () -> Unit): DecodeResult {
         val frameSamplesCount = NightjarAcoustics.FRAME_SAMPLES
         val markerFrames = NightjarAcoustics.MARKER_FRAMES
         val markerSamplesCount = markerFrames * frameSamplesCount
@@ -200,6 +230,12 @@ class AcousticCarrier(
         val searchLimit = totalFrames - 2 * markerFrames
         var startFrame = -1
         for (candidate in 0..searchLimit) {
+            // Every 64 candidates rather than every one: this is the only loop in decode() whose
+            // length scales with carrier.size rather than maxPayloadBytes (see decode()'s KDoc
+            // "Cost" note), so on a long, transmission-free input it can run tens of thousands of
+            // iterations -- checking a lambda that deep is not free, but skipping the check
+            // entirely would leave a long import with no way to actually stop mid-search.
+            if (candidate % 64 == 0) checkCancelled()
             val isStart = (candidate until candidate + markerFrames).all { frame ->
                 frameHasMarkerSignature(carrier, frame, protocol.baseBin, protocol.topBin)
             }
@@ -230,6 +266,7 @@ class AcousticCarrier(
         }
         val headerAreaBytes = ByteArray(headerSymbols * bytesPerSymbol)
         for (symbolIndex in 0 until headerSymbols) {
+            checkCancelled()
             val symbolStartSample = dataStartSample + symbolIndex * symbolSamplesCount
             val magnitudes = fftMagnitudes(frameSamplesAt(carrier, symbolStartSample))
             demodulateSymbol(magnitudes).copyInto(headerAreaBytes, symbolIndex * bytesPerSymbol)
@@ -294,6 +331,7 @@ class AcousticCarrier(
         // pass -- cheap, and avoids stitching together two partial byte streams.
         val codedBytes = ByteArray(numSymbols * bytesPerSymbol)
         for (symbolIndex in 0 until numSymbols) {
+            checkCancelled()
             val symbolStartSample = dataStartSample + symbolIndex * symbolSamplesCount
             val magnitudes = fftMagnitudes(frameSamplesAt(carrier, symbolStartSample))
             demodulateSymbol(magnitudes).copyInto(codedBytes, symbolIndex * bytesPerSymbol)
@@ -304,6 +342,7 @@ class AcousticCarrier(
         var payloadOffset = 0
         var codedOffset = NightjarAcoustics.RS_HEADER_CODEWORD_BYTES
         while (payloadOffset < protectedLength) {
+            checkCancelled()
             val blockDataLen = minOf(NightjarAcoustics.RS_PAYLOAD_DATA_BYTES, protectedLength - payloadOffset)
             val codewordLen = blockDataLen + NightjarAcoustics.RS_PAYLOAD_PARITY_BYTES
             if (codedOffset + codewordLen > codedBytes.size) {

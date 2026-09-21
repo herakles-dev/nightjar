@@ -1610,7 +1610,7 @@ class AcousticModemController(
             // window from the header's own declared length, never from the buffer's total size.
             val pcm = padToFrameBoundary(imported.samples)
             lastDecodedPcm = pcm
-            status = when (val result = carrier.decode(pcm)) {
+            status = when (val result = decodeCancellable(carrier, pcm)) {
                 is DecodeResult.Success -> {
                     DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, success = true)
                     ModemStatus.DecodedSuccess(result.payload.decodeToString(), result.correctedByteErrors)
@@ -1653,7 +1653,7 @@ class AcousticModemController(
             }
             lastDecodedPcm = captureResult.pcm
             status = ModemStatus.Decoding
-            status = when (val result = carrier.decode(captureResult.pcm)) {
+            status = when (val result = decodeCancellable(carrier, captureResult.pcm)) {
                 is DecodeResult.Success -> {
                     DebugProbe.reportEncodeDecodeResult(ModuleId.ACOUSTIC_MODEM, DebugProbe.Operation.DECODE, success = true)
                     ModemStatus.DecodedSuccess(result.payload.decodeToString(), result.correctedByteErrors)
@@ -1808,6 +1808,35 @@ class AcousticModemController(
     // mic-1/mic-2/mic-3/mic-8: AudioRecord source-fallback + platform-DSP-effect suppression
     // moved out to the shared dev.herakles.nightjar.MicCapture helper (used by DetectorController
     // too) — see capturePcm() above and MicCapture.kt's own KDoc.
+}
+
+/**
+ * Runs [carrier].decode([pcm]) with cooperative cancellation when possible, in place of a bare
+ * `carrier.decode(pcm)` call. [AcousticCarrier.decode]'s cost is linear in `pcm`'s length (that
+ * class's own KDoc "Cost" note) — cheap for a bounded live-listen capture, but on a large imported
+ * file (up to [MAX_IMPORT_FILE_BYTES], ~11 minutes at 48kHz mono) a transmission-free buffer used
+ * to scan the *whole* thing with no way to actually cancel: `decode()` is a single synchronous,
+ * non-`suspend` call, so backing out of the screen (cancelling [AcousticModemController]'s `scope`)
+ * had no effect on a search already in flight, and `startListening()`/`importAndDecode()`'s own
+ * busy-gate left transmit/save/share/import/listen all disabled for however long it took.
+ *
+ * [AcousticCarrier] exposes a `decode(carrier, checkCancelled)` overload for exactly this, but it
+ * isn't part of [CovertCarrier] — this screen's controllers are otherwise deliberately
+ * carrier-agnostic (see [AcousticModemController]'s own KDoc), and widening the shared interface
+ * would also require updating every other [CovertCarrier] implementation (`AudioStegoCarrier`,
+ * `ImageStegoCarrier`) for a change only this carrier's search actually needs. This function is
+ * the one narrow, documented exception: a runtime type check reaches the cancellable overload when
+ * [carrier] is actually the concrete [AcousticCarrier] this screen always constructs (via
+ * `carrierFactory`/[jarCatchFlow]'s own direct construction); any other [CovertCarrier] — e.g. a
+ * test fake — just runs the plain, uncancellable [CovertCarrier.decode].
+ */
+private suspend fun decodeCancellable(carrier: CovertCarrier<PcmAudio>, pcm: PcmAudio): DecodeResult {
+    val ctx = coroutineContext
+    return if (carrier is AcousticCarrier) {
+        carrier.decode(pcm) { ctx.ensureActive() }
+    } else {
+        carrier.decode(pcm)
+    }
 }
 
 // --- Task #32: "import" file reading — plain (non-composable, non-member) functions, matching
