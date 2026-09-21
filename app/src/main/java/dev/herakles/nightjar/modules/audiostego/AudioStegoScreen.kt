@@ -795,8 +795,10 @@ fun AudioStegoContent(
                 }
             }
 
-            // A/B listening test: proves the working clip sounds unchanged from the pristine
-            // cover. Available in any idle-equivalent state; never changes `status`.
+            // A/B listening test: lets the operator compare cover vs. working directly instead
+            // of taking fidelity on faith -- Gate 8's own headphone pass found this is NOT
+            // always "sounds unchanged" (design-v5.md §2.7; see audioStegoTagline()'s KDoc).
+            // Available in any idle-equivalent state; never changes `status`.
             PlaybackRow(
                 enabled = idleEquivalent,
                 nowPlaying = nowPlaying,
@@ -984,16 +986,21 @@ private fun tradeoffExplainer(): String =
  * this technique's *real*, owner-verified audibility (Pixel 6a, headphones) instead of the prior
  * copy's blanket "sounds unchanged" claim, which was true for spectrogram-LSB but false for the
  * other two. `internal` so [AudioStegoScreenTest] can assert each string actually says so.
+ *
+ * Capacity claims below are checked against [dev.herakles.nightjar.AudioStegoCarrier]'s real
+ * `maxPayloadBytes` for the bundled 5s covers, not asserted from memory: MFSK = 37B,
+ * PHASE_INVERSION = 51B, SPECTROGRAM_LSB = 457B ([AudioStegoScreenTest]'s
+ * `mfskHasTheLowestCapacityOfTheThreeTechniques`) — MFSK is the *lowest*-capacity technique, not
+ * phase-inversion; the prior copy had that backwards.
  */
 internal fun techniqueExplainer(technique: AudioStegoTechnique): String = when (technique) {
     AudioStegoTechnique.PHASE_INVERSION ->
         "Splits the clip into two channels: one is the original cover, the other an inverted " +
             "copy with your message mixed in as a barely-there signal. On headphones it's " +
-            "clearly audible as a difference from the cover — wider and more hollow, since the " +
-            "two channels are near-perfect opposites — though it's harder to tell apart on a " +
-            "phone speaker. Summing the channels to mono cancels the cover and the message " +
-            "alike, which is also why it's fragile: simple to reason about, lowest capacity of " +
-            "the three."
+            "clearly audible as a difference from the cover — wider and more hollow — though " +
+            "harder to tell apart on a phone speaker. Summing the channels to mono cancels the " +
+            "cover and the message alike, which is also why it's fragile. Simple to reason " +
+            "about, modest capacity."
     AudioStegoTechnique.SPECTROGRAM_LSB ->
         "Converts the clip into its frequency-domain representation (a spectrogram) and nudges " +
             "specific frequency bins by tiny, controlled amounts to encode your message — the " +
@@ -1001,14 +1008,14 @@ internal fun techniqueExplainer(technique: AudioStegoTechnique): String = when (
             "of pixels. Near-transparent on headphones: indistinguishable from the cover on " +
             "spoken-word audio, with only a faint crackle in the soft-synth cover's near-silent " +
             "fade-in. Every frame contributes several bits instead of one, so capacity is far " +
-            "higher than phase inversion."
+            "higher than the other two."
     AudioStegoTechnique.MFSK ->
         "Encodes your message as a sequence of tones layered on top of the cover clip, then " +
             "wraps the whole thing in real error-correcting math (Reed-Solomon — the same family " +
             "of code behind QR codes and CDs). The tones sit near the top of hearing (about " +
-            "19.7-20 kHz) and are audible to most listeners as a faint high tone. Lower, fixed " +
-            "capacity, but built to recover the message even if part of the clip gets corrupted " +
-            "or noisy."
+            "19.7-20 kHz) and are audible to most listeners as a faint high tone. Lowest, fixed " +
+            "capacity of the three, but built to recover the message even if part of the clip " +
+            "gets corrupted or noisy."
 }
 
 /** Plain-language explanation of what a sample cover clip actually is — grounded in
@@ -1212,10 +1219,11 @@ private fun AnalyzedBlock(result: DetectionResult) {
  * the owner's own Gate 8 headphone listening pass disproved for two of the three techniques
  * (phase-inversion reads clearly wider/hollow, MFSK's tones are audible) — this tells the
  * operator to listen and judge instead of asserting a result that isn't true for every technique.
+ * Kept close to the prior copy's length rather than spelling out per-technique caveats here —
+ * each technique's own "?" tooltip ([techniqueExplainer]) is where those live.
  */
 internal fun audioStegoTagline(): String =
-    "hide text inside a clip. play cover and working, then judge for yourself — " +
-        "not every technique here is inaudible."
+    "hide text inside a clip. play cover and working, then judge for yourself."
 
 /**
  * Static honesty line appended to every "check for hidden data" verdict on the technical screen

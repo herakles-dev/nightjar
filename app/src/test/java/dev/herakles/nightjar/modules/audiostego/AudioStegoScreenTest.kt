@@ -1,5 +1,6 @@
 package dev.herakles.nightjar.modules.audiostego
 
+import dev.herakles.nightjar.AudioStegoCarrier
 import dev.herakles.nightjar.AudioStegoTechnique
 import dev.herakles.nightjar.DecodeFailure
 import dev.herakles.nightjar.DetectionResult
@@ -48,6 +49,13 @@ class AudioStegoScreenTest {
         assertTrue("should call out headphone audibility", text.contains("headphones"))
         assertTrue("should describe the wide/hollow character Gate 8 found", text.contains("hollow"))
         assertTrue("should note summing to mono destroys it", text.contains("mono"))
+        // A real, measured capacity bug the design-v5.md draft had backwards (design-v5.md §2.7
+        // review note): phase-inversion is NOT the lowest-capacity technique -- see
+        // mfskHasTheLowestCapacityOfTheThreeTechniques below. The tooltip must not claim it is.
+        assertFalse(
+            "phase-inversion's text must not claim to be the lowest-capacity technique",
+            text.lowercase().contains("lowest capacity"),
+        )
     }
 
     @Test
@@ -59,13 +67,35 @@ class AudioStegoScreenTest {
     }
 
     @Test
-    fun mfskExplainerStatesAudibleHighTones() {
+    fun mfskExplainerStatesAudibleHighTonesAndLowestCapacity() {
         val text = techniqueExplainer(AudioStegoTechnique.MFSK)
         assertTrue("should say the tones are audible", text.contains("audible"))
         assertTrue("should name the tone-band frequency range", text.contains("19.7"))
         // MFSK's crackle was a separate encoder bug, not this technique's real tradeoff -- the
         // audibility explanation must not describe it as a feature of the technique.
         assertFalse("must not describe the MFSK crackle bug as a feature", text.contains("crackle"))
+        assertTrue(
+            "MFSK is the actual lowest-capacity technique (37B vs 51B/457B) -- its text should say so",
+            text.lowercase().contains("lowest"),
+        )
+    }
+
+    // ==========================================================================================
+    // Capacity ordering: the ground truth the three tooltips' capacity claims are checked
+    // against, computed from the real AudioStegoCarrier (not hardcoded or trusted from memory --
+    // design-v5.md §2.7 review note: an earlier copy pass had phase-inversion and MFSK's
+    // "lowest capacity" claim backwards).
+    // ==========================================================================================
+
+    @Test
+    fun mfskHasTheLowestCapacityOfTheThreeTechniques() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+        val mfskBytes = AudioStegoCarrier(cover, AudioStegoTechnique.MFSK).maxPayloadBytes
+        val phaseInversionBytes = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_INVERSION).maxPayloadBytes
+        val spectrogramLsbBytes = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB).maxPayloadBytes
+
+        assertTrue("MFSK ($mfskBytes B) should be lower-capacity than phase-inversion ($phaseInversionBytes B)", mfskBytes < phaseInversionBytes)
+        assertTrue("phase-inversion ($phaseInversionBytes B) should be lower-capacity than spectrogram-LSB ($spectrogramLsbBytes B)", phaseInversionBytes < spectrogramLsbBytes)
     }
 
     // ==========================================================================================
