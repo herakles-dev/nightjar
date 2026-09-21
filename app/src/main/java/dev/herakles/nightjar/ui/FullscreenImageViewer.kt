@@ -37,6 +37,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import kotlinx.coroutines.launch
 
@@ -148,9 +150,41 @@ internal fun clampPanOffset(
  * the same honest string the inline preview already uses (e.g. the P5-fixed
  * `fireflyImageContentDescription` on the Firefly Jar surface) — this composable never invents its
  * own.
+ *
+ * Hosted in a [Dialog] rather than composed directly into the caller's layout tree — an earlier
+ * version did the latter and, confirmed on device (`dumpsys window windows` showed only the
+ * MainActivity window, no Dialog/Popup), rendered as an inline band inside the caller's own
+ * scrolling `Column` instead of covering the screen: the underlying content stayed visible around
+ * and through it, with no scrim over any of it. A [Dialog] with `usePlatformDefaultWidth = false`
+ * and `decorFitsSystemWindows = false` gets its own window sized to the full display, which is
+ * what "fullscreen" actually requires here — [Box.fillMaxSize] only ever fills the space its
+ * *parent* already gave it, and a caller's `Column` slot was never that. `dismissOnBackPress` is
+ * off in favor of the explicit [BackHandler] below, so there's exactly one back-dismiss path, not
+ * two racing to invoke [onDismiss].
  */
 @Composable
 fun FullscreenImageViewer(
+    bitmap: Bitmap,
+    contentDescription: String,
+    onDismiss: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        FullscreenImageViewerContent(bitmap = bitmap, contentDescription = contentDescription, onDismiss = onDismiss)
+    }
+}
+
+/** The viewer's actual content, pulled out of [FullscreenImageViewer] so the [Dialog] wrapper
+ *  above stays a thin, obviously-correct shell around it. */
+@Composable
+private fun FullscreenImageViewerContent(
     bitmap: Bitmap,
     contentDescription: String,
     onDismiss: () -> Unit,
