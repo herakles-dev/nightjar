@@ -422,7 +422,9 @@ You **create** fireflies (embedding: amber) and **catch** other people's (decodi
 receiving: cyan). "catch" never describes making one. The embed verb "catch a firefly"
 becomes **"create a firefly"**, and creation success reads **"you created one — N bytes"**.
 "look for fireflies", "catch from a photo or file" and "you caught one" stay, because those
-are receiving.
+are receiving. Received fireflies are labelled "caught", not "spotted" (the modem's receive
+result, the detail label, the jar subtitle and the TalkBack description). Only the meadow keeps
+"spotted": it notices fireflies and never keeps one.
 
 ### Welcome card (first launch, on the shelf, in place, not a modal)
 

@@ -53,3 +53,31 @@ internal fun trailPracticeGlossRes(module: Module): Int? = when (module) {
     Module.ACOUSTIC_MODEM -> R.string.trail_gloss_singing
     Module.DETECTOR -> null
 }
+
+/**
+ * W2-5 (design/riddle-trail.md § "Quest lines"): the one-line hint shown on [step]'s own active
+ * screen, above its actions -- distinct from [trailWordmarkHintRes], which only ever replaces
+ * the shelf's short wordmark subtitle.
+ */
+internal fun trailQuestRes(step: TrailStep): Int = when (step) {
+    TrailStep.ART -> R.string.trail_quest_art
+    TrailStep.HUMMING -> R.string.trail_quest_humming
+    TrailStep.SINGING -> R.string.trail_quest_singing
+    TrailStep.MEADOW -> R.string.trail_quest_meadow
+    TrailStep.SEND -> R.string.trail_quest_send
+    TrailStep.WORKSHOP -> R.string.trail_quest_workshop
+}
+
+/**
+ * W2-5 (design/riddle-trail.md § "Reward lines"): the one-line celebration shown once [step]
+ * completes, where it completed. [TrailStep.WORKSHOP]'s reward is the finale line -- shown on
+ * the shelf alongside the constellation's own all-six-lit state, not on a jar screen.
+ */
+internal fun trailRewardRes(step: TrailStep): Int = when (step) {
+    TrailStep.ART -> R.string.trail_reward_art
+    TrailStep.HUMMING -> R.string.trail_reward_humming
+    TrailStep.SINGING -> R.string.trail_reward_singing
+    TrailStep.MEADOW -> R.string.trail_reward_meadow
+    TrailStep.SEND -> R.string.trail_reward_send
+    TrailStep.WORKSHOP -> R.string.trail_reward_finale
+}

@@ -67,4 +67,36 @@ class TrailTargetsTest {
     fun `the meadow never holds a practice firefly, so it has no gloss`() {
         assertNull(trailPracticeGlossRes(Module.DETECTOR))
     }
+
+    // --- trailQuestRes (W2-5) ---
+
+    @Test
+    fun `every step resolves to its own distinct quest line`() {
+        val resolved = TrailStep.entries.associateWith { trailQuestRes(it) }
+        assertEquals(TrailStep.entries.size, resolved.values.toSet().size)
+        assertEquals(R.string.trail_quest_art, resolved.getValue(TrailStep.ART))
+        assertEquals(R.string.trail_quest_humming, resolved.getValue(TrailStep.HUMMING))
+        assertEquals(R.string.trail_quest_singing, resolved.getValue(TrailStep.SINGING))
+        assertEquals(R.string.trail_quest_meadow, resolved.getValue(TrailStep.MEADOW))
+        assertEquals(R.string.trail_quest_send, resolved.getValue(TrailStep.SEND))
+        assertEquals(R.string.trail_quest_workshop, resolved.getValue(TrailStep.WORKSHOP))
+    }
+
+    // --- trailRewardRes (W2-5) ---
+
+    @Test
+    fun `every step resolves to its own distinct reward line`() {
+        val resolved = TrailStep.entries.associateWith { trailRewardRes(it) }
+        assertEquals(TrailStep.entries.size, resolved.values.toSet().size)
+        assertEquals(R.string.trail_reward_art, resolved.getValue(TrailStep.ART))
+        assertEquals(R.string.trail_reward_humming, resolved.getValue(TrailStep.HUMMING))
+        assertEquals(R.string.trail_reward_singing, resolved.getValue(TrailStep.SINGING))
+        assertEquals(R.string.trail_reward_meadow, resolved.getValue(TrailStep.MEADOW))
+        assertEquals(R.string.trail_reward_send, resolved.getValue(TrailStep.SEND))
+    }
+
+    @Test
+    fun `the workshop's reward is the finale line`() {
+        assertEquals(R.string.trail_reward_finale, trailRewardRes(TrailStep.WORKSHOP))
+    }
 }

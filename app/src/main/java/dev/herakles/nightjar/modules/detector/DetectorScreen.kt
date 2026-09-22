@@ -57,6 +57,8 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import androidx.compose.material3.HorizontalDivider
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.trail.trailHighlight
@@ -254,6 +256,10 @@ fun jarWatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
     var showHonestFallback by remember { mutableStateOf(false) }
     var trailAdvancePending by remember { mutableStateOf(false) }
 
+    // W2-5 (design/riddle-trail.md § "Reward lines"): shown once this screen session's own
+    // advance() call fires -- same shape as the three creating jars' own reward-line flags.
+    var meadowTrailRewardShown by remember { mutableStateOf(false) }
+
     // Branch A: a real flagged rising edge during an active trail-watch session advances the
     // step immediately (gate-38's "stops on tap" -- here, stops on the detection itself).
     // [trailAdvancePending] is a same-session latch, not a persisted flag: it only ever needs to
@@ -266,6 +272,7 @@ fun jarWatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
             trailAdvancePending = true
             practicePlayer.stop()
             trailStore.advance(TrailStep.MEADOW)
+            meadowTrailRewardShown = true
         }
     }
 
@@ -321,6 +328,8 @@ fun jarWatchFlow(repository: FireflyRepository, trailStore: TrailStateStore, onE
         },
         watchHighlighted = trailActive,
         honestFallbackVisible = showHonestFallback,
+        trailQuestVisible = trailActive,
+        trailRewardVisible = meadowTrailRewardShown,
     )
 }
 
@@ -374,8 +383,18 @@ private fun JarWatchContent(
     // MEADOW_HONEST_FALLBACK_TIMEOUT_MS with nothing flagged -- design/riddle-trail.md's honest
     // copy plus a pointer to skip or try the singing jar for real.
     honestFallbackVisible: Boolean = false,
+    // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): true while MEADOW is the
+    // trail's active step / once this session's own MEADOW completion has fired.
+    trailQuestVisible: Boolean = false,
+    trailRewardVisible: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
+        if (trailQuestVisible) {
+            TrailQuestLine(TrailStep.MEADOW)
+        }
+        if (trailRewardVisible) {
+            TrailRewardLine(TrailStep.MEADOW)
+        }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // DESIGN_SPEC.md §5 1h "watch button" — purple-tinted, 12dp radius, the
             // primary-button tier (the watching jar has one action, not a catch/look pair).

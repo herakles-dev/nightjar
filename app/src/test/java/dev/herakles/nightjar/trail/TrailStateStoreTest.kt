@@ -227,4 +227,87 @@ class TrailStateStoreTest {
         assertTrue(state.skipped)
         assertEquals(setOf(TrailStep.ART), state.completedSteps)
     }
+
+    // ==============================================================================
+    // W2-5 (design/riddle-trail.md § "Welcome + game layer"): welcomeSeen / finaleDismissed /
+    // lastCompletedStep
+    // ==============================================================================
+
+    @Test
+    fun freshStateHasNotSeenTheWelcomeCardAndHasNoFinaleOrPulsePending() {
+        val state = newStore().state.value
+        assertFalse(state.welcomeSeen)
+        assertFalse(state.finaleDismissed)
+        assertNull(state.lastCompletedStep)
+    }
+
+    @Test
+    fun markWelcomeSeenSetsTheFlagAndPersistsIt() {
+        val store = newStore()
+        store.markWelcomeSeen()
+        assertTrue(store.state.value.welcomeSeen)
+
+        val reloaded = TrailStateStore(context, repository)
+        assertTrue("welcomeSeen must survive a fresh store instance", reloaded.state.value.welcomeSeen)
+    }
+
+    @Test
+    fun advanceRecordsLastCompletedStepAndAcknowledgeCompletionClearsIt() {
+        val store = newStore()
+        store.advance(TrailStep.ART)
+        assertEquals(TrailStep.ART, store.state.value.lastCompletedStep)
+
+        store.acknowledgeCompletion()
+        assertNull(store.state.value.lastCompletedStep)
+    }
+
+    @Test
+    fun eachAdvanceOverwritesTheHandoffToItsOwnStep() {
+        val store = newStore()
+        store.advance(TrailStep.ART)
+        store.advance(TrailStep.HUMMING)
+        assertEquals(
+            "only the most recent completion should be pending a pulse",
+            TrailStep.HUMMING,
+            store.state.value.lastCompletedStep,
+        )
+    }
+
+    @Test
+    fun lastCompletedStepIsNeverPersisted() {
+        val store = newStore()
+        store.advance(TrailStep.ART)
+        assertEquals(TrailStep.ART, store.state.value.lastCompletedStep)
+
+        val reloaded = TrailStateStore(context, repository)
+        assertNull("a pending pulse must not survive a fresh store instance", reloaded.state.value.lastCompletedStep)
+    }
+
+    @Test
+    fun dismissFinaleSetsTheFlagAndPersistsIt() {
+        val store = newStore()
+        store.dismissFinale()
+        assertTrue(store.state.value.finaleDismissed)
+
+        val reloaded = TrailStateStore(context, repository)
+        assertTrue("finaleDismissed must survive a fresh store instance", reloaded.state.value.finaleDismissed)
+    }
+
+    @Test
+    fun restartClearsWelcomeSeenFinaleDismissedAndLastCompletedStep() = runBlocking {
+        val store = newStore()
+        store.markWelcomeSeen()
+        store.advance(TrailStep.ART)
+        store.dismissFinale()
+
+        store.restart()
+
+        val state = store.state.value
+        assertFalse(
+            "restart resets welcomeSeen (design doc: \"resets everything, including welcomeSeen\")",
+            state.welcomeSeen,
+        )
+        assertFalse(state.finaleDismissed)
+        assertNull(state.lastCompletedStep)
+    }
 }
