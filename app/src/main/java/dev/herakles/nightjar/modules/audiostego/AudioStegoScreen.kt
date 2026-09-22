@@ -524,21 +524,26 @@ fun jarCatchFlow(
         onExtract = {
             debounceCatchDispatch {
                 if (trailActive) {
-                    val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.HUMMING)
-                    val practicePcm = if (practiceFile.exists()) {
-                        WavFile.decodePcm16(practiceFile.readBytes())
-                    } else {
-                        null
-                    }
-                    if (practicePcm != null) {
-                        pendingLookTechniqueOverride = AudioStegoTechnique.SPECTROGRAM_LSB
-                        controller.selectCover(practicePcm.samples)
-                        controller.extract(AudioStegoTechnique.SPECTROGRAM_LSB)
-                    } else {
-                        // Practice file not generated/readable yet -- degrade to the normal
-                        // decode rather than doing nothing; the trail step just doesn't complete.
-                        pendingLookTechniqueOverride = null
-                        controller.extract(technique)
+                    // Review finding #5 (v6/review-fix): the practice file's own read + decode
+                    // (File.readBytes + WavFile.decodePcm16) is real file I/O/CPU work -- run it
+                    // off the main thread, same discipline AcousticModemScreen.kt's SINGING trail
+                    // step already follows via its Dispatchers.IO-backed controller scope. Only
+                    // the decode moves; catch/advance/error behavior below is unchanged.
+                    coroutineScope.launch {
+                        val practicePcm = withContext(Dispatchers.IO) {
+                            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.HUMMING)
+                            if (practiceFile.exists()) WavFile.decodePcm16(practiceFile.readBytes()) else null
+                        }
+                        if (practicePcm != null) {
+                            pendingLookTechniqueOverride = AudioStegoTechnique.SPECTROGRAM_LSB
+                            controller.selectCover(practicePcm.samples)
+                            controller.extract(AudioStegoTechnique.SPECTROGRAM_LSB)
+                        } else {
+                            // Practice file not generated/readable yet -- degrade to the normal
+                            // decode rather than doing nothing; the trail step just doesn't complete.
+                            pendingLookTechniqueOverride = null
+                            controller.extract(technique)
+                        }
                     }
                 } else {
                     pendingLookTechniqueOverride = null

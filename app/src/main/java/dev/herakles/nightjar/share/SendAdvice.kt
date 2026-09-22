@@ -57,3 +57,48 @@ fun sendAdviceStringRes(kind: OutgoingKind): Int = when (kind) {
  */
 fun sturdyRefusalMessage(context: Context, longSide: Int): String =
     context.getString(R.string.send_refusal_too_small, longSide, STURDY_MIN_COVER_LONG_SIDE_PX)
+
+/**
+ * Real outgoing MIME type + file extension for an EXISTING caught firefly's own stored carrier
+ * (adversarial review finding #3, v6/review-fix). [outgoingKindFor] only ever resolves an
+ * "AUDIO" `carrierKind` to [OutgoingKind.AUDIO], whose [OutgoingKind.mimeType]/
+ * [OutgoingKind.fileExtension] are fixed at audio/wav -- correct for the acoustic modem's/
+ * audio-stego's own genuinely-WAV catches and for both techniques' freshly-CREATED records
+ * (this app's own new encodes are always exactly what [OutgoingKind] says by construction), but
+ * wrong for a modem firefly caught from a compressed voice note
+ * ([dev.herakles.nightjar.incoming.IncomingRouter.routeCompressedAudio]): that firefly's
+ * ORIGINAL compressed bytes are persisted under their own real extension via
+ * [dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore] -- exporting it as audio/wav
+ * mislabels bytes that are still M4A/MP3/etc.
+ *
+ * Derives the real extension from [mediaPath]'s own suffix (the content-addressed filename
+ * [dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore.write] returns) rather than
+ * trusting [kind] alone -- this is the "share/keep an existing caught firefly" path only;
+ * [kind]'s own role for a fresh encode is untouched (this function isn't called there).
+ *
+ * Only [OutgoingKind.AUDIO] is ever affected -- an image kind's carrier extension is always jpg/
+ * png already by construction, so this returns [kind]'s own values unchanged for both image
+ * kinds. Falls back to [kind]'s own (audio/wav, wav) when [mediaPath] is null/blank or its
+ * extension isn't recognized in [AUDIO_EXTENSION_MIME_TYPES] -- which is every genuinely-WAV
+ * audio firefly, so today's behavior is unchanged for every path that's actually WAV.
+ */
+internal fun outgoingMimeAndExtensionFor(kind: OutgoingKind, mediaPath: String?): Pair<String, String> {
+    if (kind != OutgoingKind.AUDIO) return kind.mimeType to kind.fileExtension
+    val extension = mediaPath?.substringAfterLast('.', "")?.lowercase()?.takeIf { it.isNotEmpty() }
+    val mime = extension?.let { AUDIO_EXTENSION_MIME_TYPES[it] }
+    return if (mime != null && extension != null) mime to extension else kind.mimeType to kind.fileExtension
+}
+
+/** Extension -> MIME lookup backing [outgoingMimeAndExtensionFor] -- every compressed container
+ *  the acoustic modem can catch a firefly from (`AudioStegoScreen.kt`'s own "m4a/ogg/opus/mp3/
+ *  amr" KDoc, `IncomingRouter.routeCompressedAudio`'s matching list), plus "wav" itself so a
+ *  genuinely-WAV audio firefly resolves identically whether it hits this map or falls through to
+ *  [kind]'s own default. */
+private val AUDIO_EXTENSION_MIME_TYPES: Map<String, String> = mapOf(
+    "wav" to "audio/wav",
+    "m4a" to "audio/mp4",
+    "mp3" to "audio/mpeg",
+    "ogg" to "audio/ogg",
+    "opus" to "audio/opus",
+    "amr" to "audio/amr",
+)

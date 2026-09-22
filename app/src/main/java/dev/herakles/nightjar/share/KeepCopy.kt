@@ -26,17 +26,31 @@ import java.io.IOException
  * succeeds), same pattern `saveBitmapAsPngToMediaStore` already established, so a half-written
  * file is never visible to the gallery or a share target mid-write. Throws [IOException] on
  * failure so the caller's own `runCatching`/try-catch surfaces a real reason.
+ *
+ * [mimeType]/[extension] default to [kind]'s own [OutgoingKind.mimeType]/
+ * [OutgoingKind.fileExtension] -- every existing caller (a fresh encode) keeps getting exactly
+ * that. Review finding #3 (v6/review-fix): "keep a copy" of an EXISTING caught firefly
+ * (`JarDetailScreen.kt`) passes the firefly's own real on-disk values instead
+ * (`dev.herakles.nightjar.share.outgoingMimeAndExtensionFor`), so a modem firefly caught from a
+ * compressed voice note keeps its real container/MIME type instead of being mislabeled
+ * audio/wav.
  */
-fun keepOutgoingCopy(context: Context, bytes: ByteArray, kind: OutgoingKind): Uri {
+fun keepOutgoingCopy(
+    context: Context,
+    bytes: ByteArray,
+    kind: OutgoingKind,
+    mimeType: String = kind.mimeType,
+    extension: String = kind.fileExtension,
+): Uri {
     val resolver = context.contentResolver
-    val displayName = "nightjar_${System.currentTimeMillis()}.${kind.fileExtension}"
+    val displayName = "nightjar_${System.currentTimeMillis()}.$extension"
     return when (kind) {
         OutgoingKind.AUDIO -> writeToMediaStore(
             resolver = resolver,
             collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
             relativePath = "${Environment.DIRECTORY_MUSIC}/Nightjar",
             displayName = displayName,
-            mimeType = kind.mimeType,
+            mimeType = mimeType,
             bytes = bytes,
         )
         OutgoingKind.IMAGE_EXACT, OutgoingKind.IMAGE_STURDY -> writeToMediaStore(
@@ -44,7 +58,7 @@ fun keepOutgoingCopy(context: Context, bytes: ByteArray, kind: OutgoingKind): Ur
             collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
             relativePath = "${Environment.DIRECTORY_PICTURES}/Nightjar",
             displayName = displayName,
-            mimeType = kind.mimeType,
+            mimeType = mimeType,
             bytes = bytes,
         )
     }
