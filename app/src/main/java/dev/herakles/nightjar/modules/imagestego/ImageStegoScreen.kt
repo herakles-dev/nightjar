@@ -66,8 +66,10 @@ import dev.herakles.nightjar.SturdyImageCarrier
 import dev.herakles.nightjar.encodeSturdyJpeg
 import dev.herakles.nightjar.prepareSturdyCover
 import dev.herakles.nightjar.toBitmap
+import dev.herakles.nightjar.incoming.FileSniffer
 import dev.herakles.nightjar.incoming.IncomingOutcome
 import dev.herakles.nightjar.incoming.IncomingPipeline
+import dev.herakles.nightjar.incoming.SniffedType
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.modules.fireflyjar.HideInPhotoFlow
@@ -204,7 +206,15 @@ sealed interface StegoStatus {
     data class Embedded(val payloadBytes: Int) : StegoStatus
     data class ExtractedSuccess(val text: String) : StegoStatus
     data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : StegoStatus
-    data class Analyzed(val result: DetectionResult) : StegoStatus
+    // v6 (task W2-6, gate on the check's honest caveat): [coverWasLossyContainer] snapshots
+    // whether the image actually checked traced back to a picked photo whose real container
+    // (sniffed by magic bytes, not a declared MIME/extension) was JPEG/WebP/HEIC -- SturdyImage
+    // SteganalysisRealPhotoTest.kt's real-photo measurement found this check's flagged/clear
+    // reading on a JPEG is often just that photo's own JPEG-quantization pattern, not a signal
+    // that anything is hidden. Defaults false so every existing call site (all @Preview
+    // functions, the jar-disguised "peek inside" flow) keeps compiling/behaving unchanged --
+    // same "codec-M01" precedent as this file's other optional params.
+    data class Analyzed(val result: DetectionResult, val coverWasLossyContainer: Boolean = false) : StegoStatus
 
     /**
      * S-01 defense in depth: an embed/extract/check attempt ran out of memory mid-operation
@@ -285,6 +295,14 @@ fun ImageStegoScreen(
     // picked cover actually had transparency and got flattened onto an opaque background --
     // never touched for the two bundled sample covers, which are already opaque.
     var coverImportNotice by remember { mutableStateOf<String?>(null) }
+    // v6 (task W2-6, gate-30 follow-up): whether the CURRENT cover's real container (sniffed by
+    // magic bytes at pick time, never a declared MIME/extension) is JPEG/WebP/HEIC -- false for
+    // both bundled sample covers (always PNG resources) and reset whenever a fresh cover is
+    // picked. Feeds "check for hidden data"'s honest caveat (SturdyImageSteganalysisRealPhotoTest
+    // .kt's measured false-flag rate on real JPEG photos), never used for anything else -- this
+    // screen still never keeps the picked Uri/original bytes around (decodePickedCoverImage's own
+    // "discard the original format" contract, this file's top KDoc), only this one display bit.
+    var pickedCoverIsLossyContainer by remember { mutableStateOf(false) }
     var saveStatus: SaveStatus by remember { mutableStateOf<SaveStatus>(SaveStatus.Idle) }
 
     val pickCoverScope = rememberCoroutineScope()
@@ -296,6 +314,11 @@ fun ImageStegoScreen(
         coverLoadError = null
         coverImportNotice = null
         pickCoverScope.launch {
+            // v6 (task W2-6): sniffed alongside the decode, off the main thread -- a few header
+            // bytes only (see sniffPickedCoverContainer), never the full file, and never kept
+            // anywhere but this one boolean (decodePickedCoverImage's own KDoc: "nothing left
+            // pointing at the original lossy file").
+            val lossyContainer = withContext(Dispatchers.IO) { sniffPickedCoverIsLossy(context, uri) }
             val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
             isCoverLoading = false
             if (decoded == null) {
@@ -308,6 +331,7 @@ fun ImageStegoScreen(
                     coverImportNotice = "that image had transparent areas — they were filled in " +
                         "so the hidden data survives on this device."
                 }
+                pickedCoverIsLossyContainer = lossyContainer
                 coverSource = CoverSource.Picked(flattened)
             }
         }
@@ -405,7 +429,11 @@ fun ImageStegoScreen(
         isCoverLoading = isCoverLoading,
         coverLoadError = coverLoadError,
         coverImportNotice = coverImportNotice,
-        onSelectSample = { coverSource = CoverSource.Sample(it) },
+        onSelectSample = {
+            // v6 (task W2-6): both bundled sample covers are PNG resources -- never lossy.
+            pickedCoverIsLossyContainer = false
+            coverSource = CoverSource.Sample(it)
+        },
         onPickFromDevice = {
             pickCoverImage.launch(
                 PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -425,7 +453,9 @@ fun ImageStegoScreen(
             controller.embed(embedCover, payloadText.encodeToByteArray())
         },
         onExtract = { controller.extract(controller.workingBitmap ?: coverBitmap) },
-        onCheck = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+        onCheck = {
+            controller.analyze(controller.workingBitmap ?: coverBitmap, pickedCoverIsLossyContainer)
+        },
         saveStatus = saveStatus,
         hasEmbeddedPayload = controller.hasEmbeddedPayload,
         onSave = onSave,
@@ -1411,7 +1441,7 @@ private fun StatusBlock(status: StegoStatus) {
             style = MaterialTheme.typography.bodyLarge,
             color = TextSecondary,
         )
-        is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+        is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result, coverWasLossyContainer = status.coverWasLossyContainer)
         is StegoStatus.Failed -> Text(
             text = status.message,
             style = MaterialTheme.typography.bodyLarge,
@@ -1470,9 +1500,16 @@ private fun SaveStatusBlock(status: SaveStatus, technique: ImageTechnique = Imag
  * line (real chi-square window/run output, e.g. "sustained PoV-equalization run: 5/32
  * windows...") is the one deliberate rough edge on this screen, the same move task #7/#10 made
  * with the modem's FEC count and the detector's tone-grid note.
+ *
+ * [coverWasLossyContainer] (task W2-6, gate-30 follow-up): true once the checked cover's real
+ * container was sniffed as JPEG/WebP/HEIC. `ImageSteganalysisRealPhotoFalseFlagTest.kt` measured
+ * this check's false-flag rate on clean, never-embedded real photos per container -- material
+ * enough on JPEG that the verdict alone is misleading there, so this renders one honest caveat
+ * line underneath it. The verdict itself (confidence/flagged/detail/estimate above) is always
+ * shown unchanged -- this never hides or downgrades a flag, only explains it.
  */
 @Composable
-private fun AnalyzedBlock(result: DetectionResult) {
+private fun AnalyzedBlock(result: DetectionResult, coverWasLossyContainer: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = "${(result.confidence * 100).roundToInt()}%",
@@ -1494,6 +1531,13 @@ private fun AnalyzedBlock(result: DetectionResult) {
         result.estimatedPayloadBytes?.let { bytes ->
             Text(
                 text = "~$bytes bytes estimated",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        if (coverWasLossyContainer) {
+            Text(
+                text = stringResource(R.string.workshop_image_check_jpeg_caveat),
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
             )
@@ -1643,15 +1687,20 @@ class ImageStegoController(
     /** Score [sample] for the likelihood it holds an embedded payload. No-op while busy. Same
      *  synchronous-gate discipline as [embed] — see its KDoc, including the S-01
      *  [OutOfMemoryError] catch ([ImageSteganalysis]'s per-pixel channel-sample array is the
-     *  largest single allocation in this file's whole embed/extract/check pipeline). */
-    fun analyze(sample: Bitmap) {
+     *  largest single allocation in this file's whole embed/extract/check pipeline).
+     *  [coverWasLossyContainer] (task W2-6) is a plain caller-supplied snapshot of whether the
+     *  current cover's real container (sniffed by magic bytes) was JPEG/WebP/HEIC -- this
+     *  controller does no sniffing itself, only carries the flag into [StegoStatus.Analyzed] so
+     *  the honest caveat renders against the state that produced the verdict, not whatever cover
+     *  happens to be selected by the time the result is drawn. */
+    fun analyze(sample: Bitmap, coverWasLossyContainer: Boolean = false) {
         if (!idleEquivalent) return
         status = StegoStatus.Analyzing
         scope.launch {
             status = try {
                 val result = detector.analyze(sample)
                 DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
-                StegoStatus.Analyzed(result)
+                StegoStatus.Analyzed(result, coverWasLossyContainer)
             } catch (oom: OutOfMemoryError) {
                 StegoStatus.Failed(OOM_ERROR_MESSAGE)
             }
@@ -1765,6 +1814,36 @@ internal fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
 } catch (oom: OutOfMemoryError) {
     null
 }
+
+/**
+ * Sniffs whether [uri]'s real container (by magic bytes, via [FileSniffer.sniff] — the same
+ * receive-path sniffer `IncomingPipeline` uses, never a declared MIME/extension) is JPEG, WebP or
+ * HEIC (task W2-6, gate-30 follow-up: the "check for hidden data" honest caveat). Reads only a
+ * handful of header bytes off their own short-lived stream — this does not weaken
+ * [decodePickedCoverImage]'s "nothing left pointing at the original lossy file" contract just
+ * above: the Uri/bytes themselves are never kept past this call, only the single boolean this
+ * returns, for *display* only (whether to show a caveat under a later check verdict), never to
+ * reconstruct or re-embed against the original file.
+ */
+internal fun sniffPickedCoverIsLossy(context: Context, uri: Uri): Boolean {
+    val head = try {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            val buffer = ByteArray(SNIFF_HEADER_BYTES)
+            val read = stream.read(buffer)
+            if (read <= 0) ByteArray(0) else buffer.copyOf(read)
+        }
+    } catch (failure: Exception) {
+        null
+    } ?: ByteArray(0)
+    return when (FileSniffer.sniff(head)) {
+        SniffedType.JPEG, SniffedType.WEBP, SniffedType.HEIF -> true
+        else -> false
+    }
+}
+
+/** Comfortably covers every magic-byte pattern [FileSniffer.sniff] checks (the longest is the
+ *  12-byte RIFF/ISO-BMFF brand check). */
+private const val SNIFF_HEADER_BYTES = 32
 
 /**
  * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings the post-scale long
