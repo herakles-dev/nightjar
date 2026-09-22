@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -76,7 +75,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import dev.herakles.nightjar.ui.theme.withTapAffordance
+import dev.herakles.nightjar.ui.theme.workshopButton
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -610,14 +609,13 @@ fun DetectorContent(
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable { onBack() }
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -681,13 +679,12 @@ private fun ActionRow(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .clickable(onClick = onClick),
+            .workshopButton(onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+            style = MaterialTheme.typography.labelLarge,
             color = TextPrimary,
         )
     }
