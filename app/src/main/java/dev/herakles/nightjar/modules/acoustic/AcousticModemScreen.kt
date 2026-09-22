@@ -101,6 +101,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.withTapAffordance
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -1138,7 +1139,7 @@ fun AcousticModemContent(
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -1265,7 +1266,7 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }
@@ -1339,7 +1340,7 @@ private fun SettingOptionRow(label: String, selected: Boolean, enabled: Boolean,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
             color = if (selected) TextPrimary else TextSecondary,
         )
     }

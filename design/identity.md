@@ -114,6 +114,79 @@ unused slot (see `Type.kt` for the full collapse list).
 
 ---
 
+## Tappable-vs-static affordance (2026-09-22)
+
+Owner report: on the five technical screens (module picker, acoustic modem, image
+steganography, audio steganography, detector), users could not tell which text was
+tappable versus purely informational. The diagnosis held up: `ActionRow`/`CoverRow`
+(and their equivalents in every other technical screen file) render their **enabled**
+tappable label in `labelLarge`/`TextPrimary` — the exact color `StatusBlock`'s static
+result text also uses (a different type slot, `bodyLarge`, but the same color, which is
+what a quick glance actually registers). A **disabled** row drops to `TextSecondary` —
+the same color static secondary captions and descriptions already use. Color was being
+asked to carry three things at once (selection state, enabled/disabled state, and
+tappability) when it was only ever reserved for the first two.
+
+**Decision:** a plain `TextDecoration.Underline`, applied through one shared primitive,
+`TextStyle.withTapAffordance(tappable: Boolean = true)` in
+`ui/theme/TappableText.kt`, reserved exclusively for text the user can act on *right
+now*. Never applied to static/informational text, status words, or a row while it's
+disabled.
+
+Considered and rejected:
+- **A trailing glyph** (e.g. a `›` appended to the label). Rejected: roughly half the
+  rows this needs to cover are *selection* rows (`CoverRow`, `SettingOptionRow`,
+  `SelectorRowWithInfo`'s option rows) rather than navigation rows — a forward-chevron
+  on "cover image: mosaic" promises a drill-down that tapping it doesn't do (it just
+  selects the option in place). One glyph, one meaning, wrong on half its own
+  applications is worse than the ambiguity it would fix.
+- **A new or reassigned color.** Rejected on the same discipline the accent-color
+  decision above holds itself to: `AccentSignal` earns its existence with a measured
+  contrast ratio and exactly two named states. This affordance has to sit on top of
+  the selected/unselected and enabled/disabled color logic every row already carries,
+  not replace or compete with it — a third color axis stacked on two already-overloaded
+  ones would make the palette harder to reason about, not easier.
+- **Underline** was the one option that costs nothing new in the palette: no icon or
+  vector asset, no shadow/glow/gradient, no motion, and it is the oldest, plainest
+  "this is a link" convention there is — older than the Material-3-sample look this
+  project exists to avoid, not an imitation of it.
+
+**Disabled rows get no distinct treatment of their own beyond losing the underline** —
+they keep rendering exactly like static secondary text, which this task treats as the
+correct reading rather than a gap: a disabled row is not actionable right now, so
+looking like static text is honest, not a missed case. A separate "disabled but not
+quite static" visual tier would be a fourth signal for a state this pass wasn't asked
+to solve, and it's the kind of speculative decoration the "one rough edge, not a
+polished one" discipline elsewhere in this file argues against adding pre-emptively.
+
+Applied to every enabled tappable row on all five technical screens: `ModulePicker`'s
+three module rows (label only — each row's one-line description stays plain, matching
+the rule that the affordance marks the actionable word, not the whole row) plus its
+"back to the jar" and "start the trail again" links; `AcousticModemScreen`'s
+`ActionRow`/`SettingOptionRow` rows and its "back" link; `ImageStegoScreen`'s
+`ActionRow`/`CoverRow` rows and its "back" link; `AudioStegoScreen`'s `ActionRow`,
+`PlaybackVerb`, `SelectorRowWithInfo` (both its option label and its "?"/"close" info
+toggle), `SectionLabelRow`'s info toggle, and its "back" link; `DetectorScreen`'s
+listen/stop `ActionRow` and its "back" link. Rows with no `enabled` concept of their own
+(back links, the detector's listen/stop row, the info toggles) pass no argument and
+resolve to the primitive's default (`tappable = true`).
+
+**Explicitly not touched:** the Firefly Jar surface (`JarActionRow`, `JarCoverRow`,
+`JarFlowRow`, `JarSelectorRow`, `JarOptionRow`, and everything else under
+`design/firefly-jar-identity.md`'s doctrine). That surface already signals its tappable
+rows with tinted fill + border, has its own visual language by explicit owner
+direction, and this task's scope is the technical screens only. The fullscreen-image
+tap target (`ImageStegoScreen`'s cover preview, `FullscreenImageViewer.kt`) was also
+left alone — it's an `Image`, not `Text`, so a text-decoration primitive doesn't apply
+to it, and it already has its own owner-requested corner glyph affordance from a prior
+task, outside this pass's "text-only" brief.
+
+No new color token was needed — see § Palette above for why introducing one was
+rejected. `Type.kt` was not touched; the primitive operates on whatever `TextStyle` a
+row already resolves to, rather than adding a new type-scale slot.
+
+---
+
 ## Compose theme wiring
 
 `NightjarTheme` in `app/src/main/java/dev/herakles/nightjar/ui/theme/Theme.kt`:
@@ -265,6 +338,29 @@ variable names (`c2` as a cosine-wave term, `Stage C2` internal task labeling). 
 string (`"the ravens have landed"`, `"wet-snacks-design"`); the user always supplies the
 real payload. INV-1 (synthetic/benign payloads only) still holds.
 
+**Re-run 2026-09-22 (tappable-vs-static affordance): re-checked all items against the new
+`ui/theme/TappableText.kt` primitive and its five call sites** (`ModulePicker.kt`,
+`AcousticModemScreen.kt`, `ImageStegoScreen.kt`, `AudioStegoScreen.kt`,
+`DetectorScreen.kt`):
+- No shimmer/glow/bloom, no gradient, no shadow — `TextDecoration.Underline` is a
+  static text-style flag, not a drawn effect; nothing in `TappableText.kt` touches
+  `Brush`, `graphicsLayer`, or any shadow modifier.
+- No new color — the primitive never sets `color`; every row's existing selected/
+  enabled color logic (`TextPrimary`/`TextSecondary`) is untouched, confirmed by the
+  `TappableTextTest`'s "only the decoration changes" case.
+- No icon/vector asset — the affordance lives entirely inside `TextStyle`, no `Icon`
+  composable, no drawable, no `Canvas` glyph added anywhere.
+- No motion — the underline is present or absent per composition, no animated
+  reveal, no `Crossfade`, no tween; no new `androidx.compose.animation` usage was
+  introduced by this change.
+- No card/glassmorphism — this change adds no new surface, only a text-style flag on
+  existing plain `Text`/`Box` rows.
+- Doesn't leak into jar mode — grepped every edited file's diff for `Jar` (functions,
+  imports, colors); zero touches to `JarActionRow`, `JarCoverRow`, `JarFlowRow`,
+  `JarSelectorRow`, `JarOptionRow`, `JarType`, or any `firefly-jar-identity.md` token.
+Zero violations found. This is the first checklist re-run to cover the tappable-
+affordance decision; nothing prior addressed tappability signaling at all.
+
 ---
 
 ## Change log
@@ -297,6 +393,7 @@ real payload. INV-1 (synthetic/benign payloads only) still holds.
 | 2026-08-03 | **Task #27.** Acoustic modem's `listening` state now shows a live input-level readout (`input level N dB`, RMS dBFS, ~85ms update cadence) and a remaining-time countdown (`Ns left in listen window`) as two labelSmall/TextSecondary rows under the status word. `DecodedFailure` gained a `timedOut` flag, giving the `NO_PAYLOAD_FOUND` case a more specific message when the full 20s window elapses with nothing decoded ("no signal detected in 20s. move phones closer and confirm the other phone actually transmitted.") vs. an early manual stop (unchanged shorter message). | Real two-phone test feedback: the person running it had no way to tell whether "listen" was picking anything up, how long the window would run, or why it failed — the screen just sat there. Both additions are plain numeric text at the same throttled cadence the detector's live confidence readout already established (Task #10) — no meter, no gauge, no animation added; the accent/motion/palette decisions this task ratified are unchanged. |
 | 2026-08-03 | **Task #28.** Added one line of static, first-run guidance text to all four screens, all labelSmall/TextSecondary, all present-always (not tied to a live state): (1) module picker — each of the 3 rows gained a one-line `description` under its label ("send text as sound, phone to phone" / "hide or extract text inside an image" / "continuously listens for the modem's signal"), rows changed from a fixed-height `Row` to a wrap-content `Column` to fit the second line; (2) acoustic modem — "works best within 1m, in a quiet room." under the title, sourced from architecture.md §7's AUDIBLE-protocol round-trip envelope (speaker→mic ≤1.0m, ambient noise <45 dBA), not a made-up number; (3) image steganography — one caption above the embed/extract/check row group explaining what each of the three verbs does; (4) detector — one line under the title explaining the confidence number is a live match score against the modem's own signal and that it runs continuously/passively (never decodes). | Real user feedback: the app wasn't usable for a first-time user — no idea what distance to use, what the byte counters meant, or what a confidence number implied. All four additions are plain static text, no dialogs, no onboarding carousel, no tooltip/popover — matches the "terse inline text, not tutorial overlays" instruction and the existing screens' own established micro-copy voice (bare lowercase sentences, no exclamation, real numbers over vague ones). None of Task #27's live listening-state additions (level readout, countdown) were touched or duplicated — the new modem note sits above the payload field, entirely separate from `ListeningBlock`. |
 | 2026-09-21 | **Gate-9/gate-14 close-out.** Re-ran the full anti-AI-tell checklist against Module 2 (`AudioStegoScreen.kt`, including its v5 detector wiring), `CarrierInsightViews.kt`'s v5 difference/polarity views, and the owner-requested `FullscreenImageViewer.kt` — none of which the 2026-08-03 Task #17 pass above could have covered. Also re-checked INV-1 (synthetic/benign payloads only) against the full `app/src/main/java`/`app/src/test/java` tree. | Gate-9 has required this re-run since Module 2 shipped (v2 addition) but it was never actually recorded as done. Zero violations found on either check; see Anti-AI-tell status above for the item-by-item results. |
+| 2026-09-22 | **Workshop tappable-vs-static affordance.** Added `TextStyle.withTapAffordance(tappable: Boolean = true)` (`ui/theme/TappableText.kt`) — a plain `TextDecoration.Underline`, reserved exclusively for enabled tappable row labels. Applied across all five technical screens: `ModulePicker`'s module rows (label only) + "back to the jar"/"start the trail again" links; `AcousticModemScreen`'s `ActionRow`/`SettingOptionRow` + "back"; `ImageStegoScreen`'s `ActionRow`/`CoverRow` + "back"; `AudioStegoScreen`'s `ActionRow`/`PlaybackVerb`/`SelectorRowWithInfo` (label + info toggle)/`SectionLabelRow` (info toggle) + "back"; `DetectorScreen`'s listen/stop `ActionRow` + "back". No new color token, no icon, no motion. Firefly Jar mode (`Jar*` composables) untouched — it already signals tappability with tinted fill/border per its own doctrine. | Owner report: users couldn't tell tappable text from static text on the technical screens — `ActionRow`'s enabled label and `StatusBlock`'s static result text shared the same `TextPrimary` color, and a disabled row already shared `TextSecondary` with static secondary captions. Underline was chosen over a trailing glyph (wrong semantics on the screens' many *selection* rows, which don't drill down) and over a new/reassigned color (would stack a third meaning onto color axes already carrying selection-state and enabled-state). Disabled rows deliberately get no distinct treatment beyond losing the underline — a disabled row genuinely isn't actionable right now, so reading identically to static text is honest, not a gap. See § Tappable-vs-static affordance above for the full rationale and the Anti-AI-tell status re-run this task closes out. |
 
 ---
 
@@ -342,3 +439,23 @@ No clutter, no overlap, no truncation on any of the four screens at real device
 resolution (1080x2400). Screenshots not committed to the repo (raw device captures
 land in `~/pixel6a/captures/`, outside this project's tree, matching prior tasks'
 practice of not vendoring capture PNGs into `design/assets/`).
+
+---
+
+## Verification (Workshop tappable-vs-static affordance, 2026-09-22)
+
+`./gradlew --console=plain -q testDebugUnitTest assembleDebug` — **succeeded on the
+first attempt.** `534` JVM unit tests ran, `0` failed (4 of them new, in
+`TappableTextTest.kt`); `app-debug.apk` produced at
+`app/build/outputs/apk/debug/`.
+
+No Paparazzi/Roborazzi/AGP Screenshot Testing is configured in this project (unchanged
+since Task #17's verification note), so — same as every prior visual task recorded in
+this changelog — build-level verification (every screen file, including its
+`@Preview` composables, compiling clean) plus the pure-Kotlin unit test on the shared
+primitive is what this pass relies on. Not verified live on-device this pass; the
+underline is a one-line, well-understood `TextStyle` change with no layout, sizing, or
+z-order implications, and every row's existing color/enabled logic is provably
+untouched (`TappableTextTest`'s "only the decoration changes" case) — the same
+risk profile prior instant-motion and type-scale decisions in this file relied on
+`assembleDebug` alone for.

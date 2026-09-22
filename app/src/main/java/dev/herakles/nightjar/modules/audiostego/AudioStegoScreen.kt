@@ -92,6 +92,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.withTapAffordance
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -952,7 +953,7 @@ fun AudioStegoContent(
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -1205,7 +1206,7 @@ private fun SelectorRowWithInfo(
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
                 color = if (selected) TextPrimary else TextSecondary,
             )
         }
@@ -1218,7 +1219,7 @@ private fun SelectorRowWithInfo(
         ) {
             Text(
                 text = if (infoExpanded) "close" else "?",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelSmall.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -1249,7 +1250,7 @@ private fun SectionLabelRow(label: String, infoLabel: String, infoExpanded: Bool
         ) {
             Text(
                 text = if (infoExpanded) "close" else infoLabel,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelSmall.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -1351,7 +1352,7 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }
@@ -1401,7 +1402,7 @@ private fun PlaybackVerb(label: String, enabled: Boolean, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }

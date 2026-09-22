@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.R
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.withTapAffordance
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -106,7 +107,11 @@ fun ModulePicker(
                 .padding(horizontal = 24.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text(text = "back to the jar", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+            Text(
+                text = "back to the jar",
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                color = TextSecondary,
+            )
         }
         Text(
             text = "nightjar",
@@ -128,7 +133,7 @@ fun ModulePicker(
         ) {
             Text(
                 text = stringResource(R.string.trail_restart),
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -149,7 +154,7 @@ private fun ModuleRow(module: Module, onClick: () -> Unit) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(
                 text = module.label,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyLarge.withTapAffordance(),
                 color = TextPrimary,
             )
             Text(

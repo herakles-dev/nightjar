@@ -76,6 +76,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.withTapAffordance
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -616,7 +617,7 @@ fun DetectorContent(
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
                 color = TextSecondary,
             )
         }
@@ -686,7 +687,7 @@ private fun ActionRow(label: String, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.withTapAffordance(),
             color = TextPrimary,
         )
     }
