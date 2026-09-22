@@ -112,6 +112,13 @@ anywhere in the covert-data research base.
     views (deferred follow-up #12) and for every guidance highlight; all v6 copy
     in `strings.xml`; MFSK's "lossy-channel robust" claim measured against real
     codecs and corrected to the result.
+  - **Welcome + game layer** (owner direction, 2026-09-22) — an in-place welcome card on
+    first launch, a six-dot progress constellation for the trail, a one-line quest on each
+    step's screen, a reward line with a soft halo pulse when a step completes, and a finale.
+    It's a quest feel with no scores, badges, carousel or mascot, and copy lives in
+    `design/riddle-trail.md` § Welcome + game layer. Verb rule app-wide: you *create*
+    fireflies and *catch* other people's; "catch" never describes making one. The trail's
+    send step teaches creating one of your own ("hide one in a photo")
   - **The meadow** — the detector's tile, "the watching jar", becomes "the
     meadow" in all user-facing copy (it never keeps a firefly, it only notices
     them), and moves to 4th on the shelf, swapping with the humming jar, so the
@@ -475,7 +482,13 @@ anywhere in the covert-data research base.
   `Module.entries`; nothing persists an enum ordinal (verified before the reorder),
   so stored fireflies keep their jars; the meadow tile's visual treatment follows
   the v6 design addendum; verified on Hek
-- gate-40: safety and close — safety-scope checklist re-run (INV-1 benign
+- gate-40: welcome + game layer + verb rule — a fresh install shows the welcome card;
+  `begin` starts the trail and `skip` skips it; the constellation shows `N of 6` and pulses
+  one dot per completed step (static with animations off, TalkBack-readable); each step shows
+  its quest line and, on completion, its reward line; the finale lights all six. No
+  user-facing string uses catch/caught for creating a firefly (grep-backed JVM test on
+  "catch a firefly" and on creation-success copy), and creation success reads "you created one"
+- gate-41: safety and close — safety-scope checklist re-run (INV-1 benign
   payloads, INV-10 no network or storage permission, and a review of the new
   incoming-intent surface for malformed and oversized files); `architecture.md`,
   `design/screen-flow.md` and `design/firefly-jar-identity.md` reconciled with the

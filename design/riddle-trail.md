@@ -407,3 +407,68 @@ reason (a future reorder of the trail shouldn't silently remap anyone's in-progr
   not shipped as pre-encoded assets. INV-11 holds either way (the text is only ever shown
   from a decode); runtime generation keeps the wording editable in one place and ready for
   translation.
+
+## Welcome + game layer (owner direction, 2026-09-22)
+
+Owner feedback on the first on-device pass: "should probably have some guiding welcome text for
+the users so they understand. the glow is a good start. make it feel like a game kindof." The
+owner chose **trail with progress + rewards**: a quest feel, with no scores or badges. It stays
+inside the jar identity: lowercase, no exclamation marks, no emoji, no checkmark glyphs, no
+carousel or mascot. Every celebration is drawn with the existing glow primitives.
+
+### Verb rule (owner direction, applies app-wide)
+
+You **create** fireflies (embedding: amber) and **catch** other people's (decoding or
+receiving: cyan). "catch" never describes making one. The embed verb "catch a firefly"
+becomes **"create a firefly"**, and creation success reads **"you created one — N bytes"**.
+"look for fireflies", "catch from a photo or file" and "you caught one" stay, because those
+are receiving.
+
+### Welcome card (first launch, on the shelf, in place, not a modal)
+
+Shown above the jars while the trail hasn't been begun or skipped (`welcomeSeen` flag in the
+trail store).
+
+- title: `welcome to the night jar`
+- body: `every firefly here carries a hidden message. three practice fireflies are hiding in the jars. find them to learn how it works, then create your own and send it to a friend.`
+- actions: `begin` (dismisses the card; the art jar starts glowing) · `skip` (skips the trail)
+
+### Progress constellation (under the wordmark while the trail is active)
+
+Six small firefly dots, one per step, plus `trail` and `N of 6`. A completed step's dot is lit
+amber and the rest are dim. When a step completes, its dot does one soft halo pulse
+(`drawAmbientHalo`/`fireflyAlpha`, ~800 ms), which is static when animations are off. TalkBack
+reads: `trail, N of 6 done`.
+
+### Quest lines (one line on the active step's screen, above its actions)
+
+| step | quest line |
+|---|---|
+| art | `a practice firefly is hiding in this picture. tap look for fireflies to catch it.` |
+| humming | `a practice firefly is hiding in this recording. look for it.` |
+| singing | `a practice firefly is hiding in this song. look for it.` |
+| meadow | `the meadow notices fireflies as they pass. tap watch, and the phone will sing one for it.` |
+| send | `now create one of your own. in the art jar, hide one in a photo and send it to a friend.` |
+| workshop | `one secret left. hold the name at the top of the shelf.` |
+
+### Reward lines (shown once, where the step completed, beside the dot's pulse)
+
+| step done | reward line |
+|---|---|
+| art | `found one. the humming jar is glowing now.` |
+| humming | `found another. the singing jar is glowing now.` |
+| singing | `that's all three. the meadow is waiting.` |
+| meadow | `the meadow noticed. now create one of your own.` |
+| send | `sent. one secret left.` |
+| workshop (finale) | `the trail is done. every jar is yours now.` |
+
+At the finale all six dots are lit together. The constellation stays on the shelf until the
+user dismisses it (`close`), then hides. "start the trail again" resets everything, including
+`welcomeSeen`.
+
+### Send step change
+
+Step 5 is now **create one of your own**, not re-send the practice firefly. Its glow target is
+the art jar's `hide one in a photo` row, and it completes when the share sheet opens from
+`hide one in a photo`. Sending an existing firefly with `send this firefly` also counts, so the
+user is never stuck.
