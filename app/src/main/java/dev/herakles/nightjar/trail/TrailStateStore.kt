@@ -44,6 +44,9 @@ class TrailStateStore(
             current.copy(
                 currentStep = TrailStep.after(step),
                 completedSteps = current.completedSteps + step,
+                // W2-5: tells the shelf's progress constellation which dot should play its
+                // one-shot completion pulse next time it composes -- see acknowledgeCompletion().
+                lastCompletedStep = step,
             )
         }
     }
@@ -62,7 +65,10 @@ class TrailStateStore(
      * "Start the trail again" (design/riddle-trail.md § Start the trail again): regenerates all
      * three practice carrier files (fresh riddle text baked in, in case a translation/wording
      * update landed) via [PracticeFireflies.generate], then resets the glow to step 1 and clears
-     * [TrailState.completedSteps]/[TrailState.skipped].
+     * [TrailState.completedSteps]/[TrailState.skipped] -- and, per the W2-5 "Welcome + game
+     * layer" addendum's explicit "resets everything, including welcomeSeen," also clears
+     * [TrailState.welcomeSeen] (the welcome card shows again) and [TrailState.finaleDismissed]
+     * (the finale panel is ready to show again once all six steps are re-completed).
      *
      * [TrailState.practiceRecordIds] is deliberately NOT cleared: per the design doc, a previous
      * run's practice fireflies that were never released stay in their jar's swarm, still
@@ -78,6 +84,9 @@ class TrailStateStore(
                 completedSteps = emptySet(),
                 skipped = false,
                 practiceRecordIds = current.practiceRecordIds,
+                welcomeSeen = false,
+                finaleDismissed = false,
+                lastCompletedStep = null,
             )
         }
     }
@@ -92,6 +101,35 @@ class TrailStateStore(
     /** True if [id] was caught from a practice carrier -- drives the "a practice firefly from
      *  the trail" label (design/riddle-trail.md § Release practice fireflies). */
     fun isPractice(id: Long): Boolean = _state.value.practiceRecordIds.contains(id)
+
+    /**
+     * W2-5 (design/riddle-trail.md § Welcome card): the welcome card's `begin` action. Dismisses
+     * the card -- it only shows while [TrailState.welcomeSeen] is false and the trail isn't
+     * [TrailState.skipped] -- and, since every shelf-tile glow/wordmark hint this app already
+     * has is gated on the same flag (`JarShelfScreen.kt`'s own `trailStarted` gate), this is also
+     * the moment "the art jar starts glowing" per the design doc's own parenthetical.
+     */
+    fun markWelcomeSeen() {
+        updateState { current -> current.copy(welcomeSeen = true) }
+    }
+
+    /**
+     * W2-5 (design/riddle-trail.md § Progress constellation): the finale panel's `close` action,
+     * once every step in [TrailStep.ORDER] is in [TrailState.completedSteps]. Hides the
+     * constellation entirely until the next [restart].
+     */
+    fun dismissFinale() {
+        updateState { current -> current.copy(finaleDismissed = true) }
+    }
+
+    /**
+     * W2-5: called by the shelf's progress constellation once it has started (or, under
+     * reduce-motion, skipped) [TrailState.lastCompletedStep]'s one-shot pulse, so the same
+     * completion never pulses twice.
+     */
+    fun acknowledgeCompletion() {
+        updateState { current -> current.copy(lastCompletedStep = null) }
+    }
 
     /**
      * Releases the practice firefly at [recordId]: deletes its row (and attached media, if any)
@@ -121,6 +159,9 @@ class TrailStateStore(
         editor.putStringSet(KEY_COMPLETED_STEPS, trailState.completedSteps.map { it.id }.toSet())
         editor.putBoolean(KEY_SKIPPED, trailState.skipped)
         editor.putStringSet(KEY_PRACTICE_IDS, trailState.practiceRecordIds.map { it.toString() }.toSet())
+        editor.putBoolean(KEY_WELCOME_SEEN, trailState.welcomeSeen)
+        editor.putBoolean(KEY_FINALE_DISMISSED, trailState.finaleDismissed)
+        // lastCompletedStep is deliberately never persisted -- see TrailState's own KDoc.
         editor.apply()
     }
 
@@ -138,11 +179,17 @@ class TrailStateStore(
         val practiceRecordIds = (prefs.getStringSet(KEY_PRACTICE_IDS, emptySet()) ?: emptySet())
             .mapNotNull { it.toLongOrNull() }
             .toSet()
+        val welcomeSeen = prefs.getBoolean(KEY_WELCOME_SEEN, false)
+        val finaleDismissed = prefs.getBoolean(KEY_FINALE_DISMISSED, false)
         return TrailState(
             currentStep = currentStep,
             completedSteps = completedSteps,
             skipped = skipped,
             practiceRecordIds = practiceRecordIds,
+            welcomeSeen = welcomeSeen,
+            finaleDismissed = finaleDismissed,
+            // Never persisted -- always starts a fresh load with no pulse pending.
+            lastCompletedStep = null,
         )
     }
 
@@ -152,5 +199,7 @@ class TrailStateStore(
         const val KEY_COMPLETED_STEPS = "completed_steps"
         const val KEY_SKIPPED = "skipped"
         const val KEY_PRACTICE_IDS = "practice_record_ids"
+        const val KEY_WELCOME_SEEN = "welcome_seen"
+        const val KEY_FINALE_DISMISSED = "finale_dismissed"
     }
 }

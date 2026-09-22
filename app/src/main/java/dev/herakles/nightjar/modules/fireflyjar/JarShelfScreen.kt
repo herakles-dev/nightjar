@@ -36,9 +36,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.R
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.TrailConstellation
+import dev.herakles.nightjar.trail.TrailQuestLine
 import dev.herakles.nightjar.trail.TrailState
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.TrailWelcomeCard
 import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.trail.trailShelfTargetModule
 import dev.herakles.nightjar.trail.trailWordmarkHintRes
@@ -102,6 +105,11 @@ fun JarShelfScreen(
         onClearHistory = { coroutineScope.launch { repository.clearAll() } },
         trailState = trailState,
         onSkipTrail = { trailStore.skip() },
+        // W2-5 (design/riddle-trail.md § "Welcome + game layer"): welcome card `begin`, the
+        // constellation's one-shot pulse acknowledgement, and the finale panel's `close`.
+        onBeginTrail = { trailStore.markWelcomeSeen() },
+        onCompletionAcknowledged = { trailStore.acknowledgeCompletion() },
+        onCloseFinale = { trailStore.dismissFinale() },
     )
 }
 
@@ -128,9 +136,20 @@ fun JarShelfContent(
     // this task, so the one existing @Preview call site keeps compiling unchanged.
     trailState: TrailState? = null,
     onSkipTrail: () -> Unit = {},
+    // W2-5 (design/riddle-trail.md § "Welcome + game layer"): defaults keep every existing
+    // @Preview call site compiling unchanged, same "pure/previewable" reasoning this file's
+    // other optional trail params already follow.
+    onBeginTrail: () -> Unit = {},
+    onCompletionAcknowledged: () -> Unit = {},
+    onCloseFinale: () -> Unit = {},
 ) {
     var showClearConfirm by remember { mutableStateOf(false) }
-    val trailStep = trailState?.currentStep
+    // W2-5: the tile-glow/wordmark-hint/skip-link chrome below only starts once the welcome
+    // card's own `begin` action has fired (TrailState.welcomeSeen) -- before that, this local
+    // `trailStep` reads as null exactly like "no trail progress to show" already does, so every
+    // one of those existing `trailStep != null` branches suppresses itself for free.
+    val trailStarted = trailState?.welcomeSeen == true
+    val trailStep = if (trailStarted) trailState?.currentStep else null
     val trailHighlightedModule = trailShelfTargetModule(trailStep)
 
     JarNightSky(modifier = Modifier.fillMaxSize()) {
@@ -151,7 +170,7 @@ fun JarShelfContent(
                         active = trailStep == TrailStep.WORKSHOP,
                         description = "hold to open workshop",
                     )
-                    .padding(bottom = 24.dp),
+                    .padding(bottom = 12.dp),
             ) {
                 Text(text = "night jar", style = JarType.Wordmark, color = FireflyCreated)
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -171,6 +190,29 @@ fun JarShelfContent(
                         )
                     }
                 }
+                // W2-5 (design/riddle-trail.md § "Quest lines"): the workshop step's own quest
+                // line lives on the shelf, above its action (the long-press area above) -- this
+                // sits just below the wordmark subtitle it already shares the same Column with.
+                if (trailStep == TrailStep.WORKSHOP) {
+                    TrailQuestLine(TrailStep.WORKSHOP, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+
+            if (trailState != null) {
+                TrailConstellation(
+                    state = trailState,
+                    onCompletionAcknowledged = onCompletionAcknowledged,
+                    onCloseFinale = onCloseFinale,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                // W2-5 (design/riddle-trail.md § "Welcome card"): "above the jars", in place --
+                // a no-op composable while the card isn't due (trailWelcomeCardVisible).
+                TrailWelcomeCard(
+                    state = trailState,
+                    onBegin = onBeginTrail,
+                    onSkip = onSkipTrail,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -66,6 +66,8 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.trail.trailHighlight
@@ -382,7 +384,8 @@ fun ImageStegoScreen(
  * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
  *
  * Three actions, softened per spec.md gate-13 / screen-flow.md § Screen 7's copy-mapping table:
- *  - "catch a firefly" expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
+ *  - "create a firefly" (v6 verb rule, design/riddle-trail.md § Verb rule -- "catch" never
+ *    describes making one) expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
  *    Picker, no save/share; those stay technical-screen-only, per screen-flow.md's "what this
  *    addition deliberately does not build") + payload field inline; confirming calls the same
  *    [ImageStegoController.embed]. On [StegoStatus.Embedded], writes a
@@ -461,6 +464,12 @@ fun jarCatchFlow(
     val trailState by trailStore.state.collectAsState()
     val trailActive = trailState.currentStep == TrailStep.ART
     var pendingLookBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    // W2-5 (design/riddle-trail.md § "Reward lines"): which step's reward line this screen
+    // session has shown, once -- set the moment this screen's own advance() call fires, cleared
+    // never (a fresh visit is a fresh composable instance, so a fresh `remember` -- "shown once"
+    // per completion, not persisted across visits).
+    var artTrailRewardStep by remember { mutableStateOf<TrailStep?>(null) }
 
     // Task #19 fix, layer 2: live testing showed encode()/decode() for this codec's tiny
     // sample images complete fast enough (sub-frame) that `status` can cycle all the way back
@@ -558,6 +567,7 @@ fun jarCatchFlow(
                 if (practiceBitmap != null) {
                     trailStore.markPractice(id)
                     trailStore.advance(TrailStep.ART)
+                    artTrailRewardStep = TrailStep.ART
                 }
                 pendingLookBitmap = null
             }
@@ -613,6 +623,8 @@ fun jarCatchFlow(
                 PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
             )
         },
+        trailQuestStep = if (trailActive) TrailStep.ART else null,
+        trailRewardStep = artTrailRewardStep,
     )
 }
 
@@ -645,6 +657,13 @@ private fun JarImageStegoContent(
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
     onCatchFromFile: () -> Unit,
+    // W2-5 (design/riddle-trail.md § "Quest lines"): non-null while ART (or, once the send row
+    // exists, SEND) is the trail's active step -- shows that step's quest line above the actions
+    // below. Null (default) keeps every existing @Preview call site compiling unchanged.
+    trailQuestStep: TrailStep? = null,
+    // W2-5 (design/riddle-trail.md § "Reward lines"): non-null once this session's own ART/SEND
+    // completion has fired, until the user leaves this screen -- shown once, in place.
+    trailRewardStep: TrailStep? = null,
 ) {
     val idleEquivalent = status is StegoStatus.Idle ||
         status is StegoStatus.Embedded ||
@@ -656,12 +675,20 @@ private fun JarImageStegoContent(
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): the art jar's own step
+        // (ART) plus, once its send row exists, SEND -- above the catch/look/peek rows below.
+        if (trailQuestStep != null) {
+            TrailQuestLine(trailQuestStep)
+        }
+        if (trailRewardStep != null) {
+            TrailRewardLine(trailRewardStep)
+        }
         // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look/peek are the
         // framed jar's three stacked rows (§5 1f); the status readout below is its own section.
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Column {
                 JarActionRow(
-                    label = "catch a firefly",
+                    label = "create a firefly",
                     enabled = idleEquivalent,
                     fill = JarActionCatchFill,
                     border = JarActionCatchBorder,
@@ -714,7 +741,7 @@ private fun JarImageStegoContent(
                         // A primary confirm action, not another list row — 12dp per DESIGN_SPEC.md
                         // §3's "12px (primary buttons...)" radius tier, distinct from the 8dp rows above.
                         JarActionRow(
-                            label = "catch",
+                            label = "create",
                             enabled = canCatch,
                             fill = JarActionCatchFill,
                             border = JarActionCatchBorder,
@@ -813,13 +840,13 @@ private fun JarCoverRow(label: String, selected: Boolean, enabled: Boolean, onCl
 private fun JarStatusBlock(status: StegoStatus) {
     when (status) {
         is StegoStatus.Idle -> Unit // nothing running, nothing to report
-        is StegoStatus.Embedding -> JarStatusWord("catching")
+        is StegoStatus.Embedding -> JarStatusWord("creating")
         is StegoStatus.Extracting -> JarStatusWord("looking")
         is StegoStatus.Analyzing -> JarStatusWord("peeking")
         is StegoStatus.Embedded -> {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
-                text = "you caught one — ${status.payloadBytes} byte$plural",
+                text = "you created one — ${status.payloadBytes} byte$plural",
                 // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
                 // accented announcement, not the message body itself.
                 style = JarType.SectionLabel,

@@ -942,7 +942,7 @@ Three entry points, all landing on the same underlying pipeline (spec.md v6, gat
    MIME types. Either entry point may arrive while the app isn't running at all, or while it's
    already open on some other screen — `MainActivity`'s `onCreate` and `onNewIntent` both route
    to the same handler either way.
-3. **In-jar "catch from a photo or file"** — a fourth action row, alongside `catch a firefly`
+3. **In-jar "catch from a photo or file"** — a fourth action row, alongside `create a firefly`
    / `look for fireflies`, on **all three creating jars** (art, humming, singing) — not a
    single shared shelf-level action. Placed last in each jar's action group. It opens the
    Android Photo Picker for image MIME types or the system document picker for audio, then
@@ -963,7 +963,7 @@ Three entry points, all landing on the same underlying pipeline (spec.md v6, gat
 │  the humming jar                 │
 │  ...                              │
 │                                   │
-│  catch a firefly                 │
+│  create a firefly                │
 │  look for fireflies              │
 │  catch from a photo or file      │  ← NEW, v6 — opens Photo Picker (image/*)
 │                                   │     or document picker (audio/*); result
@@ -983,8 +983,11 @@ current Android.
 Every incoming file resolves to exactly one of these; a message is shown only after its
 checksum verifies (so "caught" is never shown on a false positive). Copy follows the existing
 voice contract (what happened, plain language, two sentences max, no exclamation) and, for
-`caught`, the existing "you caught one — N bytes" pattern already established for jar-mode
-embed success (Screen 7's copy-mapping table).
+`caught`, its own established pattern (`you caught one — N bytes, hidden in {channel}.`) —
+receiving keeps "caught" under the v6 verb rule (`design/riddle-trail.md` § Verb rule: "catch"
+never describes making one), distinct from jar-mode embed success, which now reads "you
+created one — N bytes" (Screen 7's copy-mapping table predates this rule and still shows the
+older "you caught one" embed copy as history).
 
 | Outcome | When | Jar-voice copy |
 |---|---|---|
