@@ -1099,7 +1099,7 @@ project-wide.
 ```
 ┌─────────────────────────────────┐
 │                                   │
-│   night jar                      │  ← wordmark; subtitle is trail-state-
+│   nightjar                       │  ← wordmark; subtitle is trail-state-
 │   try the art jar                │     dependent while the trail is
 │                                   │     active — see design/riddle-trail.md
 │                                   │     § Wordmark hint; reverts to "hold

@@ -37,7 +37,7 @@
     <!-- W2-5 additions: design/riddle-trail.md § "Welcome + game layer (owner direction,
          2026-09-22)" — welcome card, progress constellation, quest/reward lines, finale. All
          copy below is reproduced byte-for-byte from that section per gate-40. -->
-    <string name="trail_welcome_title">welcome to the night jar</string>
+    <string name="trail_welcome_title">welcome to the nightjar</string>
     <string name="trail_welcome_body">every firefly here carries a hidden message. three practice fireflies are hiding in the jars. find them to learn how it works, then create your own and send it to a friend.</string>
     <string name="trail_welcome_begin">begin</string>
     <string name="trail_welcome_skip">skip</string>
