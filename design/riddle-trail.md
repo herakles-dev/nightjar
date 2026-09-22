@@ -442,7 +442,7 @@ result, the detail label, the jar subtitle and the TalkBack description). Only t
 Shown above the jars while the trail hasn't been begun or skipped (`welcomeSeen` flag in the
 trail store).
 
-- title: `welcome to the night jar`
+- title: `welcome to the nightjar`
 - body: `every firefly here carries a hidden message. three practice fireflies are hiding in the jars. find them to learn how it works, then create your own and send it to a friend.`
 - actions: `begin` (dismisses the card; the art jar starts glowing) · `skip` (skips the trail)
 
