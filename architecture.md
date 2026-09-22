@@ -867,6 +867,19 @@ The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → 
 > number below is measured offline by the prototype in `scratchpad/sturdy/` (`sturdy_carrier.kt` +
 > `harness.kt`), re-measured with two JPEG encoders. Real-channel confirmation is gate-29's job.
 
+**covert-data cross-reference (gate-41):** `covert-data/library/02_image_steganography.md`'s
+"the workaround" section (and `module_1_image_steganography/README.md`'s planned-deliverables
+list) frames JPEG-recompression survival as a **JPEG-domain / DCT-coefficient** technique
+("Javid Steganography" — manipulating coefficients in the low/mid-frequency bands JPEG's own
+quantization already deprioritizes). Sturdy solves the same problem — survive lossy
+recompression — by a different mechanism: it never touches the JPEG bitstream or DCT
+coefficients at all. It works entirely in **decoded pixel/luminance space**, coding each bit
+into a whole grid cell's *mean* luminance via dither-QIM (a flat, DC-ish shift JPEG's own DC
+term and any resampler preserve), backed by Reed-Solomon + repetition + interleave rather than
+frequency-domain coefficient selection. Same design goal as the JPEG-domain variant covert-data
+describes, genuinely different mechanism — see `module_1_image_steganography/README.md` for the
+reciprocal note.
+
 ### Scheme — SFLY (dither-QIM on a logical luminance grid)
 1. **Luminance only.** Work on Y = 0.299R+0.587G+0.114B; leave Cb/Cr untouched (messaging apps
    subsample chroma 4:2:0, so only luma survives). A luma shift is applied by adding the same delta

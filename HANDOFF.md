@@ -60,7 +60,7 @@ but the branch has **not** been merged to main yet:
 completed as part of the merge (see next section), the rest remain open on `main`, not just
 on a feature branch.
 
-## Gate 41 — 4 of 5 items closed; one small doc item still open
+## Gate 41 — closed (5 of 5 items done)
 
 Gate 41 ("safety and close") is the closing audit for the whole v6 sprint. Status as of the
 2026-09-22 safety re-audit + remediation pass:
@@ -111,17 +111,17 @@ Gate 41 ("safety and close") is the closing audit for the whole v6 sprint. Statu
   firefly detail (capacity line, waveform/spectrogram toggle, playback), and all 4 workshop
   modules (acoustic modem, image steg, audio steg's 3 codecs, detector) — no crashes, no
   regressions found post-v6-merge.
-- covert-data module-1 cross-reference for the sturdy technique. **Audited, not yet fixed.**
-  `module_1_image_steganography/README.md` (external repo, `~/covert-data`) exists but is stale
-  — it only documents exact-LSB and predates sturdy. Mismatch found: module-1 describes
-  JPEG-survival as a DCT-coefficient (Javid) technique; sturdy actually implements spatial
-  luminance-QIM + Reed-Solomon FEC — same goal, different mechanism, no safety-claim violation,
-  pure doc-completeness gap. `architecture.md`'s own Sturdy section also has no reciprocal
-  citation back into covert-data, unlike every other technique section. Fix (when approved):
-  add sturdy to module-1's README (module-2's own pattern from the v5 close-out) plus a citation
-  back from `architecture.md`.
+- ~~covert-data module-1 cross-reference for the sturdy technique~~ — **done**. Was stale —
+  documented exact-LSB only, predated sturdy, and described JPEG-survival as a DCT-coefficient
+  (Javid) technique where sturdy actually implements spatial luminance-QIM + Reed-Solomon FEC
+  (same goal, different mechanism). `module_1_image_steganography/README.md` (external repo,
+  `~/covert-data`, commit `bcec6a5`) now records the divergence precisely, following module-2's
+  own v5 cross-reference pattern; `architecture.md`'s "Sturdy image technique (v6)" section
+  carries the reciprocal citation back.
 
-Only the module-1 doc item remains — small, external-repo scope, not a safety gap.
+**Gate 41 is fully closed.** All five items done: doc reconciliation, full unit suite green,
+safety re-audit of the incoming-intent surface (10 findings fixed), v1–v5 on-device regression
+check, and the covert-data module-1 cross-reference.
 
 ## Test coverage state
 
