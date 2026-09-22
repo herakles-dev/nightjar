@@ -1032,3 +1032,19 @@ re-checked under every DC hypothesis, is what keeps a clean image reading as *no
   rounding of a continuous shift is value-dependent in the same statistical way LSB replacement
   is, even though it never touches an LSB directly. The in-app copy must say sturdy *can* be
   flagged by the existing check, not that it evades detection.
+  **Re-measured on real photos, not just the bundled covers (task W2-4, `SturdyImageSteganalysisRealPhotoTest.kt`):**
+  the bundled-cover result does **not** generalize. Three real photographs (900x700, public-domain
+  Unsplash/Lorem Picsum sources, `app/src/test/resources/sturdy_photos/`) run through the app's own
+  send pipeline (`SturdyImageCarrier.encode` → `encodeSturdyJpeg` q90 → decode) are flagged only
+  2/3 of the time (confidences 0.868/0.985/0.565, `flagThreshold` 0.85) — and, photo for photo, the
+  **same** flagged/clear verdict lands on an unembedded copy of that photo pushed through the
+  identical q90 JPEG export (0.966/0.989/0.469): the run this detector finds tracks that photo's
+  own JPEG-quantization pattern, not whether anything is hidden in it. Even the pristine,
+  never-exported working bitmap (the state right after tapping "embed", before any save/share) is
+  only flagged 2/3 on real photos (0.905/0.943/0.492) — unlike the bundled covers' 2/2. After a
+  real-channel-shaped recompression pass (`simulateFacebookLikeChannel`/`simulateMmsLikeChannel`,
+  the same `JpegLumaSim.kt` utility gate-28/29 use), confidence collapses near zero for sturdy
+  **and** clean alike, 4/4 pairs across all three photos — the check essentially stops flagging
+  either one once a photo is actually sent. `ImageStegoScreen.kt`'s sturdy "check for hidden data"
+  caption is written from these real-photo numbers, not the bundled-cover ones: it says the
+  flagged/clear reading is unreliable for sturdy, not that sturdy reliably gets caught.
