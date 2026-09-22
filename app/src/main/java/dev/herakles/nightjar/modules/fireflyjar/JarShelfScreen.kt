@@ -29,9 +29,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.TrailConstellation
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailState
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.TrailWelcomeCard
+import dev.herakles.nightjar.trail.trailHighlight
+import dev.herakles.nightjar.trail.trailShelfTargetModule
+import dev.herakles.nightjar.trail.trailWordmarkHintRes
 import dev.herakles.nightjar.ui.theme.FireflyCreated
 import dev.herakles.nightjar.ui.theme.FireflyReceived
 import dev.herakles.nightjar.ui.theme.JarTextPrimary
@@ -58,6 +71,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun JarShelfScreen(
     repository: FireflyRepository,
+    trailStore: TrailStateStore,
     onSelectModule: (Module) -> Unit,
     onRevealTechnicalMode: () -> Unit,
 ) {
@@ -71,15 +85,31 @@ fun JarShelfScreen(
     // than emitting null.
     val totalMediaBytes by repository.observeTotalMediaBytes().collectAsState(initial = 0L)
     val coroutineScope = rememberCoroutineScope()
+    val trailState by trailStore.state.collectAsState()
 
     JarShelfContent(
         fireflyCounts = fireflyCounts,
         totalMediaBytes = totalMediaBytes,
         onSelectModule = onSelectModule,
-        onRevealTechnicalMode = onRevealTechnicalMode,
+        // W2-3 (design/riddle-trail.md § Step 6): the workshop step's target is the wordmark's
+        // own long-press reveal, not a jar tile -- a successful long-press advances it, then
+        // still performs the reveal itself, in that order.
+        onRevealTechnicalMode = {
+            if (trailState.currentStep == TrailStep.WORKSHOP) {
+                trailStore.advance(TrailStep.WORKSHOP)
+            }
+            onRevealTechnicalMode()
+        },
         // Clear-history now goes through FireflyRepository (gate-20, INV-6) so files and rows
         // are deleted together -- see FireflyRepository.clearAll for the file-before-row ordering.
         onClearHistory = { coroutineScope.launch { repository.clearAll() } },
+        trailState = trailState,
+        onSkipTrail = { trailStore.skip() },
+        // W2-5 (design/riddle-trail.md § "Welcome + game layer"): welcome card `begin`, the
+        // constellation's one-shot pulse acknowledgement, and the finale panel's `close`.
+        onBeginTrail = { trailStore.markWelcomeSeen() },
+        onCompletionAcknowledged = { trailStore.acknowledgeCompletion() },
+        onCloseFinale = { trailStore.dismissFinale() },
     )
 }
 
@@ -101,8 +131,26 @@ fun JarShelfContent(
     onSelectModule: (Module) -> Unit,
     onRevealTechnicalMode: () -> Unit,
     onClearHistory: () -> Unit = {},
+    // W2-3 (design/riddle-trail.md, gate-36/gate-38): null means "no trail progress to show" --
+    // the default wordmark subtitle renders with no highlight and no skip link, same as before
+    // this task, so the one existing @Preview call site keeps compiling unchanged.
+    trailState: TrailState? = null,
+    onSkipTrail: () -> Unit = {},
+    // W2-5 (design/riddle-trail.md § "Welcome + game layer"): defaults keep every existing
+    // @Preview call site compiling unchanged, same "pure/previewable" reasoning this file's
+    // other optional trail params already follow.
+    onBeginTrail: () -> Unit = {},
+    onCompletionAcknowledged: () -> Unit = {},
+    onCloseFinale: () -> Unit = {},
 ) {
     var showClearConfirm by remember { mutableStateOf(false) }
+    // W2-5: the tile-glow/wordmark-hint/skip-link chrome below only starts once the welcome
+    // card's own `begin` action has fired (TrailState.welcomeSeen) -- before that, this local
+    // `trailStep` reads as null exactly like "no trail progress to show" already does, so every
+    // one of those existing `trailStep != null` branches suppresses itself for free.
+    val trailStarted = trailState?.welcomeSeen == true
+    val trailStep = if (trailStarted) trailState?.currentStep else null
+    val trailHighlightedModule = trailShelfTargetModule(trailStep)
 
     JarNightSky(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -115,10 +163,56 @@ fun JarShelfContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .combinedClickable(onClick = {}, onLongClick = onRevealTechnicalMode)
-                    .padding(bottom = 24.dp),
+                    // W2-3 § Step 6: the workshop step's own target -- there's no jar tile left
+                    // to point at once every creating jar/the meadow is done, so the long-press
+                    // area itself glows instead.
+                    .trailHighlight(
+                        active = trailStep == TrailStep.WORKSHOP,
+                        description = "hold to open workshop",
+                    )
+                    .padding(bottom = 12.dp),
             ) {
                 Text(text = "night jar", style = JarType.Wordmark, color = FireflyCreated)
-                Text(text = "hold to open workshop", style = JarType.WordmarkSubtitle, color = JarTextTertiary)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = trailStep?.let { stringResource(trailWordmarkHintRes(it)) } ?: "hold to open workshop",
+                        style = JarType.WordmarkSubtitle,
+                        color = JarTextTertiary,
+                    )
+                    // W2-3 § Skip: only while a trail step is active -- not shown once the trail
+                    // is complete or already skipped (trailStep == null covers both).
+                    if (trailStep != null) {
+                        Text(
+                            text = stringResource(R.string.trail_skip),
+                            style = JarType.WordmarkSubtitle,
+                            color = JarTextTertiary,
+                            modifier = Modifier.clickable(onClick = onSkipTrail),
+                        )
+                    }
+                }
+                // W2-5 (design/riddle-trail.md § "Quest lines"): the workshop step's own quest
+                // line lives on the shelf, above its action (the long-press area above) -- this
+                // sits just below the wordmark subtitle it already shares the same Column with.
+                if (trailStep == TrailStep.WORKSHOP) {
+                    TrailQuestLine(TrailStep.WORKSHOP, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+
+            if (trailState != null) {
+                TrailConstellation(
+                    state = trailState,
+                    onCompletionAcknowledged = onCompletionAcknowledged,
+                    onCloseFinale = onCloseFinale,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                // W2-5 (design/riddle-trail.md § "Welcome card"): "above the jars", in place --
+                // a no-op composable while the card isn't due (trailWelcomeCardVisible).
+                TrailWelcomeCard(
+                    state = trailState,
+                    onBegin = onBeginTrail,
+                    onSkip = onSkipTrail,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -127,6 +221,7 @@ fun JarShelfContent(
                         module = module,
                         fireflyCount = fireflyCounts[module] ?: 0,
                         onClick = { onSelectModule(module) },
+                        highlighted = module == trailHighlightedModule,
                     )
                 }
             }
@@ -179,8 +274,9 @@ fun JarShelfContent(
 }
 
 @Composable
-private fun JarTile(module: Module, fireflyCount: Int, onClick: () -> Unit) {
+private fun JarTile(module: Module, fireflyCount: Int, onClick: () -> Unit, highlighted: Boolean = false) {
     val tint = tileTint(module)
+    val description = "${module.jarName}, ${fireflyCountLabel(module, fireflyCount)}"
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -188,6 +284,22 @@ private fun JarTile(module: Module, fireflyCount: Int, onClick: () -> Unit) {
             .background(tint.fill)
             .border(width = 1.dp, color = tint.border, shape = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
+            // W2-3 (gate-36/gate-38): glows this tile as the trail's current shelf-level target.
+            // When active, trailHighlight's own clearAndSetSemantics supersedes the plain
+            // `.semantics{}` call below entirely (skipped in that branch) so the two can't both
+            // try to own this element's contentDescription -- see trail/TrailHighlight.kt's KDoc.
+            .trailHighlight(active = highlighted, description = description)
+            .then(
+                if (highlighted) {
+                    Modifier
+                } else {
+                    // A bare Row's title/caption Text children would otherwise read as two
+                    // separate TalkBack stops -- same "no text a screen reader can read" reasoning
+                    // JarDetailScreen's FireflyDot semantics block already documents, applied to
+                    // the tile as a whole.
+                    Modifier.semantics(mergeDescendants = true) { contentDescription = description }
+                },
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,

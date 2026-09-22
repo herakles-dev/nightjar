@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,9 +46,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.BitmapPixelSurface
 import dev.herakles.nightjar.CovertCarrier
 import dev.herakles.nightjar.CovertDetector
 import dev.herakles.nightjar.DebugProbe
@@ -58,9 +61,28 @@ import dev.herakles.nightjar.ImageSteganalysis
 import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.ModuleId
 import dev.herakles.nightjar.R
+import dev.herakles.nightjar.SturdyCoverPrep
+import dev.herakles.nightjar.SturdyImageCarrier
+import dev.herakles.nightjar.encodeSturdyJpeg
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
+import dev.herakles.nightjar.prepareSturdyCover
+import dev.herakles.nightjar.toBitmap
+import dev.herakles.nightjar.incoming.FileSniffer
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
+import dev.herakles.nightjar.incoming.SniffedType
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.HideInPhotoFlow
+import dev.herakles.nightjar.modules.fireflyjar.HidePhotoSelection
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.prepareSturdyCover
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
 import dev.herakles.nightjar.ui.ExpandGlyph
 import dev.herakles.nightjar.ui.FullscreenImageViewer
 import dev.herakles.nightjar.ui.theme.AccentSignal
@@ -82,6 +104,8 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.workshopButton
+import dev.herakles.nightjar.ui.theme.WorkshopBackLink
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.roundToInt
@@ -144,6 +168,16 @@ enum class SampleCover(val label: String, val resId: Int) {
 }
 
 /**
+ * v6 (task W2-4, spec.md gate-30): which Module-1 image technique the *technical* screen is
+ * currently driving -- the frozen exact-LSB codec ([ImageStegoCarrier], INV-9) or the
+ * JPEG-surviving sturdy codec ([SturdyImageCarrier], architecture.md "Sturdy image technique
+ * (v6)"). Screen-local UI selection state, same reasoning [SampleCover] already is -- not carrier
+ * state. [jarCatchFlow] (the art jar) is untouched by this addition and stays exact-only, per
+ * this task's own scope note.
+ */
+enum class ImageTechnique { EXACT, STURDY }
+
+/**
  * Where the active cover image came from: one of the two bundled [SampleCover]s, or a
  * [Picked] image the operator chose from their device via the Photo Picker (task #33).
  *
@@ -177,7 +211,15 @@ sealed interface StegoStatus {
     data class Embedded(val payloadBytes: Int) : StegoStatus
     data class ExtractedSuccess(val text: String) : StegoStatus
     data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : StegoStatus
-    data class Analyzed(val result: DetectionResult) : StegoStatus
+    // v6 (task W2-6, gate on the check's honest caveat): [coverWasLossyContainer] snapshots
+    // whether the image actually checked traced back to a picked photo whose real container
+    // (sniffed by magic bytes, not a declared MIME/extension) was JPEG/WebP/HEIC -- SturdyImage
+    // SteganalysisRealPhotoTest.kt's real-photo measurement found this check's flagged/clear
+    // reading on a JPEG is often just that photo's own JPEG-quantization pattern, not a signal
+    // that anything is hidden. Defaults false so every existing call site (all @Preview
+    // functions, the jar-disguised "peek inside" flow) keeps compiling/behaving unchanged --
+    // same "codec-M01" precedent as this file's other optional params.
+    data class Analyzed(val result: DetectionResult, val coverWasLossyContainer: Boolean = false) : StegoStatus
 
     /**
      * S-01 defense in depth: an embed/extract/check attempt ran out of memory mid-operation
@@ -227,7 +269,25 @@ fun ImageStegoScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val controller = remember(carrierFactory, detector) { ImageStegoController(carrierFactory, detector) }
+
+    // v6 (task W2-4, gate-30): "exact" (the injected carrierFactory, unchanged) or "sturdy"
+    // (SturdyImageBitmapCarrier, this file's own adapter over SturdyImageCarrier -- see that
+    // class's KDoc for why the technical screen builds it directly rather than threading a
+    // second factory parameter through MainActivity.kt/jarCatchFlow). Rebuilding the controller
+    // whenever technique changes gives a fresh Idle/no-workingBitmap start, the same reset a
+    // fresh cover selection already gets below.
+    var technique by remember { mutableStateOf(ImageTechnique.EXACT) }
+    val controller = remember(carrierFactory, detector, technique) {
+        ImageStegoController(
+            carrierFactory = { bitmap ->
+                when (technique) {
+                    ImageTechnique.EXACT -> carrierFactory(bitmap)
+                    ImageTechnique.STURDY -> SturdyImageBitmapCarrier(bitmap)
+                }
+            },
+            detector = detector,
+        )
+    }
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
     }
@@ -240,6 +300,14 @@ fun ImageStegoScreen(
     // picked cover actually had transparency and got flattened onto an opaque background --
     // never touched for the two bundled sample covers, which are already opaque.
     var coverImportNotice by remember { mutableStateOf<String?>(null) }
+    // v6 (task W2-6, gate-30 follow-up): whether the CURRENT cover's real container (sniffed by
+    // magic bytes at pick time, never a declared MIME/extension) is JPEG/WebP/HEIC -- false for
+    // both bundled sample covers (always PNG resources) and reset whenever a fresh cover is
+    // picked. Feeds "check for hidden data"'s honest caveat (SturdyImageSteganalysisRealPhotoTest
+    // .kt's measured false-flag rate on real JPEG photos), never used for anything else -- this
+    // screen still never keeps the picked Uri/original bytes around (decodePickedCoverImage's own
+    // "discard the original format" contract, this file's top KDoc), only this one display bit.
+    var pickedCoverIsLossyContainer by remember { mutableStateOf(false) }
     var saveStatus: SaveStatus by remember { mutableStateOf<SaveStatus>(SaveStatus.Idle) }
 
     val pickCoverScope = rememberCoroutineScope()
@@ -251,6 +319,11 @@ fun ImageStegoScreen(
         coverLoadError = null
         coverImportNotice = null
         pickCoverScope.launch {
+            // v6 (task W2-6): sniffed alongside the decode, off the main thread -- a few header
+            // bytes only (see sniffPickedCoverContainer), never the full file, and never kept
+            // anywhere but this one boolean (decodePickedCoverImage's own KDoc: "nothing left
+            // pointing at the original lossy file").
+            val lossyContainer = withContext(Dispatchers.IO) { sniffPickedCoverIsLossy(context, uri) }
             val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
             isCoverLoading = false
             if (decoded == null) {
@@ -263,6 +336,7 @@ fun ImageStegoScreen(
                     coverImportNotice = "that image had transparent areas — they were filled in " +
                         "so the hidden data survives on this device."
                 }
+                pickedCoverIsLossyContainer = lossyContainer
                 coverSource = CoverSource.Picked(flattened)
             }
         }
@@ -274,13 +348,22 @@ fun ImageStegoScreen(
             is CoverSource.Picked -> source.bitmap
         }
     }
-    val maxPayloadBytes = remember(coverBitmap) { controller.maxPayloadBytesFor(coverBitmap) }
+    val maxPayloadBytes = remember(controller, coverBitmap) { controller.maxPayloadBytesFor(coverBitmap) }
 
-    // Switching the cover (sample or freshly picked) resets the working image (and any
-    // embed/extract/check result) back to a clean start — a per-cover workflow needs this
-    // even though the modem/detector screens (single fixed carrier) never had to reset
-    // anything on select.
-    LaunchedEffect(coverBitmap) {
+    // v6 (task W2-4, gate-30): sturdy's ~640px robustness floor (architecture.md "Sturdy image
+    // technique (v6)") -- computed once per cover/technique so the cover section can show its
+    // refusal plainly (this file's top KDoc CRITICAL note pattern: real feedback, not a silent
+    // disabled button) rather than let embed() fail unexplained. Null for the exact technique,
+    // which has no such floor.
+    val sturdyCoverPrep = remember(coverBitmap, technique) {
+        if (technique == ImageTechnique.STURDY) prepareSturdyCover(coverBitmap) else null
+    }
+
+    // Switching the cover (sample or freshly picked) OR the technique resets the working image
+    // (and any embed/extract/check result) back to a clean start — a per-cover workflow needs
+    // this even though the modem/detector screens (single fixed carrier) never had to reset
+    // anything on select. Mirrors AudioStegoScreen's LaunchedEffect(coverAudio, technique).
+    LaunchedEffect(coverBitmap, technique) {
         controller.selectCover(coverBitmap)
     }
 
@@ -293,15 +376,30 @@ fun ImageStegoScreen(
 
     val saveScope = rememberCoroutineScope()
 
-    suspend fun persistWorkingImageAsPng(bitmap: Bitmap): Result<Uri> =
-        withContext(Dispatchers.IO) { runCatching { saveBitmapAsPngToMediaStore(context, bitmap) } }
+    // v6 (task W2-4, gate-30): sturdy always writes JPEG (encodeSturdyJpeg -- the whole point of
+    // the technique is surviving that recompression), exact keeps writing PNG unchanged. Same
+    // two-phase-write MediaStore path either way; only the encode call and MIME type differ.
+    suspend fun persistWorkingImage(bitmap: Bitmap): Result<Uri> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                when (technique) {
+                    ImageTechnique.EXACT -> saveBitmapAsPngToMediaStore(context, bitmap)
+                    ImageTechnique.STURDY -> saveBitmapAsJpegToMediaStore(context, bitmap)
+                }
+            }
+        }
+
+    fun shareIntentFor(uri: Uri): Intent = when (technique) {
+        ImageTechnique.EXACT -> buildPngShareIntent(uri)
+        ImageTechnique.STURDY -> buildJpegShareIntent(uri)
+    }
 
     val onSave: () -> Unit = save@{
         val bitmap = controller.workingBitmap
         if (!controller.hasEmbeddedPayload || bitmap == null) return@save
         saveStatus = SaveStatus.Saving
         saveScope.launch {
-            saveStatus = persistWorkingImageAsPng(bitmap).fold(
+            saveStatus = persistWorkingImage(bitmap).fold(
                 onSuccess = { uri -> SaveStatus.Saved(uri) },
                 onFailure = { failure -> SaveStatus.Failed(failure.message ?: "couldn't save the image") },
             )
@@ -314,14 +412,14 @@ fun ImageStegoScreen(
         // Reuse an already-saved Uri for this working image rather than writing a second copy.
         val alreadySavedUri = (saveStatus as? SaveStatus.Saved)?.uri
         if (alreadySavedUri != null) {
-            context.startActivity(Intent.createChooser(buildPngShareIntent(alreadySavedUri), null))
+            context.startActivity(Intent.createChooser(shareIntentFor(alreadySavedUri), null))
             return@share
         }
         saveStatus = SaveStatus.Sharing
         saveScope.launch {
-            saveStatus = persistWorkingImageAsPng(bitmap).fold(
+            saveStatus = persistWorkingImage(bitmap).fold(
                 onSuccess = { uri ->
-                    context.startActivity(Intent.createChooser(buildPngShareIntent(uri), null))
+                    context.startActivity(Intent.createChooser(shareIntentFor(uri), null))
                     SaveStatus.Saved(uri)
                 },
                 onFailure = { failure -> SaveStatus.Failed(failure.message ?: "couldn't save the image to share") },
@@ -336,18 +434,33 @@ fun ImageStegoScreen(
         isCoverLoading = isCoverLoading,
         coverLoadError = coverLoadError,
         coverImportNotice = coverImportNotice,
-        onSelectSample = { coverSource = CoverSource.Sample(it) },
+        onSelectSample = {
+            // v6 (task W2-6): both bundled sample covers are PNG resources -- never lossy.
+            pickedCoverIsLossyContainer = false
+            coverSource = CoverSource.Sample(it)
+        },
         onPickFromDevice = {
             pickCoverImage.launch(
                 PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
             )
         },
+        technique = technique,
+        onSelectTechnique = { technique = it },
+        sturdyCoverPrep = sturdyCoverPrep,
         payloadText = payloadText,
         onPayloadTextChange = { payloadText = it },
         maxPayloadBytes = maxPayloadBytes,
-        onEmbed = { controller.embed(coverBitmap, payloadText.encodeToByteArray()) },
+        onEmbed = {
+            val embedCover = when (technique) {
+                ImageTechnique.EXACT -> coverBitmap
+                ImageTechnique.STURDY -> (sturdyCoverPrep as? SturdyCoverPrep.Ready)?.bitmap ?: coverBitmap
+            }
+            controller.embed(embedCover, payloadText.encodeToByteArray())
+        },
         onExtract = { controller.extract(controller.workingBitmap ?: coverBitmap) },
-        onCheck = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+        onCheck = {
+            controller.analyze(controller.workingBitmap ?: coverBitmap, pickedCoverIsLossyContainer)
+        },
         saveStatus = saveStatus,
         hasEmbeddedPayload = controller.hasEmbeddedPayload,
         onSave = onSave,
@@ -357,7 +470,7 @@ fun ImageStegoScreen(
 }
 
 /**
- * Task #12 — jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the framed jar",
+ * Task #12 — jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the art jar",
  * [dev.herakles.nightjar.picker.JarRole.CREATION]), hosted by `JarDetailScreen` as its
  * `moduleFlow` slot (design/screen-flow.md § Screen 7). `JarDetailScreen` already renders the
  * "back to the shelf" row, the jar name/caption, and the firefly swarm above whatever this
@@ -374,7 +487,8 @@ fun ImageStegoScreen(
  * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
  *
  * Three actions, softened per spec.md gate-13 / screen-flow.md § Screen 7's copy-mapping table:
- *  - "catch a firefly" expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
+ *  - "create a firefly" (v6 verb rule, design/riddle-trail.md § Verb rule -- "catch" never
+ *    describes making one) expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
  *    Picker, no save/share; those stay technical-screen-only, per screen-flow.md's "what this
  *    addition deliberately does not build") + payload field inline; confirming calls the same
  *    [ImageStegoController.embed]. On [StegoStatus.Embedded], writes a
@@ -395,10 +509,24 @@ fun ImageStegoScreen(
  * `JarDetailScreen` already owns the one "back to the shelf" row that leaves this screen. Left
  * as a deliberate, documented decision rather than inventing a second, redundant back
  * affordance — worth a second look if that reading turns out wrong.
+ *
+ * v6 addition (task W2-1, gate-31): a fourth row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the Android Photo Picker
+ * (`ActivityResultContracts.PickVisualMedia`, image MIME types only -- no permission added,
+ * INV-10) and routes the picked `Uri` through [IncomingPipeline.route] -- the exact same
+ * routing `MainActivity.kt` uses for a share-sheet/open-with `Intent`, never duplicated here.
+ * [onIncomingOutcome] hands the resulting [IncomingOutcome] back up to `MainActivity.kt` (via
+ * `JarDetailScreen`/`catchFlowFor`) to navigate to `Screen.Incoming`.
  */
 @Composable
-fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val controller = remember {
         ImageStegoController(
             carrierFactory = { cover -> ImageStegoCarrier(cover) },
@@ -407,10 +535,79 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     }
     DisposableEffect(controller) { onDispose { controller.dispose() } }
 
+    // v6 (task W2-1, gate-31): "catch from a photo or file" -- Photo Picker, image MIME types
+    // only, matching the art jar's own carrier (this module never handles audio). A null Uri
+    // means the operator backed out of the picker -- no-op, same as every other picker launcher
+    // in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
+    }
+
+    // v6 (task W2-2, gate-33): "hide one in a photo" -- a second, independent Photo Picker
+    // launch (this module's own carrier is always an image, so this reuses the exact same
+    // ImageOnly contract [catchFromFileLauncher] does, just routed to a new encode flow instead
+    // of the receive pipeline). Decodes off Dispatchers.IO (real file I/O + CPU work, matching
+    // decodePickedCoverImage's own KDoc), then prepares the sturdy send-side cover once, at pick
+    // time, off Dispatchers.Default -- HideInPhotoFlow reads that prep directly rather than
+    // recomputing it per technique switch. A null Uri (operator backed out) or a failed decode
+    // is a silent no-op, same as every other picker launcher in this app.
+    var hidePhotoSelection by remember { mutableStateOf<HidePhotoSelection?>(null) }
+    val hidePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
+            if (decoded != null) {
+                val prep = withContext(Dispatchers.Default) { prepareSturdyCover(decoded) }
+                hidePhotoSelection = HidePhotoSelection(original = decoded, coverPrep = prep)
+            }
+        }
+    }
+
     var coverChoice by remember { mutableStateOf(SampleCover.GRADIENT) }
     var payloadText by remember { mutableStateOf("") }
     var catchExpanded by remember { mutableStateOf(false) }
     var pendingCatchPreview by remember { mutableStateOf("") }
+
+    // W2-3 riddle trail (design/riddle-trail.md § Step 1, gate-36): while this jar's step is the
+    // active one, "look for fireflies" decodes the practice carrier PracticeFireflies wrote
+    // instead of the normal working/cover bitmap. [pendingLookBitmap] carries that practice
+    // bitmap from dispatch time through to the ExtractedSuccess handler below -- ImageStegoController
+    // .extract() doesn't update [ImageStegoController.workingBitmap] itself (only [embed] does),
+    // so this is the only way the persisted carrier and the "was this a practice catch" signal
+    // both reach the insert path correctly. Reset on every dispatch (practice or not), never left
+    // stale from a previous tap.
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.ART
+    // v6 (task W2-2, owner direction 2026-09-22, design/riddle-trail.md § Welcome + game layer,
+    // commit 6b9cedf): the SEND step's glow now lives on the "hide one in a photo" row itself,
+    // not on any firefly's own send row -- see HideInPhotoFlow.kt's KDoc.
+    val sendStepActive = trailState.currentStep == TrailStep.SEND
+    var pendingLookBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    // W2-5 (design/riddle-trail.md § "Reward lines"): which step's reward line this screen
+    // session has shown, once -- cleared never (a fresh visit is a fresh composable instance, so
+    // a fresh `remember` -- "shown once" per completion, not persisted across visits). ART is set
+    // directly below, at this screen's own advance() call. SEND has two call sites this screen
+    // doesn't own -- HideInPhotoFlow.kt's "hide it" and JarDetailScreen.kt's "send this firefly"
+    // safety net (TrailStep.kt's own KDoc) -- so it's picked up reactively off
+    // TrailStateStore.advance's own TrailState.lastCompletedStep handoff instead of a second
+    // callback threaded through both.
+    var artTrailRewardStep by remember { mutableStateOf<TrailStep?>(null) }
+    LaunchedEffect(trailState.lastCompletedStep) {
+        if (trailState.lastCompletedStep == TrailStep.SEND) {
+            artTrailRewardStep = TrailStep.SEND
+        }
+    }
 
     // Task #19 fix, layer 2: live testing showed encode()/decode() for this codec's tiny
     // sample images complete fast enough (sub-frame) that `status` can cycle all the way back
@@ -467,14 +664,13 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
     // happen in practice -- coverBitmap is always a decoded bundled resource here -- but keeps
     // this path crash-free and zero-byte-file-free either way). Called from inside the two
     // transition-guarded `when` arms below, never outside them.
-    suspend fun insertFireflyWithCarrier(record: FireflyRecord) {
-        val bitmap = controller.workingBitmap ?: coverBitmap
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord, bitmapOverride: Bitmap? = null): Long {
+        val bitmap = bitmapOverride ?: controller.workingBitmap ?: coverBitmap
         if (bitmap == null) {
-            repository.insert(record)
-            return
+            return repository.insert(record)
         }
         val pngBytes = withContext(Dispatchers.Default) { encodePngBytes(bitmap) }
-        repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
+        return repository.insertWithMedia(record.copy(carrierKind = "IMAGE"), pngBytes, "png")
     }
 
     LaunchedEffect(status) {
@@ -486,22 +682,53 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
                     timestampMillis = System.currentTimeMillis(),
                     payloadSizeBytes = status.payloadBytes,
                     technique = null,
-                    payloadPreview = pendingCatchPreview.take(40),
+                    payloadPreview = pendingCatchPreview.take(MAX_STORED_MESSAGE_CHARS),
                 ),
             )
-            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> insertFireflyWithCarrier(
-                FireflyRecord(
-                    moduleId = Module.IMAGE_STEGANOGRAPHY.name,
-                    direction = "RECEIVED",
-                    timestampMillis = System.currentTimeMillis(),
-                    payloadSizeBytes = status.text.encodeToByteArray().size,
-                    technique = null,
-                    payloadPreview = status.text.take(40),
-                ),
-            )
+            status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> {
+                val practiceBitmap = pendingLookBitmap
+                val id = insertFireflyWithCarrier(
+                    FireflyRecord(
+                        moduleId = Module.IMAGE_STEGANOGRAPHY.name,
+                        direction = "RECEIVED",
+                        timestampMillis = System.currentTimeMillis(),
+                        payloadSizeBytes = status.text.encodeToByteArray().size,
+                        technique = null,
+                        payloadPreview = status.text.take(MAX_STORED_MESSAGE_CHARS),
+                    ),
+                    bitmapOverride = practiceBitmap,
+                )
+                // W2-3 (gate-36): a practice catch marks itself and advances the trail the
+                // instant its own decode succeeds -- see this file's jarCatchFlow KDoc and
+                // pendingLookBitmap's own comment above for why practiceBitmap != null is exactly
+                // "this ExtractedSuccess came from the trail's own practice dispatch."
+                if (practiceBitmap != null) {
+                    trailStore.markPractice(id)
+                    trailStore.advance(TrailStep.ART)
+                    artTrailRewardStep = TrailStep.ART
+                }
+                pendingLookBitmap = null
+            }
             else -> Unit // Idle/Embedding/Extracting/Analyzing/ExtractedFailure/Analyzed/repeat: no catch/spot event
         }
         previousStatus = status
+    }
+
+    // v6 (task W2-2): while a photo is picked for "hide one in a photo", that flow takes over
+    // this slot entirely (its own "back" collapses back to the row list below) -- same "no
+    // separate screen per action" shape every other jar-mode expansion in this app already uses,
+    // just for a bigger inline flow than catch/look's own field expansion.
+    val currentHidePhotoSelection = hidePhotoSelection
+    if (currentHidePhotoSelection != null) {
+        HideInPhotoFlow(
+            selection = currentHidePhotoSelection,
+            repository = repository,
+            trailStore = trailStore,
+            sendStepActive = sendStepActive,
+            onCancel = { hidePhotoSelection = null },
+            onSent = { hidePhotoSelection = null },
+        )
+        return
     }
 
     JarImageStegoContent(
@@ -520,9 +747,56 @@ fun jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit) {
             }
         },
         onLookForFireflies = {
-            debounceCatchDispatch { controller.extract(controller.workingBitmap ?: coverBitmap) }
+            debounceCatchDispatch {
+                if (trailActive) {
+                    // Review finding #5 (v6/review-fix): the practice file's own decode
+                    // (BitmapFactory.decodeFile) is real file I/O -- run it off the main thread,
+                    // same discipline AcousticModemScreen.kt's SINGING trail step already
+                    // follows via its Dispatchers.IO-backed controller scope. Only the decode
+                    // moves; catch/advance/error behavior below is unchanged.
+                    coroutineScope.launch {
+                        val practiceBitmap = withContext(Dispatchers.IO) {
+                            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.ART)
+                            if (practiceFile.exists()) BitmapFactory.decodeFile(practiceFile.path) else null
+                        }
+                        if (practiceBitmap != null) {
+                            pendingLookBitmap = practiceBitmap
+                            controller.extract(practiceBitmap)
+                        } else {
+                            // Practice file not generated yet (a race with PracticeFireflies
+                            // .ensureGenerated's background job) -- degrade to the normal decode
+                            // rather than doing nothing; the trail step simply doesn't complete yet.
+                            pendingLookBitmap = null
+                            controller.extract(controller.workingBitmap ?: coverBitmap)
+                        }
+                    }
+                } else {
+                    pendingLookBitmap = null
+                    controller.extract(controller.workingBitmap ?: coverBitmap)
+                }
+            }
         },
         onPeekInside = { controller.analyze(controller.workingBitmap ?: coverBitmap) },
+        lookForFirefliesHighlighted = trailActive,
+        onCatchFromFile = {
+            catchFromFileLauncher.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
+        onHideInPhoto = {
+            hidePhotoLauncher.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
+        hideInPhotoHighlighted = sendStepActive,
+        // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): the art jar hosts both
+        // ART (its own practice catch) and SEND (design doc: "in the art jar, hide one in a
+        // photo") -- only one is ever the active step at a time.
+        trailQuestStep = when (trailState.currentStep) {
+            TrailStep.ART, TrailStep.SEND -> trailState.currentStep
+            else -> null
+        },
+        trailRewardStep = artTrailRewardStep,
     )
 }
 
@@ -550,6 +824,24 @@ private fun JarImageStegoContent(
     onCatch: () -> Unit,
     onLookForFireflies: () -> Unit,
     onPeekInside: () -> Unit,
+    // W2-3 (gate-36/gate-38): true while this jar's trail step is the active one -- glows the
+    // "look for fireflies" row. Default keeps every existing @Preview call site compiling
+    // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
+    lookForFirefliesHighlighted: Boolean = false,
+    onCatchFromFile: () -> Unit,
+    onHideInPhoto: () -> Unit = {},
+    // v6 (task W2-2, owner direction 2026-09-22): true while the trail's SEND step is active --
+    // glows this row rather than any firefly's own "send this firefly" row (design/riddle-trail.md
+    // § Welcome + game layer). Default keeps every existing @Preview call site compiling
+    // unchanged, same reasoning [lookForFirefliesHighlighted] already follows.
+    hideInPhotoHighlighted: Boolean = false,
+    // W2-5 (design/riddle-trail.md § "Quest lines"): non-null while ART or SEND is the trail's
+    // active step -- shows that step's quest line above the actions below. Null (default) keeps
+    // every existing @Preview call site compiling unchanged.
+    trailQuestStep: TrailStep? = null,
+    // W2-5 (design/riddle-trail.md § "Reward lines"): non-null once this session's own ART/SEND
+    // completion has fired, until the user leaves this screen -- shown once, in place.
+    trailRewardStep: TrailStep? = null,
 ) {
     val idleEquivalent = status is StegoStatus.Idle ||
         status is StegoStatus.Embedded ||
@@ -561,12 +853,21 @@ private fun JarImageStegoContent(
     val canCatch = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): the art jar hosts both
+        // ART (its own practice catch) and SEND ("hide one in a photo") -- above every action
+        // row below, whichever one is active/just completed.
+        if (trailQuestStep != null) {
+            TrailQuestLine(trailQuestStep)
+        }
+        if (trailRewardStep != null) {
+            TrailRewardLine(trailRewardStep)
+        }
         // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look/peek are the
         // framed jar's three stacked rows (§5 1f); the status readout below is its own section.
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Column {
                 JarActionRow(
-                    label = "catch a firefly",
+                    label = "create a firefly",
                     enabled = idleEquivalent,
                     fill = JarActionCatchFill,
                     border = JarActionCatchBorder,
@@ -619,7 +920,7 @@ private fun JarImageStegoContent(
                         // A primary confirm action, not another list row — 12dp per DESIGN_SPEC.md
                         // §3's "12px (primary buttons...)" radius tier, distinct from the 8dp rows above.
                         JarActionRow(
-                            label = "catch",
+                            label = "create",
                             enabled = canCatch,
                             fill = JarActionCatchFill,
                             border = JarActionCatchBorder,
@@ -635,6 +936,7 @@ private fun JarImageStegoContent(
                 fill = JarActionLookFill,
                 border = JarActionLookBorder,
                 onClick = onLookForFireflies,
+                highlighted = lookForFirefliesHighlighted,
             )
             JarActionRow(
                 label = "peek inside",
@@ -643,15 +945,39 @@ private fun JarImageStegoContent(
                 border = JarActionCheckBorder,
                 onClick = onPeekInside,
             )
+            // v6 (task W2-1, gate-31): "catch from a photo or file" -- last in the action group,
+            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint (identity.md: "cyan
+            // = received"), same as "look for fireflies" -- this row can land a firefly in ANY
+            // jar, not necessarily this one, so it shares that verb's tint rather than "catch"'s.
+            JarActionRow(
+                label = stringResource(R.string.receive_catch_from_file_row),
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onCatchFromFile,
+            )
+            // v6 (task W2-2, gate-33): "hide one in a photo" -- gold "creating" tint (this row
+            // embeds a NEW message into the operator's own picked photo, same verb family as
+            // "catch a firefly"), last in the action group per design/screen-flow.md's v6
+            // wireframe. `highlighted` is the trail's SEND-step glow (owner direction
+            // 2026-09-22) -- see this composable's own KDoc note on [hideInPhotoHighlighted].
+            JarActionRow(
+                label = stringResource(R.string.send_row_hide_in_photo),
+                enabled = idleEquivalent,
+                fill = JarActionCatchFill,
+                border = JarActionCatchBorder,
+                onClick = onHideInPhoto,
+                highlighted = hideInPhotoHighlighted,
+            )
         }
 
         JarStatusBlock(status = status)
     }
 }
 
-/** One tinted, rounded action row — gold for "catch", cyan for "look", purple for "peek/check"
+/** One tinted, rounded action row — gold for "create", cyan for "look", purple for "peek/check"
  *  (DESIGN_SPEC.md §1's card/row tint table). [radius] defaults to the 8dp action-row tier;
- *  the inline "catch"/"send"-style confirm button passes 12dp, the primary-button tier. */
+ *  the inline "create"/"send"-style confirm button passes 12dp, the primary-button tier. */
 @Composable
 private fun JarActionRow(
     label: String,
@@ -660,6 +986,9 @@ private fun JarActionRow(
     border: Color,
     onClick: () -> Unit,
     radius: Dp = 8.dp,
+    // W2-3: glows this row as the trail's current target (trail/TrailHighlight.kt) -- a no-op
+    // Modifier when false, so every existing call site keeps its default styling untouched.
+    highlighted: Boolean = false,
 ) {
     Box(
         modifier = Modifier
@@ -668,6 +997,7 @@ private fun JarActionRow(
             .background(fill)
             .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .trailHighlight(active = highlighted, description = label)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -702,13 +1032,13 @@ private fun JarCoverRow(label: String, selected: Boolean, enabled: Boolean, onCl
 private fun JarStatusBlock(status: StegoStatus) {
     when (status) {
         is StegoStatus.Idle -> Unit // nothing running, nothing to report
-        is StegoStatus.Embedding -> JarStatusWord("catching")
+        is StegoStatus.Embedding -> JarStatusWord("creating")
         is StegoStatus.Extracting -> JarStatusWord("looking")
         is StegoStatus.Analyzing -> JarStatusWord("peeking")
         is StegoStatus.Embedded -> {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
-                text = "you caught one — ${status.payloadBytes} byte$plural",
+                text = "you created one — ${status.payloadBytes} byte$plural",
                 // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
                 // accented announcement, not the message body itself.
                 style = JarType.SectionLabel,
@@ -822,6 +1152,12 @@ fun ImageStegoContent(
     coverImportNotice: String? = null,
     onSelectSample: (SampleCover) -> Unit,
     onPickFromDevice: () -> Unit,
+    // v6 (task W2-4, gate-30): defaults keep every existing @Preview call site (all exact-technique,
+    // predating this task) compiling unchanged -- same "codec-M01" precedent as coverImportNotice
+    // above.
+    technique: ImageTechnique = ImageTechnique.EXACT,
+    onSelectTechnique: (ImageTechnique) -> Unit = {},
+    sturdyCoverPrep: SturdyCoverPrep? = null,
     payloadText: String,
     onPayloadTextChange: (String) -> Unit,
     maxPayloadBytes: Int,
@@ -843,27 +1179,21 @@ fun ImageStegoContent(
             status is StegoStatus.Failed
         ) && !isCoverLoading && saveStatus !is SaveStatus.Saving && saveStatus !is SaveStatus.Sharing
     val payloadBytes = payloadText.encodeToByteArray().size
-    val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+    // v6 (task W2-7): sturdy's SLOT is a fixed size, but the real message length is variable, 1..
+    // maxPayloadBytes (architecture.md "Sturdy image technique (v6)": the frame's own length field
+    // carries the true count, zero-padding the rest of the slot) -- same non-empty-and-within-
+    // capacity gate as exact, plus sturdy's own Ready-cover requirement.
+    val canEmbed = idleEquivalent && when (technique) {
+        ImageTechnique.EXACT -> payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+        ImageTechnique.STURDY ->
+            payloadBytes in 1..maxPayloadBytes && sturdyCoverPrep is SturdyCoverPrep.Ready
+    }
     // Task #34: save/share only unlock once embed() has actually produced a stego image for
     // the currently selected cover (this file's top KDoc CRITICAL note + ImageStegoController
     // .hasEmbeddedPayload's own KDoc).
     val canSaveOrShare = idleEquivalent && hasEmbeddedPayload
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .height(48.dp)
-                .clickable { onBack() }
-                .padding(horizontal = 24.dp),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = "back",
-                style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary,
-            )
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -876,6 +1206,28 @@ fun ImageStegoContent(
                 style = MaterialTheme.typography.displayLarge,
                 color = TextPrimary,
             )
+
+            // v6 (task W2-4, gate-30): technique selector, same selector-row style ("cover image"
+            // below) this screen already uses -- mirrors AudioStegoScreen's "technique" section.
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = stringResource(R.string.workshop_image_technique_label),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = TextSecondary,
+                )
+                CoverRow(
+                    label = stringResource(R.string.workshop_image_technique_exact),
+                    selected = technique == ImageTechnique.EXACT,
+                    enabled = idleEquivalent,
+                    onClick = { onSelectTechnique(ImageTechnique.EXACT) },
+                )
+                CoverRow(
+                    label = stringResource(R.string.workshop_image_technique_sturdy),
+                    selected = technique == ImageTechnique.STURDY,
+                    enabled = idleEquivalent,
+                    onClick = { onSelectTechnique(ImageTechnique.STURDY) },
+                )
+            }
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
@@ -907,6 +1259,17 @@ fun ImageStegoContent(
                 coverImportNotice?.let { message ->
                     Text(
                         text = message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                    )
+                }
+                // v6 (task W2-4): sturdy's ~640px robustness floor, shown plainly (this file's top
+                // KDoc CRITICAL note pattern) rather than a silently disabled "embed" -- the
+                // rejection detail itself is SturdyImageAndroidAdapter.kt's existing copy, not new
+                // copy authored by this task.
+                (sturdyCoverPrep as? SturdyCoverPrep.Rejected)?.let { rejected ->
+                    Text(
+                        text = rejected.detail,
                         style = MaterialTheme.typography.labelSmall,
                         color = TextSecondary,
                     )
@@ -978,7 +1341,10 @@ fun ImageStegoContent(
                     // codec-H01: maxPayloadBytes == 0 can mean "this cover can't hold a frame at
                     // all" (ImageStegoCarrier.canEmbed == false), not just "trimmed to zero" --
                     // worth a distinct message rather than a bare `0 / 0 bytes` that reads as a
-                    // typo.
+                    // typo. v6 (task W2-7): sturdy's gate is the same "1..maxPayloadBytes" shape as
+                    // exact now that the carrier carries the real length in its own frame field
+                    // (architecture.md), so it shares this live "n / max bytes" counter -- no more
+                    // sturdy-only exact-match message.
                     text = when {
                         maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
                         payloadBytes > maxPayloadBytes ->
@@ -993,34 +1359,62 @@ fun ImageStegoContent(
 
             Column {
                 Text(
-                    text = "embed hides text in the image, extract reads it back, " +
-                        "check scans for hidden data without extracting it. save/share unlock " +
-                        "after a successful embed and always write PNG, so the hidden data survives",
+                    text = if (technique == ImageTechnique.STURDY) {
+                        stringResource(R.string.workshop_image_actions_caption_sturdy)
+                    } else {
+                        "embed hides text in the image, extract reads it back, " +
+                            "check scans for hidden data without extracting it. save/share unlock " +
+                            "after a successful embed and always write PNG, so the hidden data survives"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )
+                // gate-30: the check's own measured behavior against sturdy output -- see
+                // strings_workshop_image.xml's KDoc-style comment and
+                // SturdyImageSteganalysisRealPhotoTest.kt for the measurement this is written
+                // from. Exact technique shows nothing extra here (its check copy is unchanged).
+                if (technique == ImageTechnique.STURDY) {
+                    Text(
+                        text = stringResource(R.string.workshop_image_check_caption_sturdy),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
                 // Task #36: embed/extract/check (act on the working image directly) grouped
                 // separately from save/share (export the working image elsewhere) via spacing
                 // alone — 12dp between the two clusters, 0dp within one, matching
                 // AcousticModemScreen's own action-row grouping. This list grew from 3 rows
                 // (Task #13) to 5 (Task #34) and read as one undifferentiated stack.
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
                         ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
                         ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
                     }
-                    Column {
-                        ActionRow(label = "save as PNG", enabled = canSaveOrShare, onClick = onSave)
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // v6 (task W2-4): sturdy always saves/shares JPEG (encodeSturdyJpeg) --
+                        // exact's own "save as PNG" label is unchanged.
+                        ActionRow(
+                            label = if (technique == ImageTechnique.STURDY) {
+                                stringResource(R.string.workshop_image_save_action_jpeg)
+                            } else {
+                                "save as PNG"
+                            },
+                            enabled = canSaveOrShare,
+                            onClick = onSave,
+                        )
                         ActionRow(label = "share", enabled = canSaveOrShare, onClick = onShare)
                     }
                 }
             }
 
             StatusBlock(status = status)
-            SaveStatusBlock(status = saveStatus)
+            SaveStatusBlock(status = saveStatus, technique = technique)
         }
+
+        WorkshopBackLink(onBack)
     }
 }
 
@@ -1032,8 +1426,7 @@ private fun CoverRow(label: String, selected: Boolean, enabled: Boolean, onClick
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, filled = selected, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
@@ -1049,8 +1442,7 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
@@ -1086,7 +1478,7 @@ private fun StatusBlock(status: StegoStatus) {
             style = MaterialTheme.typography.bodyLarge,
             color = TextSecondary,
         )
-        is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+        is StegoStatus.Analyzed -> AnalyzedBlock(result = status.result, coverWasLossyContainer = status.coverWasLossyContainer)
         is StegoStatus.Failed -> Text(
             text = status.message,
             style = MaterialTheme.typography.bodyLarge,
@@ -1108,15 +1500,24 @@ private fun StatusWord(word: String) {
  * Task #34's secondary readout, rendered independently of [StatusBlock] — see [SaveStatus]'s
  * KDoc for why the two stay separate. `labelSmall`/[TextSecondary] throughout, same
  * "informational, not destructive" voice [extractFailureMessage] uses for a failed extract.
+ *
+ * v6 (task W2-4): [technique] only changes the [SaveStatus.Saved] wording (PNG vs JPEG, matching
+ * which format [ImageStegoScreen]'s `persistWorkingImage` actually wrote) -- defaults to
+ * [ImageTechnique.EXACT] so this function's own behavior is unchanged unless a caller passes
+ * STURDY.
  */
 @Composable
-private fun SaveStatusBlock(status: SaveStatus) {
+private fun SaveStatusBlock(status: SaveStatus, technique: ImageTechnique = ImageTechnique.EXACT) {
     when (status) {
         is SaveStatus.Idle -> Unit
         is SaveStatus.Saving -> StatusWord("saving")
         is SaveStatus.Sharing -> StatusWord("sharing")
         is SaveStatus.Saved -> Text(
-            text = "saved to your photo gallery as PNG",
+            text = if (technique == ImageTechnique.STURDY) {
+                stringResource(R.string.workshop_image_saved_jpeg)
+            } else {
+                "saved to your photo gallery as PNG"
+            },
             style = MaterialTheme.typography.labelSmall,
             color = TextSecondary,
         )
@@ -1136,9 +1537,16 @@ private fun SaveStatusBlock(status: SaveStatus) {
  * line (real chi-square window/run output, e.g. "sustained PoV-equalization run: 5/32
  * windows...") is the one deliberate rough edge on this screen, the same move task #7/#10 made
  * with the modem's FEC count and the detector's tone-grid note.
+ *
+ * [coverWasLossyContainer] (task W2-6, gate-30 follow-up): true once the checked cover's real
+ * container was sniffed as JPEG/WebP/HEIC. `ImageSteganalysisRealPhotoFalseFlagTest.kt` measured
+ * this check's false-flag rate on clean, never-embedded real photos per container -- material
+ * enough on JPEG that the verdict alone is misleading there, so this renders one honest caveat
+ * line underneath it. The verdict itself (confidence/flagged/detail/estimate above) is always
+ * shown unchanged -- this never hides or downgrades a flag, only explains it.
  */
 @Composable
-private fun AnalyzedBlock(result: DetectionResult) {
+private fun AnalyzedBlock(result: DetectionResult, coverWasLossyContainer: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = "${(result.confidence * 100).roundToInt()}%",
@@ -1160,6 +1568,13 @@ private fun AnalyzedBlock(result: DetectionResult) {
         result.estimatedPayloadBytes?.let { bytes ->
             Text(
                 text = "~$bytes bytes estimated",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        if (coverWasLossyContainer) {
+            Text(
+                text = stringResource(R.string.workshop_image_check_jpeg_caveat),
                 style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
             )
@@ -1309,15 +1724,20 @@ class ImageStegoController(
     /** Score [sample] for the likelihood it holds an embedded payload. No-op while busy. Same
      *  synchronous-gate discipline as [embed] — see its KDoc, including the S-01
      *  [OutOfMemoryError] catch ([ImageSteganalysis]'s per-pixel channel-sample array is the
-     *  largest single allocation in this file's whole embed/extract/check pipeline). */
-    fun analyze(sample: Bitmap) {
+     *  largest single allocation in this file's whole embed/extract/check pipeline).
+     *  [coverWasLossyContainer] (task W2-6) is a plain caller-supplied snapshot of whether the
+     *  current cover's real container (sniffed by magic bytes) was JPEG/WebP/HEIC -- this
+     *  controller does no sniffing itself, only carries the flag into [StegoStatus.Analyzed] so
+     *  the honest caveat renders against the state that produced the verdict, not whatever cover
+     *  happens to be selected by the time the result is drawn. */
+    fun analyze(sample: Bitmap, coverWasLossyContainer: Boolean = false) {
         if (!idleEquivalent) return
         status = StegoStatus.Analyzing
         scope.launch {
             status = try {
                 val result = detector.analyze(sample)
                 DebugProbe.reportDetectorConfidence(ModuleId.IMAGE_STEGANALYSIS, result.confidence)
-                StegoStatus.Analyzed(result)
+                StegoStatus.Analyzed(result, coverWasLossyContainer)
             } catch (oom: OutOfMemoryError) {
                 StegoStatus.Failed(OOM_ERROR_MESSAGE)
             }
@@ -1333,6 +1753,32 @@ class ImageStegoController(
         /** Copy shown for [StegoStatus.Failed] — plain, lowercase, matches this screen's other
          *  short failure captions (e.g. `coverLoadError`'s "couldn't load that image..."). */
         const val OOM_ERROR_MESSAGE = "that image is too large to work with here. try a smaller one."
+    }
+}
+
+/**
+ * v6 (task W2-4, gate-30): [CovertCarrier]<Bitmap> adapter over [SturdyImageCarrier], so this
+ * screen's existing Bitmap-shaped [ImageStegoController] can drive the sturdy technique through
+ * the exact same embed/extract/encode-decode plumbing it already uses for the frozen exact-LSB
+ * codec (INV-9: this wraps, never modifies, [SturdyImageCarrier]'s own frame format).
+ * [BitmapPixelSurface]/[toBitmap] are `SturdyImageAndroidAdapter.kt`'s existing Bitmap<->
+ * PixelSurface bridge (the same one [dev.herakles.nightjar.incoming.SturdyImageFireflyDecoder]
+ * uses for the receive side) -- this class adds no new pixel-format logic of its own, only the
+ * interface adaptation, and is instantiated directly here rather than threaded through
+ * `MainActivity.kt`/`jarCatchFlow` as a second factory parameter, so neither of those needs to
+ * change for this task (this task's own scope note: technical content only).
+ */
+private class SturdyImageBitmapCarrier(private val cover: Bitmap) : CovertCarrier<Bitmap> {
+    private val inner = SturdyImageCarrier(BitmapPixelSurface(cover))
+
+    override val descriptor = inner.descriptor
+    override val maxPayloadBytes: Int = inner.maxPayloadBytes
+
+    override fun encode(payload: ByteArray): Bitmap = inner.encode(payload).toBitmap()
+
+    override fun decode(carrier: Bitmap): DecodeResult {
+        val surface = BitmapPixelSurface(carrier)
+        return SturdyImageCarrier(surface).decode(surface)
     }
 }
 
@@ -1376,8 +1822,12 @@ private const val MAX_PICKED_COVER_DIMENSION = 4096
  * `inJustDecodeBounds = true` (bounds land in `options.outWidth`/`outHeight` instead, never in
  * the return value), so the bounds pass tracks "did the stream even open" via the `use` block's
  * own return value rather than the decode call's.
+ *
+ * `internal` (task W2-2): reused as-is by `HideInPhotoFlow.kt`'s own Photo Picker launcher --
+ * "hide one in a photo" needs the exact same bounded, `HARDWARE`-config-free decode this screen's
+ * cover picker already established, not a second copy of it.
  */
-private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
+internal fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
     val resolver = context.contentResolver
 
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1401,6 +1851,36 @@ private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
 } catch (oom: OutOfMemoryError) {
     null
 }
+
+/**
+ * Sniffs whether [uri]'s real container (by magic bytes, via [FileSniffer.sniff] — the same
+ * receive-path sniffer `IncomingPipeline` uses, never a declared MIME/extension) is JPEG, WebP or
+ * HEIC (task W2-6, gate-30 follow-up: the "check for hidden data" honest caveat). Reads only a
+ * handful of header bytes off their own short-lived stream — this does not weaken
+ * [decodePickedCoverImage]'s "nothing left pointing at the original lossy file" contract just
+ * above: the Uri/bytes themselves are never kept past this call, only the single boolean this
+ * returns, for *display* only (whether to show a caveat under a later check verdict), never to
+ * reconstruct or re-embed against the original file.
+ */
+internal fun sniffPickedCoverIsLossy(context: Context, uri: Uri): Boolean {
+    val head = try {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            val buffer = ByteArray(SNIFF_HEADER_BYTES)
+            val read = stream.read(buffer)
+            if (read <= 0) ByteArray(0) else buffer.copyOf(read)
+        }
+    } catch (failure: Exception) {
+        null
+    } ?: ByteArray(0)
+    return when (FileSniffer.sniff(head)) {
+        SniffedType.JPEG, SniffedType.WEBP, SniffedType.HEIF -> true
+        else -> false
+    }
+}
+
+/** Comfortably covers every magic-byte pattern [FileSniffer.sniff] checks (the longest is the
+ *  12-byte RIFF/ISO-BMFF brand check). */
+private const val SNIFF_HEADER_BYTES = 32
 
 /**
  * The smallest power-of-two `inSampleSize` (1, 2, 4, 8, ...) that brings the post-scale long
@@ -1573,6 +2053,55 @@ private fun saveBitmapAsPngToMediaStore(context: Context, bitmap: Bitmap): Uri {
 private fun buildPngShareIntent(uri: Uri): Intent =
     Intent(Intent.ACTION_SEND).apply {
         type = "image/png"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+// --- v6 (task W2-4, gate-30): sturdy save/share writes JPEG instead of PNG -- JPEG survival is
+// the whole point of the technique (architecture.md "Sturdy image technique (v6)"; a PNG
+// export would never even exercise it). Mirrors saveBitmapAsPngToMediaStore/buildPngShareIntent
+// exactly, only the encode call ([encodeSturdyJpeg], not [encodePngBytes]) and MIME/extension
+// differ. ---
+
+/**
+ * Writes [bitmap] as a JPEG (via [encodeSturdyJpeg], this app's `STURDY_JPEG_QUALITY`) into the
+ * device's `MediaStore.Images` collection (`Pictures/Nightjar/`) and returns the resulting
+ * `content://` [Uri]. Same two-phase-write/cleanup-on-failure shape as
+ * [saveBitmapAsPngToMediaStore] -- see that function's KDoc.
+ */
+private fun saveBitmapAsJpegToMediaStore(context: Context, bitmap: Bitmap): Uri {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, "nightjar_${System.currentTimeMillis()}.jpg")
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Nightjar")
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val uri = resolver.insert(collection, values)
+        ?: throw IOException("MediaStore rejected the insert (collection unavailable)")
+
+    try {
+        val opened = resolver.openOutputStream(uri)?.use { stream -> stream.write(encodeSturdyJpeg(bitmap)) }
+        checkNotNull(opened) { "couldn't open an output stream for $uri" }
+    } catch (failure: Exception) {
+        resolver.delete(uri, null, null) // don't leave a pending/broken row behind
+        throw IOException("failed writing JPEG bytes to MediaStore for $uri", failure)
+    }
+
+    values.clear()
+    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+    resolver.update(uri, values, null, null)
+    return uri
+}
+
+/**
+ * Builds the `ACTION_SEND` share-sheet intent for a just-saved sturdy JPEG: `image/jpeg` MIME,
+ * otherwise identical to [buildPngShareIntent] -- see its KDoc.
+ */
+private fun buildJpegShareIntent(uri: Uri): Intent =
+    Intent(Intent.ACTION_SEND).apply {
+        type = "image/jpeg"
         putExtra(Intent.EXTRA_STREAM, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }

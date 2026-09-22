@@ -61,9 +61,13 @@ class FireflyRepository(
      * EXISTING filename another row already owns), in which case deleting it would destroy that
      * row's live carrier while "cleaning up" this failed insert. Otherwise every failed insert
      * leaves an orphan that only the next-launch sweep can reclaim.
+     *
+     * Returns the inserted row's id (W2-3, gate-36: a practice catch needs it immediately to mark
+     * itself via [dev.herakles.nightjar.trail.TrailStateStore.markPractice]) -- a thin passthrough
+     * of [FireflyDao.insert]'s own return value.
      */
-    suspend fun insertWithMedia(record: FireflyRecord, media: ByteArray, extension: String) {
-        withContext(Dispatchers.IO) {
+    suspend fun insertWithMedia(record: FireflyRecord, media: ByteArray, extension: String): Long {
+        return withContext(Dispatchers.IO) {
             val filename = mediaStore.write(media, extension)
             try {
                 dao.insert(record.copy(mediaPath = filename, mediaBytes = media.size.toLong()))
@@ -77,10 +81,10 @@ class FireflyRepository(
         }
     }
 
-    /** Passthrough insert for media-less fireflies -- no file touched, `mediaPath`/`mediaBytes` are whatever [record] already carries (null/0 for an un-attached catch). */
-    suspend fun insert(record: FireflyRecord) {
-        dao.insert(record)
-    }
+    /** Passthrough insert for media-less fireflies -- no file touched, `mediaPath`/`mediaBytes`
+     *  are whatever [record] already carries (null/0 for an un-attached catch). Returns the
+     *  inserted row's id, same reasoning as [insertWithMedia]'s own return value. */
+    suspend fun insert(record: FireflyRecord): Long = dao.insert(record)
 
     fun observeByModule(moduleId: String): Flow<List<FireflyRecord>> = dao.observeByModule(moduleId)
 

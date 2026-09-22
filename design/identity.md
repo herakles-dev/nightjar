@@ -114,6 +114,190 @@ unused slot (see `Type.kt` for the full collapse list).
 
 ---
 
+## Tappable-vs-static affordance (2026-09-22)
+
+Owner report: on the five technical screens (module picker, acoustic modem, image
+steganography, audio steganography, detector), users could not tell which text was
+tappable versus purely informational. The diagnosis held up: `ActionRow`/`CoverRow`
+(and their equivalents in every other technical screen file) render their **enabled**
+tappable label in `labelLarge`/`TextPrimary` — the exact color `StatusBlock`'s static
+result text also uses (a different type slot, `bodyLarge`, but the same color, which is
+what a quick glance actually registers). A **disabled** row drops to `TextSecondary` —
+the same color static secondary captions and descriptions already use. Color was being
+asked to carry three things at once (selection state, enabled/disabled state, and
+tappability) when it was only ever reserved for the first two.
+
+**Decision:** a plain `TextDecoration.Underline`, applied through one shared primitive,
+`TextStyle.withTapAffordance(tappable: Boolean = true)` in
+`ui/theme/TappableText.kt`, reserved exclusively for text the user can act on *right
+now*. Never applied to static/informational text, status words, or a row while it's
+disabled.
+
+Considered and rejected:
+- **A trailing glyph** (e.g. a `›` appended to the label). Rejected: roughly half the
+  rows this needs to cover are *selection* rows (`CoverRow`, `SettingOptionRow`,
+  `SelectorRowWithInfo`'s option rows) rather than navigation rows — a forward-chevron
+  on "cover image: mosaic" promises a drill-down that tapping it doesn't do (it just
+  selects the option in place). One glyph, one meaning, wrong on half its own
+  applications is worse than the ambiguity it would fix.
+- **A new or reassigned color.** Rejected on the same discipline the accent-color
+  decision above holds itself to: `AccentSignal` earns its existence with a measured
+  contrast ratio and exactly two named states. This affordance has to sit on top of
+  the selected/unselected and enabled/disabled color logic every row already carries,
+  not replace or compete with it — a third color axis stacked on two already-overloaded
+  ones would make the palette harder to reason about, not easier.
+- **Underline** was the one option that costs nothing new in the palette: no icon or
+  vector asset, no shadow/glow/gradient, no motion, and it is the oldest, plainest
+  "this is a link" convention there is — older than the Material-3-sample look this
+  project exists to avoid, not an imitation of it.
+
+**Disabled rows get no distinct treatment of their own beyond losing the underline** —
+they keep rendering exactly like static secondary text, which this task treats as the
+correct reading rather than a gap: a disabled row is not actionable right now, so
+looking like static text is honest, not a missed case. A separate "disabled but not
+quite static" visual tier would be a fourth signal for a state this pass wasn't asked
+to solve, and it's the kind of speculative decoration the "one rough edge, not a
+polished one" discipline elsewhere in this file argues against adding pre-emptively.
+
+Applied to every enabled tappable row on all five technical screens: `ModulePicker`'s
+three module rows (label only — each row's one-line description stays plain, matching
+the rule that the affordance marks the actionable word, not the whole row) plus its
+"back to the jar" and "start the trail again" links; `AcousticModemScreen`'s
+`ActionRow`/`SettingOptionRow` rows and its "back" link; `ImageStegoScreen`'s
+`ActionRow`/`CoverRow` rows and its "back" link; `AudioStegoScreen`'s `ActionRow`,
+`PlaybackVerb`, `SelectorRowWithInfo` (both its option label and its "?"/"close" info
+toggle), `SectionLabelRow`'s info toggle, and its "back" link; `DetectorScreen`'s
+listen/stop `ActionRow` and its "back" link. Rows with no `enabled` concept of their own
+(back links, the detector's listen/stop row, the info toggles) pass no argument and
+resolve to the primitive's default (`tappable = true`).
+
+**Explicitly not touched:** the Firefly Jar surface (`JarActionRow`, `JarCoverRow`,
+`JarFlowRow`, `JarSelectorRow`, `JarOptionRow`, and everything else under
+`design/firefly-jar-identity.md`'s doctrine). That surface already signals its tappable
+rows with tinted fill + border, has its own visual language by explicit owner
+direction, and this task's scope is the technical screens only. The fullscreen-image
+tap target (`ImageStegoScreen`'s cover preview, `FullscreenImageViewer.kt`) was also
+left alone — it's an `Image`, not `Text`, so a text-decoration primitive doesn't apply
+to it, and it already has its own owner-requested corner glyph affordance from a prior
+task, outside this pass's "text-only" brief.
+
+No new color token was needed — see § Palette above for why introducing one was
+rejected. `Type.kt` was not touched; the primitive operates on whatever `TextStyle` a
+row already resolves to, rather than adding a new type-scale slot.
+
+---
+
+## Workshop button chrome override (2026-09-22)
+
+**Explicit owner-directed override of this file's own anti-AI-tell doctrine, scoped to the five
+technical screens.** The owner tried the underline-only tappable affordance above on-device and
+rejected it. Quoted directly: *"not enough. make them look like buttons. ignore the ai tell rules
+theyre tok strict."* This is a direct instruction, not drift, and it is recorded here with the
+same rigor every other visual decision in this file gets — a scoped, dated exception, not a
+silent doctrine violation and not a doctrine rewrite.
+
+**What now reads differently, for `ModulePicker`, `AcousticModemScreen`, `ImageStegoScreen`,
+`AudioStegoScreen`, and `DetectorScreen` only:**
+- `/home/hercules/pixel6a/CLAUDE.md`'s android-designer doctrine table ("App primary screen: …
+  Not Material 3 sample app… Not a feature carousel," implicitly no button-color-fill surfaces)
+  and this file's own "no cards" posture no longer hold for these five screens' tappable rows.
+  Every previously-plain tappable row (`ActionRow`, `CoverRow`, `SettingOptionRow`,
+  `SelectorRowWithInfo`, `PlaybackVerb`, every "back" link, `ModulePicker`'s per-module label, and
+  the "?"/"close" info toggles) now renders inside a real, rounded, bordered/filled rectangle — a
+  button, not a card (no shadow, no elevation, no independent card-surface stacking; see below).
+- The underline-only primitive from the section above (`TextStyle.withTapAffordance`,
+  `ui/theme/TappableText.kt`) is **superseded and deleted**. Every call site it covered now uses
+  real chrome instead — nothing in the app calls it anymore (confirmed by grep across
+  `app/src`). `TappableTextTest.kt` was deleted alongside it; the test suite has no orphaned
+  reference to either file.
+
+**What's new:** one color token, `WorkshopButtonFill` (`#21262D` — GitHub dark mode's own
+secondary-button fill, pulled from the same GitHub-dark scale the rest of this palette already
+borrows from; see `Color.kt`), and one shared modifier, `Modifier.workshopButton(enabled, filled,
+compact, onClick)` in the new `ui/theme/WorkshopButton.kt` (full rationale in its own KDoc — read
+that file, not just this summary). Three visual tiers:
+
+1. **Filled** — `WorkshopButtonFill` background + `BorderDefault` 1dp border, `TextPrimary` text.
+   Primary verbs (transmit/embed/extract/check/save/share/listen/send/etc.) and the *currently
+   selected* option in a picker row.
+2. **Outlined** — border only, transparent fill (the screen's own `BgBase` shows through),
+   `TextSecondary` text. Every "back" link, `ModulePicker`'s "start the trail again" link and
+   per-module label chip, an *unselected-but-available* picker option, and the compact
+   "?"/"close" info toggles.
+3. **Disabled** — `BgSurface` fill, no border, `TextSecondary` text (same color as before this
+   override) — a real, dim, borderless "grayed-out button," now visibly distinct from both
+   enabled tiers *and* from plain static text (closing the gap the underline-only pass explicitly
+   left open: "a disabled row is not actionable right now, so looking like static text is
+   honest" stopped being true the moment every enabled row got real chrome around it).
+
+The outline tier resolves a real, measured WCAG-AA failure — it isn't decoration or variety for
+its own sake. `TextSecondary` against `WorkshopButtonFill` measures **4.08:1**, under the 4.5:1
+floor non-large text needs (`labelLarge`/`labelSmall` are 13sp/11sp, not "large text" by the WCAG
+definition); `TextSecondary` against the plain screen background (`BgBase`) measures **5.07:1**,
+which clears it. Rather than invent a second, lighter secondary-text color to sit on the fill — a
+fourth color axis stacked on the two (selection state, enabled state) this app's rows already
+carry, which the tappable-affordance pass above explicitly rejected doing for the same reason —
+unselected/secondary rows go outline-only instead: still an unambiguous bordered button (the
+owner's actual ask), with the existing selected/unselected text-color distinction left intact and
+legible. Full contrast table (relative-luminance formula, same method this file's `AccentSignal`
+contrast claim uses): `TextPrimary`/`WorkshopButtonFill` 12.88:1, `TextSecondary`/`BgSurface`
+4.64:1, `TextSecondary`/`BgBase` 5.07:1 — all clear WCAG AA with margin.
+
+Numbers: 8dp corner radius. 16dp horizontal / 12dp vertical internal padding (10dp/8dp "compact"
+padding for the 1-2-character info toggles only — their touch target floor is unchanged).
+`heightIn(min = 48.dp)` enforced on every button regardless of padding, for this project's 1.3x
+accessibility-scale floor — this actually *enlarges* `SettingOptionRow`/`CoverRow`'s prior fixed
+40dp tap target, a real accessibility improvement, not just a visual one. Spacing: every
+within-group 0dp gap between two now-independently-shaped buttons (the acoustic modem's
+save/share and import/listen clusters; the image-stego embed/extract/check and save/share
+clusters; the audio-stego save/share and open/extract/check clusters) picked up a 6dp gap so
+adjacent buttons read as separate shapes instead of one touching block. Spacing between
+*different* groups (already non-zero, e.g. the 12dp between clusters) was left untouched, and so
+was the pre-existing 4dp gap between the acoustic modem's protocol/symbol-rate option rows — it's
+non-zero and outside this task's explicit "0dp-grouped runs only" scope, even though it reads
+tighter now with real chrome than it did as plain underlined text.
+
+**Rest of the anti-AI-tell checklist, re-run 2026-09-22 against all five converted files and
+`ui/theme/WorkshopButton.kt`/`Color.kt`:**
+- [x] No icons/emoji — confirmed, `workshopButton` only ever touches background/border/padding/
+  click; no `Icon`, drawable, or emoji glyph was added anywhere in this pass.
+- [x] No motion/animation — confirmed, no `androidx.compose.animation` import exists in
+  `app/build.gradle.kts` or any of the five files (grepped). Chrome is present or absent per
+  composition, exactly like the underline it replaces — never animated in, no `Crossfade`, no
+  tween on enable/disable or select/deselect.
+- [x] No gradients — confirmed, `workshopButton`'s `.background(...)` call always takes one flat
+  `Color` (`WorkshopButtonFill`, `BgSurface`, or `Color.Transparent`), never a `Brush`.
+- [x] No shimmer/glow/blur — confirmed, no `blur()`, no `graphicsLayer` shadow, no animated
+  alpha/scale on any button, filled or outlined.
+- [x] Dark-only — confirmed, unchanged; `NightjarTheme` still hardcodes `darkColorScheme()`,
+  `isSystemInDarkTheme()` still appears nowhere in the app.
+- [x] No success color — confirmed, unchanged; the filled/outlined/disabled tiers encode
+  selection and enablement, not completion — no color was added for a "done"/"success" state.
+- [x] Mono only for timestamps — confirmed, unchanged; `workshopButton` never sets `fontFamily`,
+  and the detector's `HH:mm:ss` history column is still the only monospace usage in the app.
+- [x] No elevation/shadow — a deliberate choice, not an oversight: flat fill + 1dp border only,
+  no `Modifier.shadow(...)`, no `tonalElevation`/`shadowElevation` anywhere. The owner's complaint
+  was legibility ("make them look like buttons"), not depth — a flat bordered rectangle reads as
+  a real button on this palette without reaching for skeuomorphic elevation, and "no
+  elevation/shadow" stays live doctrine for every surface this task didn't touch.
+- [x] Firefly Jar surface untouched — grepped every edited file's diff for `Jar`; zero touches to
+  `JarActionRow`/`JarCoverRow`/`JarFlowRow`/`JarSelectorRow`/`JarOptionRow`/`JarType`/any
+  `firefly-jar-identity.md` token or color. That surface keeps its own tinted-fill/border
+  language, entirely untouched by this override, and was never under the restriction this
+  override lifts (see `firefly-jar-identity.md` — it already uses filled/bordered rows).
+- [x] Eyechecked live on-device (Hek, real screenshots, not a Preview render) after install:
+  module picker, acoustic modem, image steganography, and audio steganography all confirmed —
+  filled/outlined/disabled tiers render as distinct, legible, real-looking buttons; the 6dp
+  cluster gaps read as separate shapes, not a touching block; the compact "?" toggles sit
+  correctly sized next to their selector rows.
+
+This is a scoped, recorded exception for the five technical screens' tappable rows — not a
+doctrine rewrite. Every other rule in this file and in `/home/hercules/pixel6a/CLAUDE.md`'s
+anti-AI-tell checklist still governs every other surface in this app, including the Firefly Jar,
+the splash/cold-start path, the app icon, and any future screen this task didn't touch.
+
+---
+
 ## Compose theme wiring
 
 `NightjarTheme` in `app/src/main/java/dev/herakles/nightjar/ui/theme/Theme.kt`:
@@ -265,6 +449,36 @@ variable names (`c2` as a cosine-wave term, `Stage C2` internal task labeling). 
 string (`"the ravens have landed"`, `"wet-snacks-design"`); the user always supplies the
 real payload. INV-1 (synthetic/benign payloads only) still holds.
 
+**Re-run 2026-09-22 (tappable-vs-static affordance): re-checked all items against the new
+`ui/theme/TappableText.kt` primitive and its five call sites** (`ModulePicker.kt`,
+`AcousticModemScreen.kt`, `ImageStegoScreen.kt`, `AudioStegoScreen.kt`,
+`DetectorScreen.kt`):
+- No shimmer/glow/bloom, no gradient, no shadow — `TextDecoration.Underline` is a
+  static text-style flag, not a drawn effect; nothing in `TappableText.kt` touches
+  `Brush`, `graphicsLayer`, or any shadow modifier.
+- No new color — the primitive never sets `color`; every row's existing selected/
+  enabled color logic (`TextPrimary`/`TextSecondary`) is untouched, confirmed by the
+  `TappableTextTest`'s "only the decoration changes" case.
+- No icon/vector asset — the affordance lives entirely inside `TextStyle`, no `Icon`
+  composable, no drawable, no `Canvas` glyph added anywhere.
+- No motion — the underline is present or absent per composition, no animated
+  reveal, no `Crossfade`, no tween; no new `androidx.compose.animation` usage was
+  introduced by this change.
+- No card/glassmorphism — this change adds no new surface, only a text-style flag on
+  existing plain `Text`/`Box` rows.
+- Doesn't leak into jar mode — grepped every edited file's diff for `Jar` (functions,
+  imports, colors); zero touches to `JarActionRow`, `JarCoverRow`, `JarFlowRow`,
+  `JarSelectorRow`, `JarOptionRow`, `JarType`, or any `firefly-jar-identity.md` token.
+Zero violations found. This is the first checklist re-run to cover the tappable-
+affordance decision; nothing prior addressed tappability signaling at all.
+
+**Re-run 2026-09-22 (workshop button chrome override):** `TappableText.kt` above is superseded —
+see § Workshop button chrome override for the full, item-by-item re-run against the real-chrome
+replacement (`ui/theme/WorkshopButton.kt`). Explicit owner-directed exception to "no cards"/no
+button-fill; every other item (icons/emoji, motion, gradients, shimmer/glow/blur, dark-only,
+success color, mono-only-for-timestamps, elevation/shadow, Firefly Jar isolation) re-confirmed
+clean.
+
 ---
 
 ## Change log
@@ -297,6 +511,8 @@ real payload. INV-1 (synthetic/benign payloads only) still holds.
 | 2026-08-03 | **Task #27.** Acoustic modem's `listening` state now shows a live input-level readout (`input level N dB`, RMS dBFS, ~85ms update cadence) and a remaining-time countdown (`Ns left in listen window`) as two labelSmall/TextSecondary rows under the status word. `DecodedFailure` gained a `timedOut` flag, giving the `NO_PAYLOAD_FOUND` case a more specific message when the full 20s window elapses with nothing decoded ("no signal detected in 20s. move phones closer and confirm the other phone actually transmitted.") vs. an early manual stop (unchanged shorter message). | Real two-phone test feedback: the person running it had no way to tell whether "listen" was picking anything up, how long the window would run, or why it failed — the screen just sat there. Both additions are plain numeric text at the same throttled cadence the detector's live confidence readout already established (Task #10) — no meter, no gauge, no animation added; the accent/motion/palette decisions this task ratified are unchanged. |
 | 2026-08-03 | **Task #28.** Added one line of static, first-run guidance text to all four screens, all labelSmall/TextSecondary, all present-always (not tied to a live state): (1) module picker — each of the 3 rows gained a one-line `description` under its label ("send text as sound, phone to phone" / "hide or extract text inside an image" / "continuously listens for the modem's signal"), rows changed from a fixed-height `Row` to a wrap-content `Column` to fit the second line; (2) acoustic modem — "works best within 1m, in a quiet room." under the title, sourced from architecture.md §7's AUDIBLE-protocol round-trip envelope (speaker→mic ≤1.0m, ambient noise <45 dBA), not a made-up number; (3) image steganography — one caption above the embed/extract/check row group explaining what each of the three verbs does; (4) detector — one line under the title explaining the confidence number is a live match score against the modem's own signal and that it runs continuously/passively (never decodes). | Real user feedback: the app wasn't usable for a first-time user — no idea what distance to use, what the byte counters meant, or what a confidence number implied. All four additions are plain static text, no dialogs, no onboarding carousel, no tooltip/popover — matches the "terse inline text, not tutorial overlays" instruction and the existing screens' own established micro-copy voice (bare lowercase sentences, no exclamation, real numbers over vague ones). None of Task #27's live listening-state additions (level readout, countdown) were touched or duplicated — the new modem note sits above the payload field, entirely separate from `ListeningBlock`. |
 | 2026-09-21 | **Gate-9/gate-14 close-out.** Re-ran the full anti-AI-tell checklist against Module 2 (`AudioStegoScreen.kt`, including its v5 detector wiring), `CarrierInsightViews.kt`'s v5 difference/polarity views, and the owner-requested `FullscreenImageViewer.kt` — none of which the 2026-08-03 Task #17 pass above could have covered. Also re-checked INV-1 (synthetic/benign payloads only) against the full `app/src/main/java`/`app/src/test/java` tree. | Gate-9 has required this re-run since Module 2 shipped (v2 addition) but it was never actually recorded as done. Zero violations found on either check; see Anti-AI-tell status above for the item-by-item results. |
+| 2026-09-22 | **Workshop tappable-vs-static affordance.** Added `TextStyle.withTapAffordance(tappable: Boolean = true)` (`ui/theme/TappableText.kt`) — a plain `TextDecoration.Underline`, reserved exclusively for enabled tappable row labels. Applied across all five technical screens: `ModulePicker`'s module rows (label only) + "back to the jar"/"start the trail again" links; `AcousticModemScreen`'s `ActionRow`/`SettingOptionRow` + "back"; `ImageStegoScreen`'s `ActionRow`/`CoverRow` + "back"; `AudioStegoScreen`'s `ActionRow`/`PlaybackVerb`/`SelectorRowWithInfo` (label + info toggle)/`SectionLabelRow` (info toggle) + "back"; `DetectorScreen`'s listen/stop `ActionRow` + "back". No new color token, no icon, no motion. Firefly Jar mode (`Jar*` composables) untouched — it already signals tappability with tinted fill/border per its own doctrine. | Owner report: users couldn't tell tappable text from static text on the technical screens — `ActionRow`'s enabled label and `StatusBlock`'s static result text shared the same `TextPrimary` color, and a disabled row already shared `TextSecondary` with static secondary captions. Underline was chosen over a trailing glyph (wrong semantics on the screens' many *selection* rows, which don't drill down) and over a new/reassigned color (would stack a third meaning onto color axes already carrying selection-state and enabled-state). Disabled rows deliberately get no distinct treatment beyond losing the underline — a disabled row genuinely isn't actionable right now, so reading identically to static text is honest, not a gap. See § Tappable-vs-static affordance above for the full rationale and the Anti-AI-tell status re-run this task closes out. |
+| 2026-09-22 | **Workshop button chrome override (explicit owner direction).** Deleted `ui/theme/TappableText.kt`/`TappableTextTest.kt` (superseded — no remaining call sites). Added `WorkshopButtonFill` (`#21262D`) to `Color.kt` and the shared `Modifier.workshopButton(enabled, filled, compact, onClick)` in the new `ui/theme/WorkshopButton.kt`. Converted every row the tappable-affordance pass above touched to real filled/outlined/disabled button chrome (8dp radius, `BorderDefault` 1dp border, 16dp/12dp padding, `heightIn(min = 48.dp)`) across all five technical screens. Added 6dp gaps to every previously-0dp button cluster (modem save/share + import/listen; image-stego embed/extract/check + save/share; audio-stego save/share + open/extract/check). | Owner, on-device, after trying the underline: "not enough. make them look like buttons. ignore the ai tell rules theyre tok strict." Explicit, direct override of this file's "no cards"/no-button-fill doctrine for these five screens only — see § Workshop button chrome override above for the full record, the WCAG-AA contrast math behind the filled/outlined split (TextSecondary on the new fill measured 4.08:1, under AA; outline-only at 5.07:1 against BgBase clears it), and the re-run confirming every other checklist item (icons, motion, gradients, shimmer/glow, dark-only, success color, mono-only-timestamps, elevation/shadow, Firefly Jar isolation) still holds. |
 
 ---
 
@@ -342,3 +558,64 @@ No clutter, no overlap, no truncation on any of the four screens at real device
 resolution (1080x2400). Screenshots not committed to the repo (raw device captures
 land in `~/pixel6a/captures/`, outside this project's tree, matching prior tasks'
 practice of not vendoring capture PNGs into `design/assets/`).
+
+---
+
+## Verification (Workshop tappable-vs-static affordance, 2026-09-22)
+
+`./gradlew --console=plain -q testDebugUnitTest assembleDebug` — **succeeded on the
+first attempt.** `534` JVM unit tests ran, `0` failed (4 of them new, in
+`TappableTextTest.kt`); `app-debug.apk` produced at
+`app/build/outputs/apk/debug/`.
+
+No Paparazzi/Roborazzi/AGP Screenshot Testing is configured in this project (unchanged
+since Task #17's verification note), so — same as every prior visual task recorded in
+this changelog — build-level verification (every screen file, including its
+`@Preview` composables, compiling clean) plus the pure-Kotlin unit test on the shared
+primitive is what this pass relies on. Not verified live on-device this pass; the
+underline is a one-line, well-understood `TextStyle` change with no layout, sizing, or
+z-order implications, and every row's existing color/enabled logic is provably
+untouched (`TappableTextTest`'s "only the decoration changes" case) — the same
+risk profile prior instant-motion and type-scale decisions in this file relied on
+`assembleDebug` alone for.
+
+---
+
+## Verification (Workshop button chrome override, 2026-09-22)
+
+`./gradlew --console=plain -q testDebugUnitTest assembleDebug` — **succeeded on the first
+attempt.** `530` JVM unit tests ran, `0` failed (down from 534 — `TappableTextTest.kt`'s 4 tests
+were removed with the file it tested; no test was added for `workshopButton` itself, since it's a
+pure Compose-modifier function with no non-Compose logic to unit test — same reasoning Task #17's
+verification note gives for why this project doesn't unit-test Compose UI, and the same reasoning
+the task brief itself anticipated). `app-debug.apk` produced at `app/build/outputs/apk/debug/`.
+
+Unlike the tappable-affordance pass above, this one **was** verified live on-device — Hek was
+reachable (`hek adb-status` → `ACTIVE`). Installed the rebuilt `app-debug.apk`
+(`adb-new install -r`, `Success`) and drove the module picker, acoustic modem, image
+steganography, and audio steganography screens via `hek screen`/`hek tap`:
+- Module picker: "back to the jar" and each module's label chip render as clean outlined
+  buttons; the plain description line under each label stayed untouched, no chrome.
+- Acoustic modem: "audible"/"normal" (selected) render filled; "near-ultrasonic"/"fast"
+  (unselected) render outlined; "transmit"/"save"/"share" (disabled, empty payload) render
+  visibly dim with no border, distinct from "import"/"listen" (enabled, filled) right below
+  them — cropped and re-inspected at pixel level to confirm the border was actually absent on
+  the disabled tier, not just fainter.
+- Image steganography: "exact"/"gradient" (selected) filled, "sturdy"/"mosaic"/"device photo"
+  (unselected) outlined, "embed" (disabled, empty payload) dim vs. "extract" (enabled) filled —
+  same pattern, confirmed clean.
+- Audio steganography: `SelectorRowWithInfo`'s compact "?" toggles sit correctly sized next to
+  the full-width technique/cover rows with a visible gap, not stretched or crowded;
+  `SectionLabelRow`'s "what's the tradeoff?" toggle reads as its own button next to the plain
+  "technique" label; "play cover"/"play working" render as two independent filled buttons side
+  by side.
+- Detector screen not re-verified live this pass (navigation returned to audio steganography
+  before the tap landed) — its `ActionRow` conversion is code-identical in shape to
+  `AcousticModemScreen`'s and `ImageStegoScreen`'s already-verified `ActionRow`, and
+  `assembleDebug`/`testDebugUnitTest` both pass against it; not considered a material risk.
+
+One device-level observation, unrelated to this change: the test device has Android's "high
+contrast text" accessibility feature enabled, which draws a tight dark highlight box directly
+behind every glyph system-wide (visible identically on the untouched Firefly Jar screen in the
+same screenshots). This is a device accessibility setting, not part of the app's own rendering —
+noted here so a future screenshot comparison isn't misread as a regression this task introduced.

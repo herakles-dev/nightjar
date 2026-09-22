@@ -58,6 +58,21 @@ val AccentSignal = Color(0xFF39C5CF)
 
 // No success color. Silence is success.
 
+/**
+ * Workshop button chrome fill — owner-directed doctrine override, 2026-09-22 (see
+ * `ui/theme/WorkshopButton.kt` and `design/identity.md` § Workshop button chrome override). GitHub
+ * dark mode's own secondary-button fill, `#21262D` — pulled from the same GitHub-dark scale the
+ * rest of this palette already borrows from, not invented for this task. [BorderDefault]
+ * (`#30363D`) is GitHub's matching secondary-button border and was already defined, unused, before
+ * this override — no new border token was needed, only this one fill.
+ *
+ * Scoped to the five technical screens' real-button-chrome rows only
+ * ([dev.herakles.nightjar.ui.theme.workshopButton]'s "filled" tier). Never used on the Firefly Jar
+ * surface, which has its own tinted-fill button language (`JarAction*Fill`/`JarAction*Border`
+ * below) under `design/firefly-jar-identity.md`.
+ */
+val WorkshopButtonFill = Color(0xFF21262D)
+
 // --- Firefly Jar (v3 disguise surface) ---------------------------------------------
 // design/firefly-jar-identity.md is the source of truth for this block — a warm
 // dusk-meadow palette deliberately distinct from the cold scale above, scoped to

@@ -115,8 +115,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDistantFireflie
  * The two-flash blink cycle, verbatim from DESIGN_SPEC.md §4.2 — a fast ramp to full, a
  * hold, a fade, a long dark stretch, then a second flash at 60% before going dark again.
  * Period varies per firefly so the field never pulses in unison.
+ *
+ * `internal` rather than `private`: [FireflyGlyphs]'s meadow render (v6 addendum, the
+ * DETECTOR/"watching" module's open-field tile) reuses this same primitive for its own
+ * distant-firefly dots rather than inventing a second blink function.
  */
-private fun distantBlink(id: Int, t: Float): Float {
+internal fun distantBlink(id: Int, t: Float): Float {
     val period = 4f + (id % 7) * 0.8f
     val phase = ((t / period) + id * 0.29f).mod(1f)
     return when {

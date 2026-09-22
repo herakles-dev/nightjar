@@ -1,0 +1,44 @@
+<resources>
+    <!-- Workshop image-steganography (technical) screen: the v6 sturdy technique selector, its
+         exact-payload byte counter, its cover-size floor, its JPEG save/share copy, and the
+         check's measured sturdy caption (task W2-4, spec.md gate-30). New v6 copy for this
+         screen only; kept in its own file (not strings.xml) so parallel v6 tasks don't collide
+         on one shared resource file. The exact-technique's existing copy is untouched. -->
+
+    <!-- Technique selector (mirrors AudioStegoScreen's "technique" section/row style). -->
+    <string name="workshop_image_technique_label">technique</string>
+    <string name="workshop_image_technique_exact">exact</string>
+    <string name="workshop_image_technique_sturdy">sturdy</string>
+
+    <!-- v6 (task W2-7): sturdy's payload SLOT is a fixed size (SturdyImageCarrier.PAYLOAD_BYTES =
+         64), but the real message length is now variable, 1..64 (the frame's own length field
+         carries it, zero-padding the rest of the slot), so sturdy shares exact's plain
+         "%1$d / %2$d bytes" live counter (ImageStegoScreen.kt) and no longer needs its own
+         exact-byte-count strings. -->
+
+    <!-- General actions caption (task #28's original), sturdy variant: the exact-technique
+         string this replaces always writes PNG, which is no longer true once sturdy writes
+         JPEG; see save/share below. -->
+    <string name="workshop_image_actions_caption_sturdy">embed hides text in the image, extract reads it back, check scans for hidden data without extracting it. save/share unlock after a successful embed and write JPEG here, since that\'s what sturdy is built to survive.</string>
+
+    <!-- gate-30: the check's caption when technique = sturdy, written from the measurement in
+         SturdyImageSteganalysisRealPhotoTest.kt: on real photos this check's flagged/clear
+         reading tracks the photo's own JPEG pattern, not whether anything is hidden, and mostly
+         stops flagging anything at all once a photo is actually sent. -->
+    <string name="workshop_image_check_caption_sturdy">this check looks for exact\'s last-bit changes, not sturdy\'s brightness-cell shifts. in a small test on real photos it flagged sturdy output exactly as often as the same photos untouched, and after a real send it rarely flagged either, so flagged or clear here says little about sturdy.</string>
+
+    <!-- v6 (task W2-6, gate-30 follow-up): shown under EITHER verdict (flagged or clear) whenever
+         the checked cover's own sniffed container (magic bytes, not a declared MIME/extension)
+         was JPEG/WebP/HEIC. ImageSteganalysisRealPhotoFalseFlagTest.kt measured this check on 26
+         clean, never-embedded real photos: even as lossless PNGs it flagged 5/26 (19%) with
+         nothing hidden at all, and JPEG export raised that a bit further (5/26 at q75, 6/26 at
+         q90/q95), so the honest framing is "this check often misreads ordinary photo detail,
+         and JPEG makes that somewhat more likely," not "JPEG alone is the problem." Plain-voice,
+         states the measured fact, never claims the verdict itself is wrong. -->
+    <string name="workshop_image_check_jpeg_caveat">this check often misreads ordinary photo detail as hidden data, and JPEG compression can make that a little more likely — so a flag here doesn\'t mean something is hidden, and clear doesn\'t rule it out either.</string>
+
+    <!-- Save/share: sturdy always writes a JPEG (Pictures/Nightjar, image/jpeg) so the hidden
+         data survives; exact's own "saved to your photo gallery as PNG" string is unchanged. -->
+    <string name="workshop_image_saved_jpeg">saved to your photo gallery as JPEG</string>
+    <string name="workshop_image_save_action_jpeg">save as JPEG</string>
+</resources>

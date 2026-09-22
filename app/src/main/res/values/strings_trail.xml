@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v6 riddle trail copy (design/riddle-trail.md, Suggested strings.xml keys section). All v6 copy
+  lives here per gate-38 ("all v6 copy lives in strings.xml"); res/values/strings.xml itself is
+  left untouched by this task. Riddle and gloss wording is owner-approved (design/riddle-trail.md,
+  Owner decisions 2026-09-22) and reproduced byte-for-byte from that doc's own suggested-keys
+  block, which is its canonical resource text (that section's own note: "listed here as plain
+  resource text for review/translation purposes").
+-->
+<resources>
+    <string name="trail_riddle_art">i live in the last bit of red, green, and blue, never alpha, never loud enough to see. tip the bit-plane and find me. next, a secret in sound.</string>
+    <string name="trail_gloss_art">hidden one bit at a time in the image\'s own colors. open the bit-plane view to see the layer where it hides.</string>
+    <string name="trail_riddle_humming">above 1.5 khz, i nudge how loud a bin looks. silence gives me away. now, a song.</string>
+    <string name="trail_riddle_humming_fallback">silence gives me away. try a song.</string>
+    <string name="trail_gloss_humming">hidden in the loudness of frequencies above 1.5 khz. the difference view shows exactly which bins moved.</string>
+    <string name="trail_riddle_singing">i\'m tones, one pitch for every four bits, mended by reed-solomon. now: watch.</string>
+    <string name="trail_riddle_singing_fallback">four bits a pitch. now watch.</string>
+    <string name="trail_gloss_singing">sent out loud as tones between about 2 and 6 khz, each pitch standing for four bits. the meadow listens for exactly these tones.</string>
+    <string name="trail_meadow_honest_fallback">the meadow can\'t always hear its own song on one phone — the speaker and mic don\'t always overlap enough. skip this step, or open the singing jar and try \"create a firefly\" for real.</string>
+    <string name="trail_hint_art">try the art jar</string>
+    <string name="trail_hint_humming">try the humming jar</string>
+    <string name="trail_hint_singing">try the singing jar</string>
+    <string name="trail_hint_meadow">try the meadow</string>
+    <string name="trail_hint_send">send what you caught</string>
+    <string name="trail_hint_workshop">hold to see how it really works</string>
+    <string name="trail_skip">skip the trail</string>
+    <string name="trail_restart">start the trail again</string>
+    <string name="trail_practice_label">a practice firefly from the trail</string>
+    <!-- W2-3 additions: not in design/riddle-trail.md's own suggested-keys block (written before
+         the UI build), but required by gate-38 ("all v6 copy lives in strings.xml") for the two
+         pieces of UI chrome this task adds: the highlight's appended TalkBack clause
+         (design/firefly-jar-identity.md v6 addendum, Guidance-highlight rules: "next step in
+         the trail") and the small label above a practice firefly's plain-gloss text (same
+         addendum, Practice-firefly labelling: "labelled as a gloss"). -->
+    <string name="trail_highlight_next_step">next step in the trail</string>
+    <string name="trail_gloss_label">gloss</string>
+    <!-- W2-5 additions: design/riddle-trail.md § "Welcome + game layer (owner direction,
+         2026-09-22)" — welcome card, progress constellation, quest/reward lines, finale. All
+         copy below is reproduced byte-for-byte from that section per gate-40. -->
+    <string name="trail_welcome_title">welcome to the nightjar</string>
+    <string name="trail_welcome_body">every firefly here carries a hidden message. three practice fireflies are hiding in the jars. find them to learn how it works, then create your own and send it to a friend.</string>
+    <string name="trail_welcome_begin">begin</string>
+    <string name="trail_welcome_skip">skip</string>
+    <string name="trail_constellation_label">trail</string>
+    <string name="trail_constellation_count">%1$d of %2$d</string>
+    <string name="trail_constellation_content_description">trail, %1$d of %2$d done</string>
+    <string name="trail_quest_art">a practice firefly is hiding in this picture. tap look for fireflies to catch it.</string>
+    <string name="trail_quest_humming">a practice firefly is hiding in this recording. look for it.</string>
+    <string name="trail_quest_singing">a practice firefly is hiding in this song. look for it.</string>
+    <string name="trail_quest_meadow">the meadow notices fireflies as they pass. tap watch, and the phone will sing one for it.</string>
+    <string name="trail_quest_send">now create one of your own. in the art jar, hide one in a photo and send it to a friend.</string>
+    <string name="trail_quest_workshop">one secret left. hold the name at the top of the shelf.</string>
+    <string name="trail_reward_art">found one. the humming jar is glowing now.</string>
+    <string name="trail_reward_humming">found another. the singing jar is glowing now.</string>
+    <string name="trail_reward_singing">that\'s all three. the meadow is waiting.</string>
+    <string name="trail_reward_meadow">the meadow noticed. now create one of your own.</string>
+    <string name="trail_reward_send">sent. one secret left.</string>
+    <string name="trail_reward_finale">the trail is done. every jar is yours now.</string>
+    <string name="trail_finale_close">close</string>
+</resources>

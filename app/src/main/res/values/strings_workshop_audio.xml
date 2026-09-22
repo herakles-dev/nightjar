@@ -1,0 +1,25 @@
+<resources>
+    <!-- Workshop audio-steganography (technical) screen: save/share/open (v6, gate-34) and the
+         measured MFSK honesty correction (gate-35). New v6 copy for this screen only; kept in its
+         own file (not strings.xml) so parallel v6 tasks don't collide on one shared resource
+         file. -->
+
+    <!-- Save/share the current stego WAV (Music/Nightjar via MediaStore), matching
+         AcousticModemScreen's own save/share behaviour. -->
+    <string name="workshop_audio_action_save">save</string>
+    <string name="workshop_audio_action_share">share</string>
+    <string name="workshop_audio_busy_saving">saving</string>
+    <string name="workshop_audio_busy_sharing">sharing</string>
+    <string name="workshop_audio_saved">saved to Music/Nightjar</string>
+    <string name="workshop_audio_save_failed">save failed</string>
+    <string name="workshop_audio_share_chooser_title">share audio</string>
+
+    <!-- "open a recording": pick an existing audio file and try all three techniques. -->
+    <string name="workshop_audio_action_open">open a recording</string>
+    <string name="workshop_audio_busy_opening">opening</string>
+    <!-- %1$s = technique label (e.g. "mfsk"), %2$s = the recovered text -->
+    <string name="workshop_audio_open_matched">matched %1$s — %2$s</string>
+    <string name="workshop_audio_open_no_match">nothing hidden found — none of the three techniques matched this clip.</string>
+    <string name="workshop_audio_open_compressed">arrived compressed. audio fireflies have to travel as a file, and voice notes squeeze them — this isn\'t a WAV, so no decode was attempted.</string>
+    <string name="workshop_audio_open_read_failed">couldn\'t read that file as audio. pick a different one.</string>
+</resources>

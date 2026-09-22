@@ -1,5 +1,6 @@
 package dev.herakles.nightjar.modules.fireflyjar
 
+import android.animation.ValueAnimator
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -38,16 +39,10 @@ import dev.herakles.nightjar.ui.theme.JarGlassFull
 import dev.herakles.nightjar.ui.theme.JarGlassHighlight
 import dev.herakles.nightjar.ui.theme.JarGlassOutline
 import dev.herakles.nightjar.ui.theme.JarGlassPartial
-import dev.herakles.nightjar.ui.theme.JarGlassWatching
 import dev.herakles.nightjar.ui.theme.JarLidKnob
-import dev.herakles.nightjar.ui.theme.JarLidKnobDim
 import dev.herakles.nightjar.ui.theme.JarLidKnobStroke
-import dev.herakles.nightjar.ui.theme.JarLidKnobStrokeDim
 import dev.herakles.nightjar.ui.theme.JarLidRim
-import dev.herakles.nightjar.ui.theme.JarLidRimDim
 import dev.herakles.nightjar.ui.theme.JarLidRimStroke
-import dev.herakles.nightjar.ui.theme.JarLidRimStrokeDim
-import dev.herakles.nightjar.ui.theme.JarRadarSweep
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import kotlin.math.PI
 import kotlin.math.cos
@@ -63,8 +58,10 @@ import kotlin.math.sin
  *
  * The jar outline (56×68 viewBox) is a single canonical shape shared by every non-watching
  * module; module identity now lives entirely in which [FireflyVisual]s a call site passes in,
- * not in a per-module draw function. The watching jar (DETECTOR) is the one bespoke exception
- * per §6 — dim cool tones, no reflections, no fireflies, its own radar glyph.
+ * not in a per-module draw function. The DETECTOR module (shown as "the meadow" since v6) is
+ * the one bespoke exception: no jar glass at all, an open field instead (§ the v6 addendum,
+ * "The meadow tile — dropping the jar glass", design/firefly-jar-identity.md; owner decision
+ * 2026-09-22) — a grass-line horizon and a few `distantBlink`-driven dots, dim cool tones only.
  */
 data class FireflyVisual(val id: Int, val color: Color)
 
@@ -254,44 +251,65 @@ private fun DrawScope.drawJarOutlineShape(glassAccent: Color) {
     drawLine(color = JarGlassHighlight, start = Offset(42f, 25f), end = Offset(42f, 50f), strokeWidth = 0.4f, cap = StrokeCap.Round, alpha = 0.04f)
 }
 
-/** §6 watching jar — bespoke dim render, no reflections, no fireflies, plus the radar glyph
- *  (§4.7): a fixed-angle sweep line (it does not rotate, per §7 item 6 — this is a pulse, not
- *  a sweep) and a breathing center dot. */
-private fun DrawScope.drawWatchingJar(t: Float, large: Boolean) {
-    drawCircle(color = JarLidKnobDim, radius = 3f, center = Offset(28f, 6f))
-    drawCircle(color = JarLidKnobStrokeDim, radius = 3f, center = Offset(28f, 6f), style = Stroke(width = 0.6f))
-    drawRoundRect(color = JarLidRimDim, topLeft = Offset(15f, 8f), size = Size(26f, 3.5f), cornerRadius = CornerRadius(1.5f, 1.5f))
-    drawRoundRect(
-        color = JarLidRimStrokeDim,
-        topLeft = Offset(15f, 8f),
-        size = Size(26f, 3.5f),
-        cornerRadius = CornerRadius(1.5f, 1.5f),
-        style = Stroke(width = 0.6f),
-    )
-    drawRoundRect(color = JarBodyFill, topLeft = Offset(10f, 12f), size = Size(36f, 50f), cornerRadius = CornerRadius(6f, 6f))
-    drawRoundRect(
-        color = JarGlassWatching,
-        topLeft = Offset(10f, 12f),
-        size = Size(36f, 50f),
-        cornerRadius = CornerRadius(6f, 6f),
-        style = Stroke(width = 1.2f),
-    )
+/** viewBox-unit endpoints for the meadow's grass-line horizon — a few short, irregular
+ *  strokes rather than one flat line, per design/firefly-jar-identity.md's v6 addendum and the
+ *  2026-09-22 owner decision ("a grass-line horizon"). Fixed hand-placed art, not randomized
+ *  per frame — the same "one shape, quiet" restraint [drawJarOutlineShape]'s own hand-placed
+ *  offsets already hold themselves to. */
+private val MEADOW_GRASS_STROKES = listOf(
+    Offset(7f, 50f) to Offset(17f, 47f),
+    Offset(15f, 52f) to Offset(26f, 49f),
+    Offset(24f, 48f) to Offset(34f, 51f),
+    Offset(32f, 51f) to Offset(43f, 48f),
+    Offset(41f, 49f) to Offset(50f, 52f),
+)
 
-    val center = Offset(28f, 38f)
-    val sweepRadius = if (large) 12f else 10f
-    val lineEnd = if (large) Offset(35f, 30f) else Offset(34f, 31f)
-    val dotRadius = if (large) 2.5f else 2f
-    val dotAmplitude = if (large) 0.15f else 0.12f
-    drawCircle(color = JarRadarSweep, radius = sweepRadius, center = center, style = Stroke(width = 0.6f))
-    drawLine(color = JarRadarSweep, start = center, end = lineEnd, strokeWidth = 0.6f)
-    drawCircle(color = JarWatchingDim, radius = dotRadius, center = center, alpha = (0.08f + dotAmplitude * sin(t * 0.8f)).coerceIn(0f, 1f))
+/** viewBox-unit positions for the meadow's distant blinking fireflies, hovering in the open
+ *  sky above [MEADOW_GRASS_STROKES] — a fixed field (not randomized), paired with distinct
+ *  [distantBlink] ids so the five never flash in lockstep. */
+private val MEADOW_DOTS = listOf(
+    201 to Offset(13f, 32f),
+    204 to Offset(23f, 18f),
+    208 to Offset(32f, 28f),
+    212 to Offset(41f, 15f),
+    216 to Offset(20f, 41f),
+)
+
+/** With system animations off, [distantBlink] would otherwise leave some dots sitting at
+ *  its "long dark stretch" phase depending on where the frame clock happens to be — reading as
+ *  missing fireflies rather than a still frame of the same field. This mid alpha keeps every
+ *  dot visibly present, and non-blinking, when that's the case. */
+private const val MEADOW_DOT_REDUCED_MOTION_BLINK = 0.6f
+
+/** §6/v6 addendum meadow — the open-field replacement for the old jar-glass "watching jar"
+ *  render (design/firefly-jar-identity.md § "The meadow tile — dropping the jar glass"; owner
+ *  decision 2026-09-22). No jar glass, no lid, no radar sweep: a low grass-line horizon plus a
+ *  handful of [distantBlink]-driven dots, reusing [JarNightSky]'s own distant-firefly primitive
+ *  rather than a bespoke new glow, in the meadow's cool/dim palette only — never warm parchment.
+ *  [large] only nudges the dot glow up slightly for the detail-hero scale; the geometry itself
+ *  doesn't need a second layout since [withViewBoxScale] already fits this whole box to
+ *  whatever call-site size it's given (56×68 shelf tile through the larger detail hero). */
+private fun DrawScope.drawMeadow(t: Float, large: Boolean) {
+    for ((start, end) in MEADOW_GRASS_STROKES) {
+        drawLine(color = JarWatchingDim, start = start, end = end, strokeWidth = 1.1f, cap = StrokeCap.Round, alpha = 0.35f)
+    }
+
+    val reducedMotion = !ValueAnimator.areAnimatorsEnabled()
+    val dotRadius = if (large) 1.6f else 1.3f
+    for ((id, pos) in MEADOW_DOTS) {
+        val blink = if (reducedMotion) MEADOW_DOT_REDUCED_MOTION_BLINK else distantBlink(id, t)
+        if (blink <= 0.02f) continue
+        val alpha = (blink * 0.5f).coerceIn(0f, 1f)
+        drawCircle(color = JarWatchingDim, radius = dotRadius * 2.2f, center = pos, alpha = alpha * 0.3f)
+        drawCircle(color = JarWatchingDim, radius = dotRadius, center = pos, alpha = alpha)
+    }
 }
 
 private fun fireflyBounds(large: Boolean): Rect = if (large) LARGE_FIREFLY_BOUNDS else STANDARD_FIREFLY_BOUNDS
 
 private fun DrawScope.drawJarGlyph(module: Module, fireflies: List<FireflyVisual>, t: Float, large: Boolean) {
     if (module == Module.DETECTOR) {
-        withViewBoxScale { drawWatchingJar(t, large) }
+        withViewBoxScale { drawMeadow(t, large) }
         return
     }
     if (fireflies.isNotEmpty()) {
@@ -310,8 +328,8 @@ private fun DrawScope.drawJarGlyph(module: Module, fireflies: List<FireflyVisual
 }
 
 /** Public entry point — screens drop this in at any size (56dp shelf tile through a 170dp
- *  detail hero) and it stays a live, breathing jar. [large] selects the wider firefly-roaming
- *  interior and radar glyph used by detail-hero call sites (§6). */
+ *  detail hero) and it stays a live, breathing jar (or, for DETECTOR, meadow). [large] selects
+ *  the wider firefly-roaming interior used by detail-hero call sites (§6). */
 @Composable
 fun JarGlyph(module: Module, fireflies: List<FireflyVisual>, modifier: Modifier = Modifier, large: Boolean = false) {
     val clock = rememberFireflyClock()
@@ -326,7 +344,7 @@ fun JarGlyph(module: Module, fireflies: List<FireflyVisual>, modifier: Modifier 
  *  JarGlassFull/Partial/Empty rung from. */
 fun DrawScope.drawJarGlyph(module: Module, stroke: Color) {
     if (module == Module.DETECTOR) {
-        withViewBoxScale { drawWatchingJar(t = 0f, large = false) }
+        withViewBoxScale { drawMeadow(t = 0f, large = false) }
         return
     }
     withViewBoxScale {

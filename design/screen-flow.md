@@ -897,3 +897,327 @@ shared `FullscreenImageViewer`, palette-neutral rather than themed to either sur
 identity doc, since a modal photo viewer should read the same however it was reached.
 
 ---
+
+## v6 addition: sharing, receiving, and the meadow reorder
+
+Scope: spec.md's v6 addition (sharing fireflies across channels + the first-use riddle trail),
+gates 27–40. This section covers everything **except** the trail's own step-by-step content,
+which lives in the new sibling doc `design/riddle-trail.md` (gates 36–38) — this section is
+where that trail's steps 4–6 get their screen-level wireframes (the meadow, send, the wordmark
+hint), since those are real screen layouts this doc already owns.
+
+**Naming note (owner direction, 2026-09-21):** "the framed jar" is renamed **"the art jar"**
+and "the watching jar" is renamed **"the meadow"** in all user-facing copy, already landed on
+`feat/v6-sharing-trail` (commit `f743f42`). Every wireframe and copy table below uses the new
+names. This worktree's own checkout predates that commit (see this doc's Screen 6/7 sections
+above, which still say "framed"/"watching" — left as historical record, not corrected in
+place, since gate-39's own audit is the mechanism that reconciles it against shipped code, not
+a doc edit here).
+
+### Shelf order (gate-39)
+
+Tiles are derived from `Module.entries`, unchanged from Screen 6's original design (this was
+never hardcoded). The v6 reorder swaps the detector to last:
+
+```
+old:  the singing jar · the framed jar · the watching jar · the humming jar
+new:  the singing jar · the art jar     · the humming jar  · the meadow
+```
+
+Three creating jars now sit together at the top, the one jar that never holds a firefly sits
+alone at the bottom — the shelf reads, top to bottom, as "things you fill, then the one thing
+that just watches." Nothing persists an enum ordinal (verified before the reorder per gate-39),
+so every firefly caught before this release keeps its jar regardless of where its tile now
+sits.
+
+---
+
+### Receiving
+
+Three entry points, all landing on the same underlying pipeline (spec.md v6, gate-31/32):
+
+1. **Share-to** — another app's share sheet, targeting nightjar (`ACTION_SEND`, `image/*` or
+   `audio/*`).
+2. **Open-with** — a file manager or gallery app's "open with" chooser (`ACTION_VIEW`), same
+   MIME types. Either entry point may arrive while the app isn't running at all, or while it's
+   already open on some other screen — `MainActivity`'s `onCreate` and `onNewIntent` both route
+   to the same handler either way.
+3. **In-jar "catch from a photo or file"** — a fourth action row, alongside `create a firefly`
+   / `look for fireflies`, on **all three creating jars** (art, humming, singing) — not a
+   single shared shelf-level action. Placed last in each jar's action group. It opens the
+   Android Photo Picker for image MIME types or the system document picker for audio, then
+   runs the exact same auto-detect-and-route pipeline as share-to/open-with. **Why all three,
+   identically, rather than one canonical spot:** a user who opens the humming jar because a
+   friend said "I hid something in a voice memo" might actually have been sent a picture by
+   mistake, or might not remember which kind of file it was — auto-detection means the entry
+   point's own jar doesn't need to match the file's real technique, so there is no wrong jar
+   to start from, and requiring the user to first guess correctly before they can even open
+   the picker would undercut the entire point of auto-detection. The meadow does not get this
+   action — it isn't a creating jar and never lands a caught firefly (`JarRole.WATCHING`
+   unchanged).
+
+```
+┌─────────────────────────────────┐
+│  ← back to the shelf             │
+│                                   │
+│  the humming jar                 │
+│  ...                              │
+│                                   │
+│  create a firefly                │
+│  look for fireflies              │
+│  catch from a photo or file      │  ← NEW, v6 — opens Photo Picker (image/*)
+│                                   │     or document picker (audio/*); result
+│                                   │     routes to whichever jar it actually
+│                                   │     matches, not necessarily this one
+│                                   │
+│  [outcome message — see below]   │
+└─────────────────────────────────┘
+```
+
+No permission is added for any of the three entry points (INV-10) — the share sheet, the
+Photo Picker, and the document picker are all permission-free content-resolver paths on
+current Android.
+
+### The five outcomes (INV-12)
+
+Every incoming file resolves to exactly one of these; a message is shown only after its
+checksum verifies (so "caught" is never shown on a false positive). Copy follows the existing
+voice contract (what happened, plain language, two sentences max, no exclamation) and, for
+`caught`, its own established pattern (`you caught one — N bytes, hidden in {channel}.`) —
+receiving keeps "caught" under the v6 verb rule (`design/riddle-trail.md` § Verb rule: "catch"
+never describes making one), distinct from jar-mode embed success, which now reads "you
+created one — N bytes" (Screen 7's copy-mapping table predates this rule and still shows the
+older "you caught one" embed copy as history).
+
+| Outcome | When | Jar-voice copy |
+|---|---|---|
+| **caught** | technique auto-detected, decode succeeds, checksum verifies | `you caught one — N bytes, hidden in {channel}.` (lands in the matching jar's swarm as a RECEIVED firefly) |
+| **squeezed** | the file arrived in a lossy container (JPEG/WebP picture, or compressed audio such as a voice note) and nothing decoded — it may have carried an exact firefly that the sending app squeezed away, or it may be an ordinary photo; the app can't tell, so the copy never asserts one was sent (INV-12) | title `no firefly came through`; picture: `this picture arrived compressed. if someone hid a firefly in it, the app it traveled through may have squeezed it away. ask them to send it as a file, or to use a sturdy firefly.` audio: `this recording arrived compressed, the way voice notes are. if someone hid a firefly in it, the compression may have squeezed it away. ask them to send it as a file or document.` (orchestrator correction 2026-09-22: the original draft asserted the bits "didn't survive") |
+| **damaged** | the file matches a nightjar carrier's shape (right header/magic) but its checksum fails in a way recompression doesn't explain — a genuinely corrupted transfer | `this one got damaged on the way over. ask whoever sent it to send it again.` |
+| **no firefly** | a normal, unmodified photo or audio file — decode attempted, no header found | `no firefly hiding in this file.` |
+| **unsupported** | a file type nightjar doesn't parse at all (wrong MIME, unreadable image/audio) | `nightjar doesn't know this kind of file.` |
+
+"Squeezed" is the one outcome this v6 addition is built to say plainly instead of masking as a
+generic failure — spec.md's own framing: "the receiving side says plainly when an app squeezed
+a firefly, instead of reporting a checksum error." Every other outcome above already follows
+the existing `DecodeFailure` copy-mapping precedent (Screens 2/4/5) of "what's wrong, what to
+do," just extended to file-arrival rather than an in-app action.
+
+---
+
+### Two send flows
+
+#### "send this firefly" (firefly detail, any caught/spotted firefly)
+
+```
+┌─────────────────────────────────┐
+│  ← back to the jar               │
+│                                   │
+│  a firefly you caught            │
+│  14:22, sent through sound       │
+│  "..."                            │
+│  42 bytes                        │
+│                                   │
+│  send this firefly               │  ← NEW, v6 — 48dp row, same verb-button
+│                                   │     shape every other action row uses
+│  let this firefly go             │  ← existing delete affordance, unchanged
+└─────────────────────────────────┘
+```
+
+Tapping `send this firefly`:
+
+1. If the firefly's technique is **exact** (raw-pixel LSB — the only technique where recompression
+   silently destroys the payload), a one-line advisory appears first, inline, no dialog:
+   `hidden, not locked — and exact only survives as a file. pick "file" or "document" in the
+   next screen, not "photo."` For every other technique (sturdy, all three audio, acoustic
+   modem) the advisory is shorter, since only exact has a file-vs-photo trap: `hidden, not
+   locked.`
+2. The app writes a private cache copy via `FileProvider` (no MediaStore write — amended
+   INV-5) and opens the system share sheet (`ACTION_SEND`).
+3. After the share sheet returns (regardless of what the user actually did in it — that's
+   outside the app's visibility), an optional, separate `keep a copy` link appears once,
+   inline under the send row, for one interaction only — tapping it is the one explicit
+   gesture that writes to `Pictures/Nightjar`/`Music/Nightjar`, matching the technical screens'
+   existing save/share precedent. Not shown again once dismissed or used for that firefly.
+
+#### "hide one in a photo" (art jar, own photo)
+
+```
+┌─────────────────────────────────┐
+│  ← back to the shelf             │
+│                                   │
+│  the art jar                     │
+│                                   │
+│  hide one in a photo             │  ← NEW, v6 — opens Photo Picker
+│                                   │
+└─────────────────────────────────┘
+        │ pick a photo
+        ▼
+┌─────────────────────────────────┐
+│  ← back                          │
+│                                   │
+│  message                         │  ← field label, noun (voice contract)
+│  ┌─────────────────────────────┐ │
+│  │ text to hide                │ │
+│  └─────────────────────────────┘ │
+│                                   │
+│  sturdy                          │  ← 40dp row, selected by default,
+│  exact                           │     TextPrimary if selected else
+│                                   │     TextSecondary — same tap-to-switch
+│                                   │     shape as every other technique
+│                                   │     selector in the app
+│  64 / 118 bytes · 2.1 MB          │  ← capacity (per selected technique +
+│                                   │     this specific photo) and resulting
+│                                   │     file size, both real numbers,
+│                                   │     recomputed live on either the
+│                                   │     message or the technique changing
+│                                   │     (Screen 4/5's capacity-recompute
+│                                   │     precedent)
+│  hidden, not locked.             │  ← static, always visible once a
+│  sends as a file if you pick     │     technique is exact — see the
+│  exact.                          │     advisory rule above; sturdy shows
+│                                   │     just "hidden, not locked." alone
+│  hide it                         │  ← 48dp verb row — encodes, then
+│                                   │     immediately opens the share sheet
+│                                   │     (no separate "embedded" pause
+│                                   │     screen — the whole point of this
+│                                   │     flow is getting to the share
+│                                   │     sheet, not admiring the result)
+└─────────────────────────────────┘
+```
+
+`sturdy` is selected by default (owner direction) — it's the technique built to survive what
+messaging apps actually do to photos; `exact` is one tap away for anyone who specifically wants
+byte-for-byte fidelity and already knows it has to travel as a file. Capacity is shown for
+whichever is selected, same "real number over vague copy" rule Task #28 already established
+project-wide.
+
+---
+
+### Meadow tile and shelf, revised
+
+```
+┌─────────────────────────────────┐
+│                                   │
+│   nightjar                       │  ← wordmark; subtitle is trail-state-
+│   try the art jar                │     dependent while the trail is
+│                                   │     active — see design/riddle-trail.md
+│                                   │     § Wordmark hint; reverts to "hold
+│                                   │     to open workshop" once done/skipped
+│                                   │
+│   [jar]  the singing jar         │  ← acoustic modem
+│          •• •                    │
+│                                   │
+│   [jar]  the art jar             │  ← image steganography (renamed)
+│          •                       │
+│                                   │
+│   [jar]  the humming jar         │  ← audio steganography
+│          •••                     │
+│                                   │
+│   [field] the meadow             │  ← detector, moved to 4th; drops the
+│           ·  ·                   │     jar-glass silhouette — see
+│                                   │     firefly-jar-identity.md v6
+│                                   │     addendum for the visual
+│                                   │     treatment and why
+└─────────────────────────────────┘
+```
+
+The meadow tile's actual visual redesign (drop the glass, what replaces it, why) is specified
+in `design/firefly-jar-identity.md`'s v6 addendum, not here — this doc only records that the
+tile's *position* changed and that its *shape* is no longer a jar silhouette, since both are
+screen-flow-level facts (what's on the shelf, in what order) rather than palette/motion-level
+ones.
+
+---
+
+### Workshop audio send/receive (gate-34)
+
+The technical audio screen (Screen 5) gains two rows in its existing action-row group, save and
+share for its stego WAV — matching the acoustic modem screen's existing `save`/`share` pair
+(Tasks #31/#32/#36 drift note above) rather than inventing new verb shapes — plus a decode path
+that tries all three techniques against an imported/received WAV and names which one matched:
+
+```
+│  embed                           │  ← existing
+│  extract                         │  ← existing
+│  check for hidden data           │  ← existing (v5)
+│  save                            │  ← NEW, v6 — writes the working stego
+│  share                           │  ← NEW, v6 — same share-sheet path as
+│                                   │     jar-mode send, private cache file
+│  import                          │  ← NEW, v6 — pick a WAV, try all three
+│                                   │     techniques against it, "decoded
+│                                   │     with {technique}" on success
+```
+
+This is the one place in the app where the technical screen, not the jar surface, gains a send/
+receive capability — deliberate, per spec.md's v6 boundary: jar-mode send is a private
+cache-file share (amended INV-5); the technical screens' save/share keeps writing to
+`Pictures/Nightjar`/`Music/Nightjar` as it already did pre-v6, and the audio screen simply
+catches up to the pattern the modem screen already established.
+
+---
+
+## Copy audit (appendix, gate-39/gate-40 support)
+
+Two greps, run against this worktree's checkout (based on `37e2e22`, pre-dating the rename
+commit `f743f42` the coordinator applied directly on `feat/v6-sharing-trail`). This table is a
+**cross-check**, not the rename itself — the coordinator reports the rename is already done in
+code: `Module.jarName` values are now `"the art jar"`/`"the meadow"`, shelf order is now
+`ACOUSTIC_MODEM, IMAGE_STEGANOGRAPHY, AUDIO_STEGANOGRAPHY, DETECTOR`, `DetectorScreen.kt:289`
+now reads `"the meadow needs microphone access to watch."`, and `@Preview` labels were renamed.
+KDoc/comments were deliberately left as-is. Every row below was checked against that report;
+none were found missed.
+
+`grep -n -i "watching"` over `JarDetailScreen.kt`, `DetectorScreen.kt`, `JarShelfScreen.kt`,
+`AcousticModemScreen.kt`, `ModulePicker.kt`, `FireflyGlyphs.kt`, `JarCatchFlows.kt`:
+
+| File:line | Current text | Classification | Proposed |
+|---|---|---|---|
+| `ModulePicker.kt:66` | `Module.jarName = "the watching jar"` | **user-facing** | `"the meadow"` — **already applied** on `feat/v6-sharing-trail` per coordinator |
+| `DetectorScreen.kt:323` | `"glow strength appears once you start watching"` | **user-facing** | no change — `"watching"` here is the verb form of the meadow's own `watch` action, not the retired jar name; the sentence carries no grammar dependency on "jar" and reads correctly for a meadow (you can watch a meadow) |
+| `DetectorScreen.kt:351` | `"nothing spotted yet"` (matched via `JarWatchingDim` on the same line, not the string itself) | leave | n/a |
+| `JarDetailScreen.kt:311` | `"hold it up and see if anything glows nearby"` (matched via `JarRole.WATCHING ->` on the same line, not the string itself) | leave, reviewed | no change — string references neither "jar" nor "watching"; already meadow-safe |
+| `JarDetailScreen.kt:1840` | `@Preview(name = "Watching jar (detector)")` | dev-only preview label | **already applied** per coordinator ("@Preview labels renamed") |
+| `JarDetailScreen.kt:1842` | `PreviewJarDetailWatching` (function identifier) | identifier | leave |
+| `JarShelfScreen.kt:210–211, 220, 233` | KDoc comments ("the watching jar is the exception ...", "the watching jar never holds fireflies ...", "the watching jar's own 'watch' button tap ...") | KDoc/comment | leave |
+| `JarDetailScreen.kt:95, 108, 125, 230, 235, 259, 317, 356–358, 371, 794, 1097, 1148, 1328, 1466` | imports/color refs (`JarWatchingDim`) and KDoc comments | identifier / KDoc | leave |
+| `AcousticModemScreen.kt:88, 349, 789, 848` | import (`JarWatchingDim`), KDoc comments, and `"ready to catch"` (matched via color ref, not text) | identifier / KDoc / leave | leave |
+| `DetectorScreen.kt:63, 172–173, 179, 250, 270, 275–276` | import (`JarWatchingDim`), KDoc comments (design-doc citations, `jarWatchFlow` naming note), and background-color refs (`JarWatchingDim.copy(alpha = ...)`) | identifier / KDoc | leave |
+| `ModulePicker.kt:31, 34` | KDoc comment; `enum class JarRole { CREATION, WATCHING }` | KDoc / identifier | leave — spec.md explicitly keeps `JarRole.WATCHING`'s name (owner direction, 2026-09-21) |
+| `JarCatchFlows.kt:18` | KDoc comment | KDoc | leave |
+| `FireflyGlyphs.kt:41, 51, 64, 66, 257, 260, 273, 287, 294, 329` | imports (`JarGlassWatching`, `JarWatchingDim`), function name `drawWatchingJar`, KDoc comments | identifier / KDoc | leave — `drawWatchingJar` is the render function the meadow's own visual redesign (firefly-jar-identity.md v6 addendum) will replace or rename as implementation work, not a copy-audit item |
+
+**Correction to the coordinator's `DetectorScreen.kt:289` note:** that line (`"the jar needs microphone access to watch."`, confirmed present at that exact line number in this worktree's checkout) does not actually contain the substring `"watching"` (`"watch."` has no `-ing`), so it would not have surfaced in a literal `grep -i "watching"` pass — it's a real rename regardless, just not one this specific grep would have caught on its own. Verified directly with a targeted `grep -n "microphone permission\|needs microphone" DetectorScreen.kt` in this worktree, which returned the exact pre-rename text the coordinator described as now-fixed. No discrepancy — this is a note on the audit method's own blind spot (a grep for one word can't catch every phrase that implies the retired name), not a missed string.
+
+`grep -n -i "framed"` over the same files plus `ImageStegoScreen.kt`:
+
+| File:line | Current text | Classification | Proposed |
+|---|---|---|---|
+| `ModulePicker.kt:65` | `Module.jarName = "the framed jar"` | **user-facing** | `"the art jar"` — **already applied** per coordinator |
+| `JarDetailScreen.kt:1812` | `@Preview(name = "Framed jar (image steganography)")` | dev-only preview label | **already applied** per coordinator |
+| `JarDetailScreen.kt:1814` | `PreviewJarDetailFramed` (function identifier) | identifier | leave |
+| `ImageStegoScreen.kt:360` | KDoc: `"jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] (\"the framed jar\", ...)"` | KDoc | leave — quotes the old name inside a comment; harmless, not user-facing |
+| `ImageStegoScreen.kt:565` | KDoc: `"framed jar's three stacked rows"` | KDoc | leave |
+| `AcousticModemScreen.kt:329` | KDoc: `"the real jar-framed flow"` | KDoc, unrelated meaning | leave — "framed" here means "structured," not a reference to the image jar's old name |
+| `JarCatchFlows.kt:12` | KDoc: `"own jar-framed flow"` | KDoc, unrelated meaning | leave — same as above |
+
+**Result:** zero user-facing strings found that the coordinator's rename missed. Both
+`Module.jarName` occurrences (the only two places the retired names actually reached a real
+screen) were already caught, and both `@Preview` display names were already renamed too.
+`DetectorScreen.kt`'s permission-denial copy was already caught, though it wouldn't have
+surfaced from this literal grep (see the correction note above — real rename, blind spot in
+the method, not a miss). The two candidates worth a second look —
+`DetectorScreen.kt:323`'s `"watching"` verb and `JarDetailScreen.kt:311`'s meadow caption —
+were reviewed on grammar grounds and don't need changes; neither depends on the word "jar" or
+the retired name, so both are filed under "leave" rather than "renamed."
+
+Copy-audit count: **5 user-facing strings** (the two `Module.jarName` values, the one
+`DetectorScreen.kt:323` verb-form string, and the two `@Preview` display-name literals — the
+only rows in either table that aren't KDoc, a code comment, or a bare identifier); **53 leave**
+(KDoc/comment/identifier instances across both tables, including the two rows — `DetectorScreen
+.kt:351`, `JarDetailScreen.kt:311` — where the grep hit itself landed on an identifier
+(`JarWatchingDim`, `JarRole.WATCHING`) even though the same line also carries an unrelated,
+already-fine user-facing string).
+
+---
+

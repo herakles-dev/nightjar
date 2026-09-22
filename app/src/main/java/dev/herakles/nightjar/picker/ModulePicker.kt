@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
@@ -17,12 +16,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.workshopButton
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -62,9 +64,13 @@ enum class Module(
     val jarChannel: String,
 ) {
     ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION, "sound"),
-    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the framed jar", JarRole.CREATION, "a picture"),
-    DETECTOR("detector", "continuously listens for the modem's signal", "the watching jar", JarRole.WATCHING, "the air"),
+    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the art jar", JarRole.CREATION, "a picture"),
     AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION, "a recording"),
+    // v6 (owner direction, 2026-09-21): the detector is "the meadow", not a jar (it never keeps
+    // a firefly, it only notices them), and sits last so the three creating jars come first.
+    // Declaration order is display order for both the jar shelf and the workshop list; nothing
+    // persists an ordinal (records store `name`), so reordering is safe for stored fireflies.
+    DETECTOR("detector", "continuously listens for the modem's signal", "the meadow", JarRole.WATCHING, "the air"),
 }
 
 /**
@@ -83,16 +89,27 @@ enum class Module(
  * than stepping up one level within it.
  */
 @Composable
-fun ModulePicker(onSelect: (Module) -> Unit, onBack: () -> Unit) {
+fun ModulePicker(
+    onSelect: (Module) -> Unit,
+    onBack: () -> Unit,
+    // W2-3 (design/riddle-trail.md § Start the trail again): "start the trail again" footer
+    // link -- default no-op keeps this composable usable without a trail store in scope (there
+    // is no @Preview for this screen today, but this matches every other optional-hook default
+    // in this app's jar-mode screens).
+    onRestartTrail: () -> Unit = {},
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable(onClick = onBack)
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text(text = "back to the jar", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+            Text(
+                text = "back to the jar",
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
         }
         Text(
             text = "nightjar",
@@ -102,6 +119,20 @@ fun ModulePicker(onSelect: (Module) -> Unit, onBack: () -> Unit) {
         )
         Module.entries.forEach { module ->
             ModuleRow(module = module, onClick = { onSelect(module) })
+        }
+        // W2-3: plain footer link, same labelLarge/TextSecondary styling the "back to the jar"
+        // link above already uses (design/riddle-trail.md § Start the trail again).
+        Box(
+            modifier = Modifier
+                .padding(start = 24.dp, top = 8.dp, bottom = 8.dp)
+                .workshopButton(filled = false, onClick = onRestartTrail),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = stringResource(R.string.trail_restart),
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
         }
     }
 }
@@ -117,12 +148,17 @@ private fun ModuleRow(module: Module, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ModuleGlyph(module = module)
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = module.label,
-                style = MaterialTheme.typography.bodyLarge,
-                color = TextPrimary,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Button chrome wraps only the label -- the row itself (icon + label + description)
+            // stays the actual tap target via the parent Row's own `.clickable` above; this is
+            // chrome-only (no `onClick` passed), matching the module-picker's own reasoning below.
+            Box(modifier = Modifier.workshopButton(filled = false)) {
+                Text(
+                    text = module.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = TextPrimary,
+                )
+            }
             Text(
                 text = module.description,
                 style = MaterialTheme.typography.labelSmall,

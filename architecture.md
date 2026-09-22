@@ -440,13 +440,34 @@ review of this task:
   unreachable-but-present. Verified via a dedicated test that deliberately corrupts symbol blocks
   and confirms both the correction path and the give-up-cleanly path.
 
+**Gate-35 correction (task W0-C, measured):** an earlier draft of this section's own reasoning —
+and `AudioStegoCarrier.kt`'s class KDoc, and the technical screen's technique label — described
+MFSK as "genuinely lossy-channel-robust." Measured against real codecs, that overclaims: MFSK
+round-trips through AAC-LC ≥ 128 kbps and MP3 128 kbps, but fails after Opus 16–64 kbps (voip and
+audio modes) and AAC 64–96 kbps. AAC at 64 kbps removes the near-ultrasonic tone band entirely;
+the other failures are quantization noise past Reed-Solomon's correction capacity, not a clean
+"recompressed = fails" rule. Real-world messaging voice notes are compressed audio in exactly the
+range this doesn't survive, which is why `AudioStegoScreen.kt`'s v6 "open a recording" action
+(gate-34) never attempts a decode on a non-WAV file at all rather than silently failing against a
+doomed codec.
+
 Gate-8 (fidelity — cover vs. stego indistinguishable by ear) and gate-9 (safety-scope +
-anti-AI-tell close-out) remain open; both need a human listening pass, not something an agent can
-self-certify.
+anti-AI-tell close-out) are closed (spec.md "Gates — v2 addition"). Gate-8's owner listening pass
+found the honest result differs by technique, not the uniform "indistinguishable" the gate
+originally predicted: spectrogram-LSB and MFSK are effectively transparent at default strength
+(MFSK only after a fix for an audible tone-edge click artifact), while phase-inversion reads
+clearly wider/hollow by design, not a bug (the same mono-mix cancellation that makes it
+detectable, gate-22) — the screen's own copy was corrected to say so rather than promise "sounds
+unchanged" for a technique where that wasn't true. Gate-9's safety-scope compliance check passed
+(synthetic payloads only, no exploit content) and the anti-AI-tell checklist was re-run against
+the new screen (`design/identity.md`'s 2026-09-21 re-run entry).
 
 ### 7.1 v5 addition — `AudioStegDetector : CovertDetector<WavFile.ParsedWav>`
 
-**Status: specified, not built** (spec.md gates 22–23). The binding deviates from the
+**Status: built** (spec.md gates 22–23). `AudioStegDetector.kt` (639 lines) implements this
+binding as specified below, and is wired in from both `MainActivity.kt` and
+`AudioStegoScreen.kt` (each constructs `AudioStegDetector()` and passes it to
+`AudioStegoScreen`/its detector-facing content). The binding deviates from the
 `CovertDetector<PcmAudio>` shape the other audio detector uses, for one reason: `PcmAudio` is
 mono by contract (§1), but phase-inversion output is interleaved stereo, and for that technique
 the channel layout *is* the signal. A detector over a bare `ShortArray` would have to guess it.
@@ -495,7 +516,10 @@ class AudioStegDetector : CovertDetector<WavFile.ParsedWav> {
 
 ### 7.2 v5 addition — cover-vs-stego difference view (spectrogram-LSB)
 
-**Status: specified, not built** (spec.md gate 24). Data flow, with no schema change (INV-8):
+**Status: built** (spec.md gate 24). Implemented as `StegoDifferenceView` in
+`CarrierInsightViews.kt` (533 lines, shared with § 7.3's `StereoPolarityView`), wired from
+`JarDetailScreen.kt` (~lines 1271–1283) via a `LaunchedEffect` that calls `matchCover` then
+`stegoDifference`. Data flow, with no schema change (INV-8):
 
 1. `JarDetailScreen` already reads the firefly's WAV (`repository.readMedia` →
    `WavFile.decodePcm16`). When `technique == "SPECTROGRAM_LSB"` and `numChannels == 1`, it
@@ -522,7 +546,9 @@ step, so it adds brick risk for nothing), and storing cover WAVs (needs the migr
 
 ### 7.3 v5 addition — L/R polarity view (phase-inversion)
 
-**Status: specified, not built** (spec.md gate 25). No data-path change is needed: the
+**Status: built** (spec.md gate 25). Implemented as `StereoPolarityView` in
+`CarrierInsightViews.kt`, wired from `JarDetailScreen.kt`'s same `LaunchedEffect` (~lines
+1271–1283) via a call to `stereoPolarity`. No data-path change was needed: the
 persisted phase-inversion WAV is already stereo end to end.
 `AudioStegoCarrier.encodePhaseInversion` returns interleaved stereo →
 `AudioStegoController.embed` sets `workingChannelCount = 2` → `jarCatchFlow`'s
@@ -738,20 +764,25 @@ fields (`JarRole` is a new 2-case enum, `{ CREATION, WATCHING }`, declared in
 enum class Module(
     val label: String,
     val description: String,
-    val jarName: String,   // NEW — e.g. "the singing jar"
-    val jarRole: JarRole,  // NEW — CREATION (has a "catch a firefly" flow) | WATCHING
-                            //       (detector-shaped, re-skins its own history instead)
+    val jarName: String,
+    val jarRole: JarRole,
+    val jarChannel: String,
 ) {
-    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone",
-        "the singing jar", JarRole.CREATION),
-    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image",
-        "the framed jar", JarRole.CREATION),
-    DETECTOR("detector", "continuously listens for the modem's signal",
-        "the watching jar", JarRole.WATCHING),
-    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio",
-        "the humming jar", JarRole.CREATION),
+    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION, "sound"),
+    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the art jar", JarRole.CREATION, "a picture"),
+    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION, "a recording"),
+    // v6 (owner direction, 2026-09-21): the detector is "the meadow", not a jar (it never keeps
+    // a firefly, it only notices them), and sits last so the three creating jars come first.
+    // Declaration order is display order for both the jar shelf and the workshop list; nothing
+    // persists an ordinal (records store `name`), so reordering is safe for stored fireflies.
+    DETECTOR("detector", "continuously listens for the modem's signal", "the meadow", JarRole.WATCHING, "the air"),
 }
 ```
+
+(`jarChannel` is a v6 addition — task #16, `picker/ModulePicker.kt` lines 59–74 — the one-word
+carrier a firefly travelled over, for the firefly-detail popup's metadata row; it exists for the
+same reason `jarName` does: § 6's exhaustive-branch budget doesn't cover the detail screen, so a
+display string it needs has to arrive as enum data rather than a `when`.)
 
 This is deliberate over a second, parallel `JarModuleDescriptor` list: a required
 constructor parameter means the compiler refuses to let a new `Module` entry compile
@@ -783,11 +814,12 @@ one function in one file, so a missed case is a build error, not a silent gap:**
   shape (zero selectors for the modem, one for image, two for audio today; a future
   module can have any shape without `JarDetailScreen` changing).
 
-**Reconciled with the code (gate-21, re-checked for v5): the "exactly two" rule above does
-not hold as written.** `grep -rn "when (module)" app/src/main/java` finds **five** exhaustive
-per-`Module` `when`s. All five are compiler-enforced, so a new `Module` entry is still a build
-error at every one of them, never a silent gap. But there are five sites to touch, not two,
-and one of them sits in `JarShelfScreen`, which the design above said would never need touching.
+**Reconciled with the code (gate-21, re-checked for v5, re-checked again for v6): the "exactly
+two" rule above does not hold as written.** `grep -rn "when (module)" app/src/main/java` finds
+**seven** exhaustive per-`Module` `when`s. All seven are compiler-enforced, so a new `Module`
+entry is still a build error at every one of them, never a silent gap. But there are seven sites
+to touch, not two, and one of them sits in `JarShelfScreen`, which the design above said would
+never need touching.
 
 | Site | Layer | Status |
 |------|-------|--------|
@@ -796,6 +828,8 @@ and one of them sits in `JarShelfScreen`, which the design above said would neve
 | `JarShelfScreen.kt` `tileTint` | jar | **added past the budget** (per-jar tile colors) |
 | `MainActivity.kt` picker routing (`Module` → `Screen`) | technical | predates jar mode; outside the rule's original scope |
 | `picker/ModulePicker.kt` `ModuleGlyph` | technical | predates jar mode; outside the rule's original scope |
+| `trail/TrailTargets.kt` `trailPracticeGlossRes` | trail | v6 addition — practice-firefly gloss text per module |
+| `incoming/IncomingPipeline.kt` `carrierKindFor` | incoming | v6 addition — `FireflyRecord.carrierKind` for a received firefly |
 
 There are also **non-exhaustive** `Module` checks that the compiler will not flag when a module
 is added:
@@ -806,17 +840,396 @@ is added:
 The `DETECTOR` checks would be safer keyed on `jarRole == JarRole.WATCHING`, which
 `JarDetailScreen` already does elsewhere.
 
-What *does* hold: v4 added no per-`Module` branch (carrier kind is a record field), and the v5
-views and detector add none either (they key on `FireflyRecord.technique` and channel count).
-So the count is five before and after v5.
+What *does* hold: v4 added no per-`Module` branch (carrier kind is a record field on the write
+path that already existed), and the v5 views and detector add none either (they key on
+`FireflyRecord.technique` and channel count). So the count was five through v5. v6 adds two more:
+the receive path's own `carrierKindFor` (`incoming/IncomingPipeline.kt`) needs the same
+`Module` → carrier-kind mapping the existing catch sites hardcode, and the riddle trail's
+`trailPracticeGlossRes` (`trail/TrailTargets.kt`) needs a per-module gloss string — bringing the
+count to seven.
 
 **Concrete recipe for adding a new module's jar, once its `CovertCarrier` exists** (corrected
 to match the code):
-1. Add one `Module` entry with its `jarName`/`jarRole`.
-2. Add one branch in each of the five exhaustive `when`s above. The compiler lists them.
+1. Add one `Module` entry with its `jarName`/`jarRole`/`jarChannel`.
+2. Add one branch in each of the seven exhaustive `when`s above. The compiler lists them.
 3. Review the non-exhaustive `DETECTOR`/`ACOUSTIC_MODEM` checks.
 
 The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → copy mapping
 (screen-flow.md § Screen 7, already module-agnostic) need zero changes.
 
 ---
+
+## Sturdy image technique (v6)
+
+> Task W0-A (design + offline measurement). Author: spec-architect-v11, revised 2026-09-22 (round 2,
+> disguise retune). A second Module-1 image technique, sibling to the frozen exact-LSB carrier —
+> **not** a change to it (INV-9). Its own magic tells it apart from every pre-v6 firefly. Every
+> number below is measured offline by the prototype in `scratchpad/sturdy/` (`sturdy_carrier.kt` +
+> `harness.kt`), re-measured with two JPEG encoders. Real-channel confirmation is gate-29's job.
+
+### Scheme — SFLY (dither-QIM on a logical luminance grid)
+1. **Luminance only.** Work on Y = 0.299R+0.587G+0.114B; leave Cb/Cr untouched (messaging apps
+   subsample chroma 4:2:0, so only luma survives). A luma shift is applied by adding the same delta
+   to R, G, B — this moves Y and leaves Cb/Cr exactly where they were.
+2. **Logical grid, relative to dimensions.** A `GX × GY` grid: cell (gx,gy) owns source columns
+   `[gx·W/GX, (gx+1)·W/GX)` and matching rows. Encoder and decoder both read each cell's **mean
+   luminance**. A uniform downscale keeps which pixels fall in which cell, so the decoder recomputes
+   the grid on whatever size it receives — no registration, no side channel.
+3. **Dither QIM per cell.** Each coded bit is carried by one cell's mean luminance: bit 0 snaps the
+   mean to the lattice `{k·Δ}`, bit 1 to `{k·Δ+Δ/2}`; the whole cell shifts by one flat luma delta
+   to reach the target. A flat shift is DC-ish — JPEG's DC term and every resampler preserve it, and
+   the eye tolerates it far better than the same energy as high-frequency noise.
+4. **FEC + repetition + interleave.** The payload is wrapped in a self-describing frame, protected
+   by Reed-Solomon over GF(256), and each coded bit is **repeated R times, dispersed across the grid**
+   by a fixed interleave so a JPEG-block burst only nicks each symbol. The decoder soft-combines the
+   copies (each weighted by its lattice-proximity confidence), hard-decides, RS-corrects, then checks
+   CRC-32. RS + CRC make a damaged image decode to *damaged*, never a wrong message (INV-12).
+5. **DC-offset search.** JPEG/resampling can shift absolute luminance, biasing every QIM decision the
+   same way. The decoder tries a few DC-offset hypotheses (± fractions of Δ) and accepts the first
+   whose RS **and** CRC-32 pass (false accept ≈ 2⁻³² per trial).
+
+### Frame format (before FEC)
+Own magic `0x53 0x46` (`"SF"`) — deliberately **not** exact-LSB's `0x4E` — so the two techniques
+never collide and auto-detect can tell them apart (INV-9, INV-12).
+
+**Task W2-7 (variable-length messages):** the 64-byte field below is a fixed-size **slot**, not a
+fixed message length. The real message length `n` (0..64) lives in the length field; the message
+occupies the slot's first `n` bytes and the remaining `64-n` bytes are zero-padded. The CRC-32
+covers the **whole slot**, padding included — not just the first `n` bytes — so a corrupted
+padding byte fails CRC exactly like a corrupted message byte (never a silently-shortened message).
+The slot's fixed size is what keeps FEC/interleave/decoder geometry deterministic; only the length
+field and how many of the slot's bytes are "real" vary.
+
+| Field    | Bytes | Value / meaning                                                          |
+|----------|-------|---------------------------------------------------------------------------|
+| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)                     |
+| version  | 1     | `0x01`                                                                   |
+| length   | 2     | the real message length `n`, big-endian, `0 <= n <= 64`                  |
+| slot     | 64    | message (first `n` bytes) + zero padding (`64-n` bytes) — slot is fixed size, decoder geometry needs no side info |
+| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+the whole slot (padding included), big-endian |
+
+Frame = 5 + 64 + 4 = **73 bytes**, RS-encoded as one codeword `RS(73+48, 73) = RS(121, 73)`
+(corrects up to 24 byte-errors) — unchanged by task W2-7, since the slot size (and therefore
+`FRAME_BYTES`) never changes with message length. A decode declaring `n = 64` is a valid,
+full-slot message and decodes normally; a forged header claiming `n > 64` is rejected before any
+CRC/RS work, never treated as a plausible-but-damaged frame.
+
+### Shipped parameters (round-2 retune, measured)
+| Param | Value | Reasoning |
+|-------|-------|-----------|
+| Grid `GX×GY` | **96 × 96** (9216 cells) | Enough cells for R=8 at this payload; at a 640 px long side each cell is ~7 px (~50 px averaged), which the DC/JPEG path preserves. |
+| `Δ` (QIM step) | **10** (luma) | Round 1 shipped Δ=24 and was **visibly blocky** (coordinator round-2 finding). Δ=10 is the lowest step that still cleared MMS-like on all covers under both JPEG encoders (see matrix), and it cuts the artifact hard: PSNR 31.6→39.6 dB, max luma delta 12→5. |
+| Max per-pixel luma delta | **5** (= Δ/2) | Worst-case flat shift to reach a lattice point (was 12). |
+| RS parity | **48** → RS(121,73), t=24 | Half-rate FEC; a safety net on top of the repetition. |
+| Repetition `R` | **8** | Soft-combining 8 dispersed copies is what lets Δ drop to 10 and still survive q50. |
+| Payload slot | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed *slot* size keeps decoder geometry deterministic. Task W2-7: the real message length is variable, 0..64 bytes, carried in the frame's own length field — the slot itself never changes size. |
+
+Bit budget: coded 121 B = 968 bits × R=8 = 7744 cells of 9216.
+
+### Covers
+45 lossless images: **24 real Kodak photos** (kodim01–24, from the FFDNet mirror on GitHub — r0k.us
+still returned HTTP 401; these are the real suite, but this mirror serves them center-cropped to
+**500×500** rather than the original 768×512, which makes them a *small-image stress case*), plus 18
+skimage natural photos and 3 synthetics. Sizes 191–1411 px.
+
+### Measured survival matrix (round 2, Δ=10)
+64-byte payload embedded, pushed through each channel, decoded; a cell counts covers whose payload
+returned **byte-exact**. Measured with two independent encoders:
+
+| Pipeline (long side × JPEG q, 4:2:0) | javax.imageio | libjpeg-turbo (`convert`) |
+|--------------------------------------|:---:|:---:|
+| orig × q95 / q80 / q70 / q50         | 45/45 each | — |
+| 1080 px × q80(bicubic) / q70(bilinear) | 45/45 / 45/45 | — |
+| 640 px × q70(bicubic) / q60(bilinear)  | 45/45 / 45/45 | — |
+| **Facebook-like** (2048→q85→1080→q75)  | **45/45** | 41/45 |
+| **MMS-like** (640 px, q50)             | **45/45** | **45/45** |
+| mms_like, covers ≥ 640 px only         | **7/7** | — |
+
+Note the encoder sensitivity: PIL/Pillow's q50 (a third encoder, used during the parameter search)
+was harsher and scored MMS ~40/45 — the small 500 px Kodak crops are the ones on the edge. The
+authoritative libjpeg-turbo path (what Android/Facebook use, via `convert -sampling-factor 4:2:0
+-quality 50`) gives MMS **45/45**. The 4 FB-like misses under `convert` are all 500 px covers; on
+covers ≥ 640 px (real phone-photo territory) FB-like is clean. **FEC margin** stayed large (RS
+corrected 0 bytes on the surviving cases — the R=8 soft-combine clears the bits alone).
+
+### Full-resolution gate-28 re-run (task W1-1, supersedes the 500 px Kodak caveat below)
+The 500 px Kodak-crop caveat below predicted *better* survival at full resolution. Re-measured
+offline (per `offline-kotlin-calibration.md`, driving the actual shipped `SturdyImageCarrier`
+class, not a re-implementation) against **24 real, full-resolution Kodak photos (768×512/512×768,
+`msdkhairi/kodak` on Hugging Face — a different reachable mirror; r0k.us still 401s)** — the honest
+result is **mixed, not uniformly better**:
+
+| Pipeline (long side × JPEG q, 4:2:0) | javax.imageio | libjpeg-turbo (`convert`) |
+|--------------------------------------|:---:|:---:|
+| orig × q95 / q80 / q70 / q50          | 24/24 each | — |
+| 1600 px × q85(bicubic)                | 24/24 | — |
+| 1080 px × q80(bicubic) / q70(bilinear) | 24/24 / 24/24 | — |
+| 640 px × q70(bicubic) / q60(bilinear)  | **20/24** / **20/24** | — |
+| **Facebook-like** (2048→q85→1080→q75)  | **24/24** | **24/24** |
+| **MMS-like** (640 px, q50)             | **19/24** | **19/24** |
+
+PSNR mean 39.7 dB (min 39.5) — matches the 500 px-crop measurement's 39.6/39.4 closely, confirming
+visibility is stable across cover sets. Crop-10%/rotate-90° failure envelope: 24/24 NoFirefly, 0
+Damaged, **0 wrong payloads** — that invariant holds exactly as before.
+
+**The genuinely new finding:** the previous 500 px-crop matrix's "640 px" and "MMS-like" columns
+never actually downscaled the Kodak covers at all — `resizeLong` is a no-op once an image is
+already under its target long side, and 500 < 640. That matrix's 45/45 on those rows was really
+measuring "JPEG-recompress a 500 px image at native size," not "downscale a real photo to 640 px
+then recompress" — the exact scenario a phone photo sent by MMS goes through. At true full
+resolution, the **640 px-long-side pipelines and MMS-like now show real, non-zero misses (17-21%
+across 24 covers)**, both encoders agreeing exactly (19/24 each on MMS-like) — libjpeg-turbo is not
+more forgiving here. Failures cluster in landscape (768×512) covers; none of the 6 portrait
+(512×768) covers failed on any pipeline in this run. 1080 px and above remain fully clean (24/24).
+This is a real, measured regression versus the prior table's optimistic 640/MMS numbers, not a
+port bug — the shipped Δ=10/R=8 parameters were tuned against the smaller/cropped set; gate-29's
+real-channel sends are the next, authoritative check, and a future retune (larger Δ, higher REP,
+or the dark/bright-skip refinement) is the likely next step if gate-29 confirms this gap on real
+sends. Reported here, not hidden, per this doc's own standard.
+
+JPEG file size at 1600 px long side (send-quality justification, task W1-1's `STURDY_JPEG_QUALITY`
+adapter constant) on these 24 covers (native ≤768 px, so no resize applied — these are native-size
+JPEG bytes, a lower bound on what a true 1600 px photo would weigh): q85 mean 91 KB, q88 103 KB,
+**q90 114 KB**, q92 126 KB, q95 165 KB. q92 costs ~11% more than q90 for no measured survival or
+visibility gain; q90 is the better trade.
+
+### Visibility (round 2)
+Δ=10: **PSNR mean 39.6 dB (min 39.4), SSIM 0.964, max per-pixel luma delta 5, and max luma delta in
+flat (std<3) 12×12 blocks = 5.** Eyeballed at 1:1 and 4×: the cup, saucer, wood, skin and fabric are
+indistinguishable from the cover; the only residual is a **very faint mottling in deep-shadow flat
+regions** (Weber's law — the eye is most sensitive to small absolute deltas in the dark). Three
+cover-vs-sturdy side-by-sides and three 4× crops of each image's flattest region are in
+`scratchpad/sturdy/eyecheck/` for gate-30.
+
+### The core trade-off (measured, reported not hidden)
+Three approaches were built and measured this round; **true invisibility and MMS-q50 survival are
+mutually exclusive in a luminance-QIM scheme:**
+- **All-cell, Δ=24 (round 1):** MMS/FB fully survive, but visibly blocky (PSNR 31.6, Δ/2=12).
+- **All-cell, Δ=10 (shipped):** near-invisible except faint deep-shadow mottling; MMS/FB survive on
+  all covers under two encoders. **Best balance — shipped.**
+- **Perceptual masking (skip flat/dark cells so nothing shows there):** genuinely invisible on
+  textured photos (PSNR 42.5, SSIM 0.986) **but** (a) needs texture to hide in, so it fails to embed
+  64 bytes in smooth/dark-dominated images (e.g. Hubble field, moon), and (b) the smaller Δ it
+  enables does **not** survive MMS q50 (≈40% MMS in tests). The mask is also fragile: a fine-texture
+  activity map shifts under the embedding itself (≈6% of cells flip active-state), breaking a
+  decoder that recomputes it; a fixed-point encode plus a blurred/brightness mask helps but does not
+  recover MMS survival. **Not shipped.**
+- **Brightness-only dark/bright skip on top of all-cell Δ=10** (a lighter refinement): removes the
+  deep-shadow residual entirely (dark-region max delta 5→**0**, PSNR→40.2, SSIM 0.971) and is robust
+  (brightness is low-frequency, stable to embedding and channel). Cost: it fails to embed on
+  **dark-dominated images** (clean 42/45 — Hubble/moon), so it needs a graceful fallback (embed dark
+  cells anyway when too few remain; decoder tries both, CRC disambiguates). **Recommended as a W1
+  option, gated on gate-30:** if the owner finds the Δ=10 deep-shadow mottling visible at 1:1, enable
+  it; otherwise keep the simpler universal all-cell path.
+
+### Failure envelope (asserted, gate-28)
+Across all 45 covers, **0 wrong payloads** in every case:
+
+| Attack | Outcome |
+|--------|---------|
+| 10% crop | 45/45 NoFirefly |
+| 90° rotation | 45/45 NoFirefly |
+| screenshot-like (0.9 + border) | 45/45 NoFirefly |
+| grayscale + 1.3× contrast | 44/45 NoFirefly, 1/45 still-correct |
+
+Honest nuance (unchanged from round 1): SFLY lives in **luminance**, so a pure grayscale conversion
+does not destroy a firefly; only a contrast/levels change that *scales* luma enough to break the
+absolute Δ lattice does. The one still-correct case was the correct payload, never a wrong one.
+
+### No false catch (gate-27)
+**0 false catches across 463 clean, never-embedded images** (all covers untouched, JPEG-recompressed
+and resized copies, random crops/rescales, and synthetic noise/gradients). Magic + version + CRC-32,
+re-checked under every DC hypothesis, is what keeps a clean image reading as *no firefly*.
+
+### Known risks / open items
+- **Simulation ≠ the real apps.** Two library encoders (javax.imageio, libjpeg-turbo/`convert`) with
+  plausible chains. Facebook/Messenger/Telegram pipelines are undisclosed and change. Gate-29 (owner
+  sends from real accounts) is the only ground truth; the matrix is a strong prior, not a guarantee.
+- **Kodak served at 500 px — re-run complete (task W1-1).** Re-measured against 24 real,
+  full-resolution (768×512) Kodak photos; see "Full-resolution gate-28 re-run" above. Result was
+  *not* uniformly better as predicted — 1080 px and above stayed fully clean, but the 640 px-long-
+  side pipelines and MMS-like dropped to ~79-83% survival (from an apparent 45/45 that, on the 500
+  px crops, had secretly never triggered an actual downscale). A real, measured gap for gate-29 to
+  confirm or refute on real channels; a future retune is the likely next step if it holds.
+- **Deep-shadow residual at Δ=10.** Faint mottling in large dark flats; gate-30 decides if it needs
+  the brightness dark-skip refinement (which then can't embed in dark-dominated images without the
+  fallback).
+- **Small images.** Survival falls below ~512–640 px long side; the app should warn/refuse covers with
+  a long side under ~640 px (a phone photo is far above this).
+- **Grayscale/contrast honesty.** Grayscale alone preserves the payload; the receive-side copy must
+  not claim a filtered image is necessarily clean.
+- **Port note (W1-1).** Pure JVM, no android.*. In the app: back `PixelSurface` with a `Bitmap`
+  adapter; **delete** the bundled `Gf256`/`Rs` and call the existing
+  `dev.herakles.nightjar.ReedSolomon`/`GF256` (same GF, prim poly 0x11d) — do not add a second RS;
+  map decode outcomes onto the existing `DecodeResult`/`DecodeFailure`. The fixed LCG interleave ports
+  as-is.
+- **No SFLY-specific detector this round.** A steganalysis detector purpose-built for SFLY is a
+  follow-up (spec out-of-scope). Measured instead (task W1-1, gate-30): the *existing* image
+  chi-square/PoV check (tuned for raw-pixel LSB) **does** flag sturdy output — 0.997/0.915
+  confidence, both bundled covers, both a sustained whole-image run. Dither QIM's per-pixel
+  rounding of a continuous shift is value-dependent in the same statistical way LSB replacement
+  is, even though it never touches an LSB directly. The in-app copy must say sturdy *can* be
+  flagged by the existing check, not that it evades detection.
+  **Re-measured on real photos, not just the bundled covers (task W2-4, `SturdyImageSteganalysisRealPhotoTest.kt`):**
+  the bundled-cover result does **not** generalize. Three real photographs (900x700, public-domain
+  Unsplash/Lorem Picsum sources, `app/src/test/resources/sturdy_photos/`) run through the app's own
+  send pipeline (`SturdyImageCarrier.encode` → `encodeSturdyJpeg` q90 → decode) are flagged only
+  2/3 of the time (confidences 0.868/0.985/0.565, `flagThreshold` 0.85) — and, photo for photo, the
+  **same** flagged/clear verdict lands on an unembedded copy of that photo pushed through the
+  identical q90 JPEG export (0.966/0.989/0.469): the run this detector finds tracks that photo's
+  own JPEG-quantization pattern, not whether anything is hidden in it. Even the pristine,
+  never-exported working bitmap (the state right after tapping "embed", before any save/share) is
+  only flagged 2/3 on real photos (0.905/0.943/0.492) — unlike the bundled covers' 2/2. After a
+  real-channel-shaped recompression pass (`simulateFacebookLikeChannel`/`simulateMmsLikeChannel`,
+  the same `JpegLumaSim.kt` utility gate-28/29 use), confidence collapses near zero for sturdy
+  **and** clean alike, 4/4 pairs across all three photos — the check essentially stops flagging
+  either one once a photo is actually sent. `ImageStegoScreen.kt`'s sturdy "check for hidden data"
+  caption is written from these real-photo numbers, not the bundled-cover ones: it says the
+  flagged/clear reading is unreliable for sturdy, not that sturdy reliably gets caught.
+
+### The check's false-flag rate on CLEAN photos, properly sized (task W2-6, gate-30 follow-up)
+Task W2-4's n=3 sample first raised the question ("the same flagged/clear verdict lands on an
+unembedded copy of that photo... 2/3 flagged after JPEG q90"), but three photos is too small to
+size honestly, and conflates "does the check flag sturdy output" with "does the check flag an
+*ordinary* photo with nothing hidden in it at all" — the second question is what actually matters
+for a false-flag caveat, since it's asked with no embed technique in play whatsoever.
+
+**Measured properly: n=26 real, public-domain photographs** (Lorem Picsum, `id` 1-100, distinct
+images, native 800x600 — their own served resolution, no resize applied), each run through
+[ImageSteganalysis] as (a) the lossless PNG decode and (b) that same PNG re-encoded as JPEG
+q75/90/95 (`encodeSturdyJpeg`) — **never embedded into at any stage**:
+
+| Container | Flagged | Rate |
+|-----------|---------|------|
+| PNG (lossless) | 5/26 | 19.2% |
+| JPEG q75 | 5/26 | 19.2% |
+| JPEG q90 | 6/26 | 23.1% |
+| JPEG q95 | 6/26 | 23.1% |
+
+**A sizing artifact caught and corrected before it shipped.** An earlier pass of this same
+measurement, run to fit a small committed-resource budget, downscaled every photo to 220px long
+side and found a wildly higher, near-universal false-flag rate (22-23 of 26, ~85-88%, *every*
+container including PNG). A follow-up sweep across intermediate sizes (320/400/480/640/800px long
+side, same 8 source photos) showed why: this detector's false-flag rate is strongly,
+monotonically **size-sensitive** — 100% → 87.5% → 75% → 50% → 12.5% flagged as long side grows
+320 → 800px — independent of JPEG entirely (confirmed with both a Lanczos resize and a
+nearest-neighbor/point-sample resize; both showed the same size-driven curve, ruling out the
+specific resize filter as the cause). A small image's coarser per-pixel sampling smooths adjacent
+channel values together in a way the chi-square Pairs-of-Values test reads as LSB-style
+equalization, regardless of container. Measuring at 220px would have reported a real number for
+the wrong question — an artifact of the test's own downscale, not of what this check actually does
+to a real photo at a size an operator would actually pick. The fix: use *fewer, full native-size*
+photos rather than *more, artificially shrunk* ones (`app/src/test/resources/clean_photos/`, a
+curated 6-photo committed subset, ~3MB — `ImageSteganalysisRealPhotoFalseFlagTest.kt`'s own KDoc
+has the full accounting).
+
+**The honest finding is more nuanced than "JPEG causes this."** PNG's own baseline false-flag rate
+(19.2%) is already material by this task's own >10% bar — this check mistakes a real photo's
+ordinary low-frequency detail (skies, walls, skin, out-of-focus backgrounds) for hidden data
+reasonably often, with **no compression involved at all**. JPEG re-encoding adds a real but modest
+increment on top of that baseline: exactly one more photo (of 26) crosses `flagThreshold` at
+q90/q95 versus PNG/q75 (confidence 0.776/0.744 clear at PNG/q75, 0.877/0.856 flagged at q90/q95).
+So the honest caveat (below) says the check often misreads ordinary photo detail *in general*, and
+JPEG makes that *somewhat* more likely — not that JPEG alone is the problem.
+
+**In-app response (task W2-6).** `ImageStegoScreen.kt` now sniffs the picked cover's real container
+by magic bytes (`FileSniffer`, the same sniffer the receive path uses — never a declared
+MIME/extension) at pick time, and once the checked image traces back to a JPEG/WebP/HEIC source,
+"check for hidden data" shows one honest caveat line under the verdict (`strings_workshop_image.xml`
+`workshop_image_check_jpeg_caveat`) stating the measured fact above. The verdict itself (confidence,
+flagged/clear, detail, estimate) is always shown unchanged — this never hides or downgrades a flag,
+only explains it. PNG-sourced covers get no caveat, per this task's scope, even though this
+measurement shows PNG's own baseline is also worth an operator's skepticism; that's a legitimate
+follow-up, not something this task silently folded in.
+
+---
+
+## Receive pipeline and riddle trail (v6 additions)
+
+Two more new packages land with v6 (spec.md "Gates — v6 addition"): `incoming/` turns a
+shared/opened file back into a firefly, and `trail/` is the first-use guided tour that walks a
+new owner through every creation jar once. Neither touches an existing
+`CovertCarrier`/`CovertDetector` implementation — both are new *consumers*, same posture as the
+Firefly Jar front-end (§ above).
+
+### `incoming/` — receive pipeline (spec.md v6 receive-plumbing, gate-31/32, INV-12)
+
+`MainActivity` hands `IncomingPipeline.route(context, uri, action)` a `Uri` straight off an
+`ACTION_SEND`/`ACTION_VIEW` intent and gets back exactly one `IncomingOutcome` — INV-12: "every
+incoming file resolves to exactly one of caught, squeezed, damaged, no firefly, or unsupported,
+and a message is shown only after its checksum verifies."
+
+**Data flow:** `IncomingPipeline` reads bytes (`IncomingAndroidAdapters.readBoundedBytes`) →
+`FileSniffer.sniff` identifies the real container from its own magic bytes, never a
+caller-supplied MIME type or filename extension (`SniffedType`: PNG/JPEG/WEBP/HEIF/WAV/M4A/MP3/
+OGG/OPUS/AMR/UNKNOWN) → dispatches into `IncomingRouter`, which tries every technique nightjar
+knows and stops at the first match — the built-in exact-LSB image codec first, then each
+`ImageFireflyDecoder` in `ImageFireflyDecoderRegistry.decoders` (the v6 sturdy technique's own
+registration point, via `SturdyImageFireflyDecoder`), then all four acoustic-modem
+protocol/symbol-rate combinations, then the WAV/compressed-audio codecs. `IncomingRouter` itself
+is pure JVM (no file/network I/O, no `Context`), so most of the routing logic tests under plain
+JUnit/Robolectric rather than needing a device. A `DecodeFailure` whose frame header verified
+(`INTEGRITY_MISMATCH`/`UNRECOVERABLE_FEC`) maps to `IncomingOutcome.Damaged`; a header that never
+verified at all keeps falling through to the next technique instead.
+
+On `IncomingOutcome.Caught`, `IncomingPipeline` persists the firefly through the same
+`FireflyRepository.insertWithMedia` write-then-insert path every existing catch site
+(`ImageStegoScreen.kt`, `AudioStegoScreen.kt`, `AcousticModemScreen.kt`) already uses, with
+`direction = "RECEIVED"` and `carrierKind` from its own `carrierKindFor(Module)` mapping (§ 6's
+exhaustive-`when` table, above). Reports every outcome — caught or not — to `DebugProbe` as the
+v6 addition to the `COVERT_DEBUG` probe contract ("the dump gains the last incoming file: action,
+MIME type, detected technique, outcome").
+
+**Key files:**
+- `IncomingPipeline.kt` — Android-facing entry point; reads/sniffs/dispatches, then persists and
+  reports to `DebugProbe`.
+- `IncomingRouter.kt` — pure-JVM auto-detect-and-route core; tries every technique in order.
+- `FileSniffer.kt` — magic-byte container detection (`SniffedType`/`SniffedDomain`).
+- `IncomingOutcome.kt` — the sealed `IncomingOutcome` (INV-12's five cases) plus its
+  `DebugProbe` field mappings.
+- `IncomingOutcomeCopy.kt` — a pure, total outcome → jar-voice string-resource mapping (six
+  cases: INV-12's five plus `Squeezed`'s own lossy-image/compressed-audio split), shared by
+  `IncomingScreen` and its own test so the screen and the test can't drift apart.
+- `ImageFireflyDecoder.kt` — the registration interface + `ImageFireflyDecoderRegistry` future
+  image techniques plug into.
+- `SturdyImageFireflyDecoder.kt` — the sturdy technique's decoder, registered there.
+- `IncomingAndroidAdapters.kt` — bounded byte/bitmap reads, compressed-audio demuxing.
+- `IncomingScreen.kt` — renders the outcome (task W2-1).
+
+### `trail/` — riddle trail (design/riddle-trail.md, spec.md gate-36–40, INV-9/INV-11)
+
+A first-use guided tour: six steps (`TrailStep.ORDER` = art → humming → singing → meadow → send
+→ workshop) that glow one jar-shelf (or firefly-detail, or wordmark) target at a time and walk a
+new owner through every creation jar, the meadow, and the technical picker, using real carriers
+produced by the production encoders — never canned assets.
+
+**Data flow:** `TrailStateStore` (SharedPreferences-backed — no new Room table; INV-9 keeps
+trail/practice status entirely outside `FireflyRecord`) owns a `TrailState`
+(`currentStep`/`completedSteps`/`skipped`/`practiceRecordIds`, plus the v6
+`welcomeSeen`/`finaleDismissed`/`lastCompletedStep` UI flags) as a `StateFlow`, persisted
+synchronously on every `advance`/`skip`/`restart` call and reloaded identically after process
+death. `TrailTargets.kt`'s pure functions (`trailShelfTargetModule`, `trailPracticeGlossRes`,
+`trailQuestRes`, …) map the active step to whichever shelf tile, practice-firefly gloss, and
+one-line quest hint should be showing, so every consumer (`JarShelfScreen.kt`,
+`JarDetailScreen.kt`, the three jar catch flows, `DetectorScreen.kt`) reads one shared mapping
+instead of re-deriving it. `Modifier.trailHighlight` (`TrailHighlight.kt`) draws the single
+breathing glow on whichever target that resolves to. `PracticeFireflyGenerator` (pure JVM: riddle
+text + already-decoded cover samples in, carrier data out — INV-11, "never the reverse," enforced
+by `TrailSourceScanTest`) generates the three practice fireflies through the same production
+`ImageStegoCarrier`/`AudioStegoCarrier`/`AcousticCarrier` encoders real catches use;
+`PracticeFireflies.kt` is the thin Android adapter that resolves `R.drawable`/`R.string`
+resources and writes the results to `filesDir/practice/` on install or restart.
+
+**Key files:**
+- `TrailState.kt` / `TrailStep.kt` — the persisted state shape and the six-step enum (a stable,
+  ordinal-independent `id` string per step, same discipline `Module.name` already follows).
+- `TrailStateStore.kt` — SharedPreferences persistence + the `advance`/`skip`/`restart` mutations.
+- `TrailTargets.kt` — pure step → UI-target mappings (shelf tile, practice gloss, quest hint),
+  including `trailPracticeGlossRes`'s exhaustive `when(module)` (§ 6's table, above).
+- `TrailHighlight.kt` — the `Modifier.trailHighlight` breathing-glow drawing.
+- `TrailConstellation.kt` — the shelf's six-dot progress readout + completion pulse.
+- `TrailQuestReward.kt` — `TrailQuestLine` (per-step hint) and `TrailRewardLine` (per-step
+  completion celebration) composables.
+- `TrailWelcomeCard.kt` — the first-run welcome card shown before `welcomeSeen`.
+- `PracticeFireflyGenerator.kt` — pure-JVM practice-firefly content generation (INV-11).
+- `PracticeFireflies.kt` — Android adapter: resource resolution + `filesDir` writes.

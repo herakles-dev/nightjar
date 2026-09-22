@@ -56,6 +56,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
@@ -68,15 +69,26 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.herakles.nightjar.LsbBitPlane
+import dev.herakles.nightjar.R
 import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.StereoPolarity
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.SturdyImageFireflyDecoder
 import dev.herakles.nightjar.matchCover
 import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.share.FireflyShare
+import dev.herakles.nightjar.share.keepOutgoingCopy
+import dev.herakles.nightjar.share.outgoingKindFor
+import dev.herakles.nightjar.share.outgoingMimeAndExtensionFor
+import dev.herakles.nightjar.share.sendAdviceStringRes
 import dev.herakles.nightjar.spectrogram
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailPracticeGlossRes
 import dev.herakles.nightjar.stegoDifference
 import dev.herakles.nightjar.stereoPolarity
 import dev.herakles.nightjar.ui.ExpandGlyph
@@ -93,6 +105,7 @@ import dev.herakles.nightjar.ui.theme.JarTextSecondary
 import dev.herakles.nightjar.ui.theme.JarTextTertiary
 import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -128,7 +141,16 @@ import kotlinx.coroutines.withContext
  * instead.
  */
 @Composable
-fun JarDetailScreen(module: Module, repository: FireflyRepository, onBack: () -> Unit) {
+fun JarDetailScreen(
+    module: Module,
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onBack: () -> Unit,
+    // v6 (task W2-1, gate-31): "catch from a photo or file" row result -- threaded through to
+    // catchFlowFor/jarCatchFlow below. Default no-op keeps every existing call site (and
+    // @Preview, if one is ever added for this stateful root) compiling unchanged.
+    onIncomingOutcome: (IncomingOutcome) -> Unit = {},
+) {
     val fireflyFlow = remember(repository, module) { repository.observeByModule(module.name) }
     val fireflies by fireflyFlow.collectAsState(initial = emptyList())
     // F-03 fix (dup M-07): saved by id, not the record itself -- FireflyRecord isn't Parcelable,
@@ -140,6 +162,14 @@ fun JarDetailScreen(module: Module, repository: FireflyRepository, onBack: () ->
     var selectedFireflyId by rememberSaveable(module) { mutableStateOf<Long?>(null) }
     val selectedFirefly = fireflies.find { it.id == selectedFireflyId }
     val coroutineScope = rememberCoroutineScope()
+    // v6 (task W2-2, owner direction 2026-09-22, design/riddle-trail.md § Welcome + game layer,
+    // commit 6b9cedf): "send this firefly" carries no glow of its own (that lives on the art
+    // jar's "hide one in a photo" row -- HideInPhotoFlow.kt), but ANY successful send still
+    // advances the SEND step if it's the active one, "so nobody gets stuck." Guarded on the
+    // live trail state here (not inside FireflyDetailContent, which stays TrailStateStore-free
+    // like every other pure/previewable composable in this file) so a send outside the trail
+    // never jumps trail progress forward.
+    val trailState by trailStore.state.collectAsState()
 
     JarDetailContent(
         module = module,
@@ -158,11 +188,25 @@ fun JarDetailScreen(module: Module, repository: FireflyRepository, onBack: () ->
             if (selectedFireflyId == id) selectedFireflyId = null
         },
         onBack = onBack,
-        moduleFlow = { catchFlowFor(module = module, repository = repository, onExit = onBack) },
+        moduleFlow = {
+            catchFlowFor(
+                module = module,
+                repository = repository,
+                trailStore = trailStore,
+                onExit = onBack,
+                onIncomingOutcome = onIncomingOutcome,
+            )
+        },
         // Stage C2 (gate-18): the carrier viewer's one I/O hook. FireflyDetailContent stays a
         // pure composable with no FireflyDao/FireflyMediaStore reference of its own -- it just
         // gets handed a suspend function that already knows how to fetch bytes by mediaPath.
         loadMedia = { path -> repository.readMedia(path) },
+        // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): a pure
+        // hook, same shape as [loadMedia] -- FireflyDetailContent still holds no TrailStateStore
+        // reference of its own.
+        isPracticeFirefly = { id -> trailStore.isPractice(id) },
+        // v6 (task W2-2): see this function's own comment above [trailState].
+        onSendOpened = { if (trailState.currentStep == TrailStep.SEND) trailStore.advance(TrailStep.SEND) },
     )
 }
 
@@ -191,6 +235,14 @@ fun JarDetailContent(
     // unchanged -- same "pure/previewable" reasoning this composable's own KDoc already states
     // for [moduleFlow].
     loadMedia: suspend (String) -> ByteArray? = { null },
+    // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): default
+    // `{ false }` keeps every existing @Preview call site compiling unchanged, same reasoning
+    // this composable's other optional hooks already follow.
+    isPracticeFirefly: (Long) -> Boolean = { false },
+    // v6 (task W2-2): called once "send this firefly" 's share sheet actually opens -- see
+    // [FireflyDetailContent]'s own KDoc. Default `{}` keeps every existing @Preview call site
+    // compiling unchanged, same reasoning this composable's other optional hooks already follow.
+    onSendOpened: () -> Unit = {},
 ) {
     // G-01/F-02: shared confirm-delete state for both entry points -- a swarm tile's long-press
     // and the detail popup's explicit delete action. Only one of the two views below is ever
@@ -208,6 +260,8 @@ fun JarDetailContent(
                 onBack = onDismissDetail,
                 loadMedia = loadMedia,
                 onRequestDelete = { pendingDeleteId = selectedFirefly.id },
+                isPracticeFirefly = isPracticeFirefly(selectedFirefly.id),
+                onSendOpened = onSendOpened,
             )
         } else {
             Column(
@@ -307,15 +361,16 @@ private fun BackRow(label: String, onClick: () -> Unit) {
  *  branching on a specific [Module], only on the 2-case [JarRole] axis (same axis
  *  [FireflyDao]'s own logging discipline already draws — see architecture.md § 3). */
 private fun jarDetailCaption(role: JarRole): String = when (role) {
-    JarRole.CREATION -> "every firefly you've caught or spotted here"
+    JarRole.CREATION -> "every firefly you've created or caught here"
     JarRole.WATCHING -> "hold it up and see if anything glows nearby"
 }
 
 /**
  * The module's hero jar, centered — 140×170.dp for the singing jar (DESIGN_SPEC.md §3/§5 1b:
  * the acoustic modem's hub screen gets hero emphasis), 100×120.dp for the other three (§5
- * 1f/1g/1h). The watching jar's dim/radar variant is [FireflyGlyphs.drawJarGlyph]'s own branch
- * on [Module.DETECTOR] — this call site doesn't know or care it's rendering differently.
+ * 1f/1g/1h). The meadow's open-field variant (v6 addendum) is [FireflyGlyphs.drawJarGlyph]'s
+ * own branch on [Module.DETECTOR] — this call site doesn't know or care it's rendering
+ * differently.
  */
 @Composable
 private fun JarHero(module: Module, fireflies: List<FireflyRecord>) {
@@ -691,9 +746,44 @@ private fun FireflyDetailContent(
     // ([FireflyDot]/[FireflySwarmTile]) isn't discoverable on its own -- this is the popup's own
     // entry point into the same shared confirm-delete dialog ([JarDetailContent]).
     onRequestDelete: () -> Unit = {},
+    // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling, gate-36):
+    // true for a firefly caught from the trail's own practice carrier. Default `false` keeps
+    // every existing @Preview call site compiling unchanged.
+    isPracticeFirefly: Boolean = false,
+    // v6 (task W2-2, owner direction 2026-09-22): called once "send this firefly" 's share sheet
+    // actually opens -- the trail's SEND-step safety net ("so nobody gets stuck"), regardless of
+    // which firefly or whether the trail is even running (the caller in `JarDetailScreen.kt`
+    // gates the actual `TrailStateStore.advance` call on the live trail state). Default `{}`
+    // keeps every existing @Preview call site compiling unchanged, same reasoning
+    // [isPracticeFirefly] already follows.
+    onSendOpened: () -> Unit = {},
 ) {
     val caught = firefly.direction == "CREATED"
     val accent = if (caught) FireflyCreated else FireflyReceived
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    // v6 (task W2-2, gate-33): "send this firefly" -- only offered for a firefly with stored
+    // media (`FireflyRecord.carrierKind` non-null); [outgoingKindFor] returns null for anything
+    // else (a pre-media-capture-era record), which this block treats as "no send row" rather
+    // than a disabled one.
+    val outgoingKind = remember(firefly.carrierKind, firefly.technique) {
+        outgoingKindFor(firefly.carrierKind, firefly.technique)
+    }
+    var sendBusy by remember(firefly.id) { mutableStateOf(false) }
+    // "not shown again once dismissed or used for that firefly" (design/screen-flow.md v6 "Two
+    // send flows" step 3) -- [showKeepCopy] flips true only after the first successful send this
+    // composition, [keptCopy] once the operator actually taps it; both reset per [firefly.id].
+    var showKeepCopy by remember(firefly.id) { mutableStateOf(false) }
+    var keptCopy by remember(firefly.id) { mutableStateOf(false) }
+    // Review finding #1 (v6/review-fix): FireflyShare.prepareOutgoing is documented to throw
+    // IOException on a failed write -- this call site used to have no catch at all, so a real
+    // write failure (full disk, revoked storage permission) crashed the app instead of
+    // surfacing feedback. Resets per [firefly.id], same as the busy/keep-copy state above.
+    var sendErrorMessage by remember(firefly.id) { mutableStateOf<String?>(null) }
+    // Review finding #2 (v6/review-fix): KeepCopy.keepOutgoingCopy is documented to throw
+    // IOException on a failed MediaStore write -- same gap, same fix shape, as [sendErrorMessage]
+    // above, for the separate "keep a copy" gesture.
+    var keepErrorMessage by remember(firefly.id) { mutableStateOf<String?>(null) }
 
     // No JarNightSky here — JarDetailContent already has this composable inside one, and a
     // second backdrop would just run a duplicate starfield under the first.
@@ -721,7 +811,7 @@ private fun FireflyDetailContent(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                text = if (caught) "a firefly you caught" else "a firefly you spotted",
+                text = if (caught) "a firefly you created" else "a firefly you caught",
                 style = JarType.ActionTitle,
                 color = accent,
                 textAlign = TextAlign.Center,
@@ -751,7 +841,43 @@ private fun FireflyDetailContent(
             ) {
                 Text(text = "message", style = JarType.MetaLabel, color = JarTextTertiary)
                 Text(text = preview, style = JarType.Body, color = JarTextPrimary)
+                messageTruncationNotice(preview, firefly.payloadSizeBytes)?.let { notice ->
+                    Text(text = notice, style = JarType.Footer, color = JarTextTertiary)
+                }
             }
+        }
+
+        // W2-3 (design/firefly-jar-identity.md v6 addendum § Practice-firefly labelling): the
+        // plain gloss sits beside the decoded riddle above, ordinary UI copy labelled as a gloss
+        // -- never the payload text itself, which is [preview] above, decoded like any other
+        // firefly's. [trailPracticeGlossRes] is null for a module that never holds a practice
+        // firefly (the meadow), so this never renders for that module regardless of
+        // [isPracticeFirefly].
+        if (isPracticeFirefly) {
+            trailPracticeGlossRes(module)?.let { glossRes ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(text = stringResource(R.string.trail_gloss_label), style = JarType.MetaLabel, color = JarTextTertiary)
+                    Text(text = stringResource(glossRes), style = JarType.Footer, color = JarTextSecondary)
+                }
+            }
+        }
+
+        // W2-3 (design/firefly-jar-identity.md v6 addendum): sits above the metadata row below,
+        // never replacing it -- a practice firefly still shows a real timestamp and channel.
+        if (isPracticeFirefly) {
+            Text(
+                text = stringResource(R.string.trail_practice_label),
+                style = JarType.Footer,
+                color = JarTextTertiary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, top = 0.dp, end = 16.dp, bottom = 8.dp),
+            )
         }
 
         Row(
@@ -780,10 +906,120 @@ private fun FireflyDetailContent(
             )
             MetaCard(
                 label = "direction",
-                value = if (caught) "caught" else "spotted",
+                value = if (caught) "created" else "caught",
                 valueColor = accent,
                 modifier = Modifier.weight(1f),
             )
+        }
+
+        // v6 (task W2-2, gate-33): "send this firefly" -- any firefly with stored media, jar-mode
+        // send via FireflyShare (private cache file, amended INV-5). See this file's own KDoc for
+        // [outgoingKind]/[showKeepCopy]/[keptCopy].
+        val mediaPath = firefly.mediaPath
+        if (outgoingKind != null && mediaPath != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, top = 20.dp, end = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(text = stringResource(sendAdviceStringRes(outgoingKind)), style = JarType.Footer, color = JarTextTertiary)
+                Text(text = stringResource(R.string.send_not_locked), style = JarType.Footer, color = JarTextTertiary)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(JarCardFill)
+                        .border(width = 1.dp, color = JarCardBorder, shape = RoundedCornerShape(8.dp))
+                        .then(
+                            if (!sendBusy) {
+                                Modifier.clickable {
+                                    coroutineScope.launch {
+                                        sendBusy = true
+                                        sendErrorMessage = null
+                                        try {
+                                            val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
+                                            if (bytes != null) {
+                                                // Review finding #3 (v6/review-fix): derive the
+                                                // real outgoing MIME/extension from the firefly's
+                                                // own stored carrier rather than assuming
+                                                // [outgoingKind]'s WAV default -- a modem firefly
+                                                // caught from a compressed voice note keeps its
+                                                // real container.
+                                                val (mimeType, extension) = outgoingMimeAndExtensionFor(outgoingKind, mediaPath)
+                                                val uri = withContext(Dispatchers.IO) {
+                                                    FireflyShare.prepareOutgoing(context, bytes, outgoingKind, extension = extension)
+                                                }
+                                                context.startActivity(FireflyShare.shareIntent(uri, mimeType))
+                                                onSendOpened()
+                                                showKeepCopy = true
+                                            }
+                                        } catch (failure: IOException) {
+                                            // Review finding #1 (v6/review-fix): never let a
+                                            // failed write crash the app -- same "couldn't ...,
+                                            // try again" jar voice HideInPhotoFlow.kt's own send
+                                            // call already uses for the equivalent failure.
+                                            sendErrorMessage = context.getString(R.string.send_send_failed)
+                                        } finally {
+                                            sendBusy = false
+                                        }
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = stringResource(if (sendBusy) R.string.send_sending_busy_label else R.string.send_row_send_this_firefly),
+                        style = JarType.ButtonLabel,
+                        color = if (sendBusy) JarTextTertiary else accent,
+                    )
+                }
+                sendErrorMessage?.let {
+                    Text(text = it, style = JarType.Footer, color = JarTextTertiary)
+                }
+                if (showKeepCopy) {
+                    Text(
+                        text = stringResource(if (keptCopy) R.string.send_kept_a_copy else R.string.send_keep_a_copy),
+                        style = JarType.Footer,
+                        color = JarTextSecondary,
+                        modifier = Modifier.then(
+                            if (!keptCopy) {
+                                Modifier.clickable {
+                                    coroutineScope.launch {
+                                        keepErrorMessage = null
+                                        try {
+                                            val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
+                                            if (bytes != null) {
+                                                // Review finding #3 (v6/review-fix): same real
+                                                // MIME/extension derivation as "send this
+                                                // firefly" above.
+                                                val (mimeType, extension) = outgoingMimeAndExtensionFor(outgoingKind, mediaPath)
+                                                withContext(Dispatchers.IO) {
+                                                    keepOutgoingCopy(context, bytes, outgoingKind, mimeType = mimeType, extension = extension)
+                                                }
+                                            }
+                                            keptCopy = true
+                                        } catch (failure: IOException) {
+                                            // Review finding #2 (v6/review-fix): never let a
+                                            // failed MediaStore write crash the app.
+                                            keepErrorMessage = context.getString(R.string.send_keep_failed)
+                                        }
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        ),
+                    )
+                }
+                keepErrorMessage?.let {
+                    Text(text = it, style = JarType.Footer, color = JarTextTertiary)
+                }
+            }
         }
 
         // G-01/F-02 (gate-20): the popup's own visible delete affordance -- long-press on the
@@ -871,12 +1107,12 @@ private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else
  * [FireflySwarmWaveform] are bare [androidx.compose.foundation.Canvas]es with no text of their
  * own, and the carrier-thumbnail [Image] only ever said what kind of thing it was ("the image
  * this firefly hid inside"), never which firefly. Mirrors [FireflyDetailContent]'s own
- * "a firefly you caught"/timestamp/[fireflyByteLabel] copy so the spoken label and the visible
+ * "a firefly you created"/timestamp/[fireflyByteLabel] copy so the spoken label and the visible
  * detail screen agree on the same firefly. `internal` and Compose-free so
  * `CarrierInsightCaptionsTest`'s sibling JVM tests can drive it directly.
  */
 internal fun fireflySwarmContentDescription(record: FireflyRecord): String {
-    val direction = if (record.direction == "CREATED") "firefly you caught" else "firefly you spotted"
+    val direction = if (record.direction == "CREATED") "firefly you created" else "firefly you caught"
     return "$direction, ${formatFireflyTime(record.timestampMillis)}, ${fireflyByteLabel(record.payloadSizeBytes)}"
 }
 
@@ -1133,7 +1369,7 @@ private fun FireflyCarrierBlock(
                             onDismiss = { showFullscreen = false },
                         )
                     }
-                    if (currentBitPlane != null) {
+                    if (currentBitPlane != null && imageBitPlaneAllowed(firefly.technique)) {
                         FireflyBitPlaneToggle(
                             showBitPlane = showBitPlane,
                             accent = accent,
@@ -1150,6 +1386,20 @@ private fun FireflyCarrierBlock(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
+                    } else if (firefly.technique == SturdyImageFireflyDecoder.STURDY_TECHNIQUE) {
+                        // v6 (task W2-2) honesty fix: a bit-plane can't show where a SFLY sturdy
+                        // firefly hides (it isn't LSB-encoded at all -- see imageBitPlaneAllowed's
+                        // KDoc) -- a short caption replaces the toggle instead of offering a view
+                        // that would show only noise unrelated to how this technique actually
+                        // works. Pre-v6 exact fireflies are unchanged (imageBitPlaneAllowed is
+                        // true for them, same toggle as always).
+                        Text(
+                            text = stringResource(R.string.send_sturdy_carrier_caption),
+                            style = JarType.Footer,
+                            color = JarWatchingDim,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
                 currentWav != null && currentPeaks != null -> FireflyAudioCarrier(
@@ -1256,6 +1506,22 @@ internal fun imageBitPlaneCaption(): String =
     "even an untouched photo's bit-plane already looks like static, not a picture. fuzz here doesn't mean a message is hiding here."
 
 /**
+ * v6 (task W2-2) honesty fix: [FireflyBitPlaneToggle] only makes sense for the raw-pixel LSB
+ * ("exact") technique -- an LSB bit-plane genuinely shows where that codec hides a payload. The
+ * sturdy technique ([SturdyImageFireflyDecoder.STURDY_TECHNIQUE]) hides in a cell's mean
+ * luminance via dither-QIM on a logical grid (`SturdyImageCarrier`'s own KDoc), never in any
+ * pixel's least-significant bit, so a bit-plane of a sturdy stego image would show the exact same
+ * meaningless static [imageBitPlaneCaption] already warns about for an *untouched* photo --
+ * offering it as if it meant something here would contradict that caption's own honesty. `null`
+ * (a pre-migration/media-less record's absent [dev.herakles.nightjar.modules.fireflyjar
+ * .FireflyRecord.technique]) and every other non-null value (the pre-v6 exact-LSB technique,
+ * which writes `technique = null` -- see `ImageStegoScreen.kt`'s embed/extract catch sites --
+ * so in practice this is `true` for every IMAGE firefly except a sturdy one) keep the toggle.
+ */
+internal fun imageBitPlaneAllowed(technique: String?): Boolean =
+    technique != SturdyImageFireflyDecoder.STURDY_TECHNIQUE
+
+/**
  * P5 (on-device review, honesty): the carrier image's spoken label -- pulled out to a pure
  * function so it's testable the same way [imageBitPlaneCaption] already is. Previously said
  * "bright pixels are where a payload bit lives" for the bit-plane case, which is false: every
@@ -1317,7 +1583,7 @@ internal fun audioCarrierViewOptions(technique: String?, numChannels: Int): List
  * mid-flight the instant the user taps over to either option — the toggle itself only waits on
  * `spectrogramImage` being ready, not on these two (see [FireflyAudioCarrier]'s own KDoc). One
  * lowercase status word in the jar's voice, the same idiom every other in-progress state in this
- * app already uses ("catching"/"peeking"/"analyzing"/"listening" — `AudioStegoScreen.kt`,
+ * app already uses ("creating"/"peeking"/"analyzing"/"listening" — `AudioStegoScreen.kt`,
  * `ImageStegoScreen.kt`, `AcousticModemScreen.kt`), not a spinner and not a percentage.
  */
 @Composable
@@ -1412,7 +1678,16 @@ private fun FireflyAudioCarrier(
                     image = spectrogramImage,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(56.dp)
+                        // gate-38 (v6): this canvas had no semantics -- TalkBack skipped it
+                        // entirely. wav is the exact ParsedWav this LaunchedEffect already
+                        // decoded, so durationSeconds is measured, never guessed.
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = audioSpectrogramContentDescription(
+                                technique = technique,
+                                durationSeconds = wav.samples.size / wav.numChannels.toDouble() / wav.sampleRateHz.toDouble(),
+                            )
+                        },
                 )
             } else {
                 // Unreachable in practice -- see this function's KDoc -- but present anyway,
@@ -1642,9 +1917,29 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
  * `AudioStegoCarrier.kt`'s own `DecodeFailure` handling already documents for its unreachable
  * cases.
  */
-private data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
+// gate-38 (v6): widened from `private` to `internal` (unchanged otherwise) so
+// audioSpectrogramContentDescription below -- and its JVM test -- can read this exact caption
+// text rather than duplicating it, guaranteeing the spectrogram canvas's spoken label can never
+// drift from the visible caption Text right underneath it.
+internal data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
 
-private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
+/**
+ * Owner report (on-device, 2026-09-22): the firefly detail's message card was silently showing
+ * only the first 40 characters of longer messages — every catch/create flow wrote a truncated
+ * [FireflyRecord.payloadPreview] regardless of the real message length. That's fixed at the
+ * write side ([dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS] is far above
+ * any realistic hidden message), but a genuinely oversized embed can still exceed even that
+ * defensive ceiling — this compares the displayed [preview]'s own UTF-8 byte length against the
+ * record's real [payloadSizeBytes] and returns an honest one-line notice only in that case,
+ * rather than ever showing a cut-off message with nothing said about it (v5/v6 honesty rules).
+ */
+internal fun messageTruncationNotice(preview: String, payloadSizeBytes: Int): String? {
+    val shownBytes = preview.toByteArray(Charsets.UTF_8).size
+    if (shownBytes >= payloadSizeBytes) return null
+    return "showing the first $shownBytes of $payloadSizeBytes bytes"
+}
+
+internal fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
     "MFSK" -> AudioSpectrogramCaption(
         text = "eight tones sit in a bright band near 19.7khz. that's the payload, visible right here.",
         genuinelyVisible = true,
@@ -1663,6 +1958,21 @@ private fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption
         genuinelyVisible = true,
     )
     else -> AudioSpectrogramCaption(text = "", genuinelyVisible = false)
+}
+
+/**
+ * gate-38 (v6 addition, closes deferred follow-up #12) — [FireflySpectrogramCanvas]'s spoken
+ * label: [FireflyAudioCarrier]'s bare spectrogram [androidx.compose.foundation.Canvas] had no
+ * semantics at all, so TalkBack skipped it, landing straight from the view toggle onto the
+ * caption [Text] beneath it with nothing said about the canvas in between. [durationSeconds] is a
+ * real measured fact ([WavFile.ParsedWav] the caller already decoded, never re-derived here), and
+ * the rest is [audioSpectrogramCaption]'s own text for [technique] *verbatim* — calling that
+ * function rather than restating its claims is what guarantees this can never say more than the
+ * visible caption does (v5/v6 honesty rules, gate-19/24/26/38).
+ */
+internal fun audioSpectrogramContentDescription(technique: String?, durationSeconds: Double): String {
+    val duration = String.format(Locale.US, "%.1f", durationSeconds)
+    return "spectrogram of a $duration second clip. ${audioSpectrogramCaption(technique).text}"
 }
 
 /**
@@ -1805,11 +2115,11 @@ private fun PreviewJarDetailSinging() {
         onSelectFirefly = {},
         onDismissDetail = {},
         onBack = {},
-        moduleFlow = { PreviewModuleFlowPlaceholder("catch a firefly · look for fireflies") },
+        moduleFlow = { PreviewModuleFlowPlaceholder("create a firefly · look for fireflies") },
     )
 }
 
-@Preview(name = "Framed jar (image steganography)", showBackground = true, backgroundColor = 0xFF161229)
+@Preview(name = "Art jar (image steganography)", showBackground = true, backgroundColor = 0xFF161229)
 @Composable
 private fun PreviewJarDetailFramed() {
     JarDetailContent(
@@ -1819,7 +2129,7 @@ private fun PreviewJarDetailFramed() {
         onSelectFirefly = {},
         onDismissDetail = {},
         onBack = {},
-        moduleFlow = { PreviewModuleFlowPlaceholder("catch a firefly · look for fireflies · check for hidden data") },
+        moduleFlow = { PreviewModuleFlowPlaceholder("create a firefly · look for fireflies · check for hidden data") },
     )
 }
 
@@ -1833,11 +2143,11 @@ private fun PreviewJarDetailHumming() {
         onSelectFirefly = {},
         onDismissDetail = {},
         onBack = {},
-        moduleFlow = { PreviewModuleFlowPlaceholder("catch a firefly · look for fireflies") },
+        moduleFlow = { PreviewModuleFlowPlaceholder("create a firefly · look for fireflies") },
     )
 }
 
-@Preview(name = "Watching jar (detector)", showBackground = true, backgroundColor = 0xFF161229)
+@Preview(name = "Meadow (detector)", showBackground = true, backgroundColor = 0xFF161229)
 @Composable
 private fun PreviewJarDetailWatching() {
     JarDetailContent(
