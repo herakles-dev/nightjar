@@ -64,6 +64,7 @@ import dev.herakles.nightjar.R
 import dev.herakles.nightjar.SturdyCoverPrep
 import dev.herakles.nightjar.SturdyImageCarrier
 import dev.herakles.nightjar.encodeSturdyJpeg
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
 import dev.herakles.nightjar.prepareSturdyCover
 import dev.herakles.nightjar.toBitmap
 import dev.herakles.nightjar.incoming.FileSniffer
@@ -679,7 +680,7 @@ fun jarCatchFlow(
                     timestampMillis = System.currentTimeMillis(),
                     payloadSizeBytes = status.payloadBytes,
                     technique = null,
-                    payloadPreview = pendingCatchPreview.take(40),
+                    payloadPreview = pendingCatchPreview.take(MAX_STORED_MESSAGE_CHARS),
                 ),
             )
             status is StegoStatus.ExtractedSuccess && previousStatus !is StegoStatus.ExtractedSuccess -> {
@@ -691,7 +692,7 @@ fun jarCatchFlow(
                         timestampMillis = System.currentTimeMillis(),
                         payloadSizeBytes = status.text.encodeToByteArray().size,
                         technique = null,
-                        payloadPreview = status.text.take(40),
+                        payloadPreview = status.text.take(MAX_STORED_MESSAGE_CHARS),
                     ),
                     bitmapOverride = practiceBitmap,
                 )

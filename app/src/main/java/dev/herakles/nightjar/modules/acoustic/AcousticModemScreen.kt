@@ -75,6 +75,7 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
 import dev.herakles.nightjar.modules.fireflyjar.JarGlyph
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.trail.PracticeFireflies
 import dev.herakles.nightjar.trail.TrailQuestLine
@@ -490,7 +491,7 @@ fun jarCatchFlow(
                     timestampMillis = System.currentTimeMillis(),
                     payloadSizeBytes = bytes,
                     technique = null,
-                    payloadPreview = payloadText.take(40),
+                    payloadPreview = payloadText.take(MAX_STORED_MESSAGE_CHARS),
                 ),
                 controller.lastTransmittedPcm,
             )
@@ -510,7 +511,7 @@ fun jarCatchFlow(
                     timestampMillis = System.currentTimeMillis(),
                     payloadSizeBytes = bytes,
                     technique = null,
-                    payloadPreview = status.text.take(40),
+                    payloadPreview = status.text.take(MAX_STORED_MESSAGE_CHARS),
                 ),
                 controller.lastDecodedPcm,
             )

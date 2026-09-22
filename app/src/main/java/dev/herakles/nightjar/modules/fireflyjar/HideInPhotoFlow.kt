@@ -73,7 +73,7 @@ import kotlinx.coroutines.withContext
  * frame's own length field and zero-pads the unused part of the slot itself, so this flow just
  * hands it the typed message's raw UTF-8 bytes -- no space-padding here anymore. A receiving
  * device's [dev.herakles.nightjar.incoming.IncomingPipeline] decodes a `Caught` sturdy payload
- * with a plain `payload.decodeToString().take(40)`, and now gets back exactly the sent bytes
+ * with a plain `payload.decodeToString().take(MAX_STORED_MESSAGE_CHARS)`, and now gets back exactly the sent bytes
  * (trimmed to the real length by the carrier's own decode), not a padded string.
  *
  * [trailStore]/[sendStepActive] exist only so `hide it` can call
@@ -218,7 +218,7 @@ fun HideInPhotoFlow(
                                             timestampMillis = System.currentTimeMillis(),
                                             payloadSizeBytes = messageBytes,
                                             technique = encoded.technique,
-                                            payloadPreview = message.take(40),
+                                            payloadPreview = message.take(MAX_STORED_MESSAGE_CHARS),
                                             carrierKind = "IMAGE",
                                         ),
                                         encoded.bytes,

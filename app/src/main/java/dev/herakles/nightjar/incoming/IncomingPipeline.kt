@@ -7,6 +7,7 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyDatabase
 import dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
 import dev.herakles.nightjar.picker.Module
 
 /**
@@ -87,7 +88,7 @@ object IncomingPipeline {
             timestampMillis = System.currentTimeMillis(),
             payloadSizeBytes = outcome.payload.size,
             technique = outcome.technique,
-            payloadPreview = outcome.payload.decodeToString().take(40),
+            payloadPreview = outcome.payload.decodeToString().take(MAX_STORED_MESSAGE_CHARS),
             carrierKind = carrierKindFor(outcome.module),
         )
         repository.insertWithMedia(record, outcome.carrierBytes, outcome.extension)

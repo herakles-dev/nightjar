@@ -22,6 +22,16 @@ import kotlinx.coroutines.flow.Flow
  * v2 (gate-16) adds media attachment fields: [carrierKind] ("IMAGE"|"AUDIO"|null), [mediaPath]
  * (a FILENAME inside filesDir/fireflies/ — never an absolute path, since filesDir moves between
  * installs), and [mediaBytes] (byte size of the attached media, 0 when none attached).
+ *
+ * [payloadPreview] (owner report, on-device, 2026-09-22): despite its name, this is the full
+ * decoded message shown verbatim in the firefly detail (`JarDetailScreen`'s "message" card) —
+ * every call site used to write `.take(40)`, silently cutting off anything longer than 40
+ * characters (a v3-era name that stuck past its original, narrower use). It's now capped only
+ * at [MAX_STORED_MESSAGE_CHARS], a defensive ceiling far above any realistic hidden message,
+ * so a genuinely oversized embed can't make a single `Text` node choke. [payloadSizeBytes]
+ * always holds the true byte count regardless of this cap, which is how the detail screen
+ * tells whether [payloadPreview] was actually cut and says so rather than showing a partial
+ * message with no indication anything is missing.
  */
 @Entity(tableName = "firefly_records")
 data class FireflyRecord(
@@ -36,6 +46,11 @@ data class FireflyRecord(
     val mediaPath: String? = null,
     @ColumnInfo(defaultValue = "0") val mediaBytes: Long = 0,
 )
+
+/** Defensive ceiling on [FireflyRecord.payloadPreview] — see its KDoc. Far above any message a
+ *  person would type (the art jar's own riddle tops out at 142 bytes), and well below a size
+ *  that would make a single Compose `Text` node expensive to lay out. */
+const val MAX_STORED_MESSAGE_CHARS = 2000
 
 @Dao
 interface FireflyDao {

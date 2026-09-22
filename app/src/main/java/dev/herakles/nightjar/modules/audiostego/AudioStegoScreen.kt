@@ -65,6 +65,7 @@ import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.trail.PracticeFireflies
 import dev.herakles.nightjar.trail.TrailQuestLine
@@ -471,7 +472,7 @@ fun jarCatchFlow(
                     timestampMillis = System.currentTimeMillis(),
                     payloadSizeBytes = fireflyStatus.payloadBytes,
                     technique = technique.name,
-                    payloadPreview = payloadText.take(40),
+                    payloadPreview = payloadText.take(MAX_STORED_MESSAGE_CHARS),
                 ),
             )
             is AudioStegoStatus.ExtractedSuccess -> {
@@ -492,7 +493,7 @@ fun jarCatchFlow(
                         timestampMillis = System.currentTimeMillis(),
                         payloadSizeBytes = fireflyStatus.text.encodeToByteArray().size,
                         technique = (practiceTechnique ?: technique).name,
-                        payloadPreview = fireflyStatus.text.take(40),
+                        payloadPreview = fireflyStatus.text.take(MAX_STORED_MESSAGE_CHARS),
                     ),
                 )
                 if (practiceTechnique != null) {

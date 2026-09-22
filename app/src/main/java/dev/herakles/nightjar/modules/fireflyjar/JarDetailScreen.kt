@@ -830,6 +830,9 @@ private fun FireflyDetailContent(
             ) {
                 Text(text = "message", style = JarType.MetaLabel, color = JarTextTertiary)
                 Text(text = preview, style = JarType.Body, color = JarTextPrimary)
+                messageTruncationNotice(preview, firefly.payloadSizeBytes)?.let { notice ->
+                    Text(text = notice, style = JarType.Footer, color = JarTextTertiary)
+                }
             }
         }
 
@@ -1875,6 +1878,22 @@ private fun spectrogramImageBitmap(data: SpectrogramData, accent: Color): ImageB
 // text rather than duplicating it, guaranteeing the spectrogram canvas's spoken label can never
 // drift from the visible caption Text right underneath it.
 internal data class AudioSpectrogramCaption(val text: String, val genuinelyVisible: Boolean)
+
+/**
+ * Owner report (on-device, 2026-09-22): the firefly detail's message card was silently showing
+ * only the first 40 characters of longer messages — every catch/create flow wrote a truncated
+ * [FireflyRecord.payloadPreview] regardless of the real message length. That's fixed at the
+ * write side ([dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS] is far above
+ * any realistic hidden message), but a genuinely oversized embed can still exceed even that
+ * defensive ceiling — this compares the displayed [preview]'s own UTF-8 byte length against the
+ * record's real [payloadSizeBytes] and returns an honest one-line notice only in that case,
+ * rather than ever showing a cut-off message with nothing said about it (v5/v6 honesty rules).
+ */
+internal fun messageTruncationNotice(preview: String, payloadSizeBytes: Int): String? {
+    val shownBytes = preview.toByteArray(Charsets.UTF_8).size
+    if (shownBytes >= payloadSizeBytes) return null
+    return "showing the first $shownBytes of $payloadSizeBytes bytes"
+}
 
 internal fun audioSpectrogramCaption(technique: String?): AudioSpectrogramCaption = when (technique) {
     "MFSK" -> AudioSpectrogramCaption(
