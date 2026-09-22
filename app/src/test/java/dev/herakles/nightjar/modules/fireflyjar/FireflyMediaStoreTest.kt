@@ -274,4 +274,24 @@ class FireflyMediaStoreTest {
         assertArrayEquals(byteArrayOf(4, 5, 6), store.read(second))
         assertNull("the file removed with the directory is gone, not resurrected", store.read(first))
     }
+
+    // --- free-space floor (gate-41 safety re-audit, finding F-4) ---
+
+    /**
+     * [FireflyMediaStore.MIN_FREE_SPACE_BYTES] is checked against [File.usableSpace], which
+     * reflects the real filesystem the test runner sits on -- there is no seam here to inject a
+     * fake low-space condition without disk-level test infrastructure this project doesn't have
+     * (the same practical limit [IncomingAndroidAdaptersTest] already documents for OOM paths).
+     * What every other test in this file already proves, by writing dozens of times without
+     * hitting [InsufficientStorageException], is the regression this floor must never cause: it
+     * must never refuse an ordinary small write on a machine with real room to spare. This test
+     * makes that a named, explicit assertion rather than an implicit side effect of the others.
+     */
+    @Test
+    fun ordinaryWriteSucceedsUnderTheFreeSpaceFloorOnAMachineWithRoom() {
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        val filename = store.write(bytes, "wav")
+        assertArrayEquals(bytes, store.read(filename))
+    }
+
 }

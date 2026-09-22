@@ -30,6 +30,12 @@
     <string name="receive_unsupported_title">can\'t read this one</string>
     <string name="receive_unsupported_body">nightjar doesn\'t know this kind of file.</string>
 
+    <string name="receive_too_large_title">too big for the jar</string>
+    <string name="receive_too_large_body">this one\'s too large for nightjar to check. ask them to send a smaller photo or a shorter recording.</string>
+
+    <string name="receive_out_of_space_title">no room to keep it</string>
+    <string name="receive_out_of_space_body">a firefly was in there, but there\'s no space left on the phone to keep it. free up some room and try again.</string>
+
     <string name="receive_back_to_jar">back to the jar</string>
     <string name="receive_catch_from_file_row">catch from a photo or file</string>
 </resources>

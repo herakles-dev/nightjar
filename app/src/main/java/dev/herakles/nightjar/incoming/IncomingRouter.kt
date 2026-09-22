@@ -10,6 +10,7 @@ import dev.herakles.nightjar.ImageStegoCarrier
 import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.modules.acoustic.padToFrameBoundary
 import dev.herakles.nightjar.picker.Module
 
 /**
@@ -105,19 +106,37 @@ object IncomingRouter {
      * [AudioStegoTechnique]s at the app's own [AudioStegoCarrier] default `stegoStrength` (the
      * workshop screen never exposes a strength selector, so every nightjar-produced
      * SPECTROGRAM_LSB file already uses that default), reporting whichever matched first. The
-     * same raw [pcm] sample array is handed to every technique's `decode()` regardless of the
-     * WAV's own declared channel count -- a technique reading the wrong shape of carrier (e.g.
-     * PHASE_INVERSION against a genuinely mono file) fails its own header check harmlessly rather
-     * than crashing, per every carrier's existing bounds-checked-before-read contract.
+     * same raw [pcm] sample array is handed to every [AudioStegoTechnique]'s `decode()` regardless
+     * of the WAV's own declared channel count -- a technique reading the wrong shape of carrier
+     * (e.g. PHASE_INVERSION against a genuinely mono file) fails its own header check harmlessly
+     * rather than crashing, per every carrier's existing bounds-checked-before-read contract.
+     *
+     * The acoustic-modem loop uses a separately frame-padded copy ([acousticPcm], via
+     * [padToFrameBoundary]), not [pcm] directly (gate-41 safety re-audit, finding F-7):
+     * [AcousticCarrier.decode] rejects any carrier whose sample count isn't a whole number of
+     * [NightjarAcoustics.FRAME_SAMPLES] as its first check, and an acoustic-modem WAV that has
+     * been re-saved, trimmed, or transcoded by literally any app in between almost never lands on
+     * an exact frame boundary by chance -- silently reporting [IncomingOutcome.NoFirefly] for a
+     * real transmission. This app's own exports are frame-aligned by construction, which is why
+     * that gap went unnoticed. [AudioStegoTechnique] carries no such alignment requirement, so its
+     * loop keeps using the unpadded [pcm].
+     *
+     * [checkCancelled] threads cooperative cancellation into the acoustic-modem search (gate-41
+     * safety re-audit, finding F-6) -- [AcousticCarrier.decode]'s own `checkCancelled` overload,
+     * the same one `AcousticModemScreen.kt`'s `decodeCancellable` uses for its own (locally
+     * trusted) file-picker import. The receive path handles *less* trusted input, so it should
+     * never have had weaker cancellation than that. Defaults to a no-op so every existing
+     * synchronous test call site is unaffected.
      */
-    fun routeWav(bytes: ByteArray): IncomingOutcome {
+    fun routeWav(bytes: ByteArray, checkCancelled: () -> Unit = {}): IncomingOutcome {
         val parsed = WavFile.decodePcm16(bytes)
             ?: return IncomingOutcome.Unsupported("couldn't read this as audio")
         val pcm = parsed.samples
+        val acousticPcm = padToFrameBoundary(pcm)
 
         for ((protocol, rate) in ACOUSTIC_COMBOS) {
             classify(
-                safeDecode { AcousticCarrier(protocol, rate).decode(pcm) },
+                safeDecode { AcousticCarrier(protocol, rate).decode(acousticPcm, checkCancelled) },
                 ACOUSTIC_MODEM_TECHNIQUE,
                 Module.ACOUSTIC_MODEM,
                 bytes,
@@ -145,13 +164,22 @@ object IncomingRouter {
      * modem's required 48kHz-mono format). Anything short of a modem
      * [IncomingOutcome.Caught]/[IncomingOutcome.Damaged] resolves to
      * [IncomingOutcome.Squeezed] -- a compressed container is always lossy. [extension] persists
-     * [bytes] as the caught firefly's carrier on a [IncomingOutcome.Caught].
+     * [bytes] as the caught firefly's carrier on a [IncomingOutcome.Caught]. [checkCancelled]
+     * threads cooperative cancellation into the search, same reasoning as [routeWav]'s own
+     * (gate-41 safety re-audit, finding F-6); [modemPcm] already arrives frame-padded from
+     * [dev.herakles.nightjar.incoming.IncomingAndroidAdapters.decodeCompressedAudioForModem], so
+     * finding F-7's padding fix doesn't apply here.
      */
-    fun routeCompressedAudio(bytes: ByteArray, modemPcm: PcmAudio?, extension: String): IncomingOutcome {
+    fun routeCompressedAudio(
+        bytes: ByteArray,
+        modemPcm: PcmAudio?,
+        extension: String,
+        checkCancelled: () -> Unit = {},
+    ): IncomingOutcome {
         if (modemPcm != null && modemPcm.isNotEmpty()) {
             for ((protocol, rate) in ACOUSTIC_COMBOS) {
                 classify(
-                    safeDecode { AcousticCarrier(protocol, rate).decode(modemPcm) },
+                    safeDecode { AcousticCarrier(protocol, rate).decode(modemPcm, checkCancelled) },
                     ACOUSTIC_MODEM_TECHNIQUE,
                     Module.ACOUSTIC_MODEM,
                     bytes,
@@ -179,11 +207,17 @@ object IncomingRouter {
     }
 
     /** Never lets a malformed carrier crash the router (build notes: "never crash on malformed
-     *  input") -- a decode attempt that throws is treated the same as one that found nothing. */
+     *  input") -- a decode attempt that throws is treated the same as one that found nothing.
+     *  Catches `Throwable`, not just `Exception` (gate-41 safety re-audit, finding F-2): an
+     *  `OutOfMemoryError` from a crafted carrier's decode is exactly as unrecoverable-by-crashing
+     *  as any other failure here. [kotlinx.coroutines.CancellationException] still propagates --
+     *  it is a `RuntimeException`, not swallowed by this rethrow. */
     private inline fun safeDecode(block: () -> DecodeResult): DecodeResult? =
         try {
             block()
-        } catch (e: Exception) {
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (e: Throwable) {
             null
         }
 }

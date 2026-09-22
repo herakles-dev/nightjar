@@ -212,31 +212,47 @@ class ImageStegoCarrier(private val coverImage: Bitmap) : CovertCarrier<Bitmap> 
 
     // --- Bit-level pixel I/O (shared indexing scheme between encode and decode) ---
 
+    /**
+     * Reads [numBytes] bytes ([startBit]-aligned) via ONE bulk [Bitmap.getPixels] call over the
+     * covering row range, not one [Bitmap.getPixel] JNI call per bit (gate-41 safety re-audit,
+     * finding F-5). [decode] calls this at most three times (header, payload, trailer) per
+     * attempt, but a crafted header can declare a payload length up to this carrier's own
+     * capacity -- tens of megabytes -- which used to mean tens of millions of individual native
+     * calls (each pixel re-fetched up to [BITS_PER_PIXEL] times, once per bit sharing it) before
+     * the length was ever checked against the actual payload's CRC-32.
+     */
     private fun extractBytes(carrier: Bitmap, startBit: Int, numBytes: Int): ByteArray {
         val out = ByteArray(numBytes)
+        if (numBytes == 0) return out
+
+        val width = carrier.width
+        val totalBits = numBytes * 8
+        val startPixelIndex = startBit / BITS_PER_PIXEL
+        val endPixelIndexExclusive = (startBit + totalBits + BITS_PER_PIXEL - 1) / BITS_PER_PIXEL
+        val startY = startPixelIndex / width
+        val endYInclusive = (endPixelIndexExclusive - 1) / width
+        val rowCount = endYInclusive - startY + 1
+
+        val pixels = IntArray(width * rowCount)
+        carrier.getPixels(pixels, 0, width, 0, startY, width, rowCount)
+        val rowOffsetPixelIndex = startY * width
+
         var bitIndex = startBit
         for (i in 0 until numBytes) {
             var value = 0
             repeat(8) {
-                value = (value shl 1) or readBit(carrier, bitIndex)
+                val pixel = pixels[bitIndex / BITS_PER_PIXEL - rowOffsetPixelIndex]
+                val channelValue = when (bitIndex % BITS_PER_PIXEL) {
+                    0 -> (pixel shr 16) and 0xFF
+                    1 -> (pixel shr 8) and 0xFF
+                    else -> pixel and 0xFF
+                }
+                value = (value shl 1) or (channelValue and 0x01)
                 bitIndex++
             }
             out[i] = value.toByte()
         }
         return out
-    }
-
-    private fun readBit(carrier: Bitmap, bitIndex: Int): Int {
-        val pixelIndex = bitIndex / BITS_PER_PIXEL
-        val x = pixelIndex % carrier.width
-        val y = pixelIndex / carrier.width
-        val pixel = carrier.getPixel(x, y)
-        val channelValue = when (bitIndex % BITS_PER_PIXEL) {
-            0 -> (pixel shr 16) and 0xFF
-            1 -> (pixel shr 8) and 0xFF
-            else -> pixel and 0xFF
-        }
-        return channelValue and 0x01
     }
 
     private fun withLsb(channelValue: Int, bit: Int): Int = (channelValue and 0xFE) or bit

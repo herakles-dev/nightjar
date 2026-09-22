@@ -22,6 +22,11 @@ import org.robolectric.annotation.Config
  * Same Robolectric-backed "resolve the real resource text, then check it" shape
  * [dev.herakles.nightjar.trail.TrailVoiceTest] already established for testing `strings.xml`
  * copy without a Compose test harness (none exists in this project).
+ *
+ * Eight cases as of gate-41's safety re-audit: [IncomingOutcome.TooLarge] (finding F-3) split out
+ * of [IncomingOutcome.Unsupported] so a file that's simply too big isn't told it's unrecognized,
+ * and [IncomingOutcome.OutOfSpace] (finding F-4) for a verified firefly the device had no room
+ * left to keep.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [33])
@@ -44,6 +49,8 @@ class IncomingOutcomeCopyTest {
         "damaged" to IncomingOutcome.Damaged(),
         "no_firefly" to IncomingOutcome.NoFirefly,
         "unsupported" to IncomingOutcome.Unsupported(),
+        "too_large" to IncomingOutcome.TooLarge,
+        "out_of_space" to IncomingOutcome.OutOfSpace,
     )
 
     /** Resolves [copy]'s body to real text the same way [IncomingScreen] itself does --

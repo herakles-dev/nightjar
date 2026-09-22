@@ -35,8 +35,22 @@ sealed interface IncomingOutcome {
     /** A lossless container (PNG, WAV); nothing found. */
     data object NoFirefly : IncomingOutcome
 
-    /** Not an image/audio nightjar can read, or over the size limits. */
+    /** Not an image/audio nightjar can read. Distinct from [TooLarge] (gate-41 safety re-audit,
+     *  finding F-3): before this split, an ordinary large photo was told "nightjar doesn't know
+     *  this kind of file" -- an accurate-sounding but false reason, since the real one (the size
+     *  cap) was computed and then discarded. */
     data class Unsupported(val reason: String? = null) : IncomingOutcome
+
+    /** The file itself, or what it decoded to, was over one of the receive pipeline's size caps
+     *  ([dev.herakles.nightjar.incoming.IncomingAndroidAdapters.MAX_INCOMING_FILE_BYTES] on the
+     *  raw file, or its 24 MP image-pixel cap) -- gate-41 safety re-audit, finding F-3. */
+    data object TooLarge : IncomingOutcome
+
+    /** A firefly decoded and verified, but persisting it would have left the device below
+     *  [dev.herakles.nightjar.modules.fireflyjar.FireflyMediaStore.MIN_FREE_SPACE_BYTES] free
+     *  (gate-41 safety re-audit, finding F-4) -- distinct from [TooLarge], which is about the
+     *  file itself, not the device's remaining room. */
+    data object OutOfSpace : IncomingOutcome
 }
 
 /** Which kind of lossy container produced an [IncomingOutcome.Squeezed]. */
@@ -50,6 +64,8 @@ val IncomingOutcome.probeOutcomeName: String
         is IncomingOutcome.Damaged -> "damaged"
         is IncomingOutcome.NoFirefly -> "no_firefly"
         is IncomingOutcome.Unsupported -> "unsupported"
+        is IncomingOutcome.TooLarge -> "too_large"
+        is IncomingOutcome.OutOfSpace -> "out_of_space"
     }
 
 /** `COVERT_DEBUG`'s `technique` field -- only [IncomingOutcome.Caught] carries one. */
