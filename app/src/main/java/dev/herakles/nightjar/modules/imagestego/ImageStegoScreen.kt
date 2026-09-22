@@ -104,7 +104,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import dev.herakles.nightjar.ui.theme.withTapAffordance
+import dev.herakles.nightjar.ui.theme.workshopButton
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.roundToInt
@@ -1195,14 +1195,13 @@ fun ImageStegoContent(
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable { onBack() }
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -1401,12 +1400,12 @@ fun ImageStegoContent(
                 // AcousticModemScreen's own action-row grouping. This list grew from 3 rows
                 // (Task #13) to 5 (Task #34) and read as one undifferentiated stack.
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Column {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
                         ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
                         ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
                     }
-                    Column {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         // v6 (task W2-4): sturdy always saves/shares JPEG (encodeSturdyJpeg) --
                         // exact's own "save as PNG" label is unchanged.
                         ActionRow(
@@ -1437,13 +1436,12 @@ private fun CoverRow(label: String, selected: Boolean, enabled: Boolean, onClick
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, filled = selected, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (selected) TextPrimary else TextSecondary,
         )
     }
@@ -1454,13 +1452,12 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }

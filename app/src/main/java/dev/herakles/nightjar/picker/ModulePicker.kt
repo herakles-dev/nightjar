@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
@@ -25,7 +24,7 @@ import androidx.compose.ui.unit.dp
 import dev.herakles.nightjar.R
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import dev.herakles.nightjar.ui.theme.withTapAffordance
+import dev.herakles.nightjar.ui.theme.workshopButton
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -102,14 +101,13 @@ fun ModulePicker(
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable(onClick = onBack)
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = "back to the jar",
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -126,14 +124,13 @@ fun ModulePicker(
         // link above already uses (design/riddle-trail.md § Start the trail again).
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable(onClick = onRestartTrail)
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp, bottom = 8.dp)
+                .workshopButton(filled = false, onClick = onRestartTrail),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = stringResource(R.string.trail_restart),
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -151,12 +148,17 @@ private fun ModuleRow(module: Module, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         ModuleGlyph(module = module)
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = module.label,
-                style = MaterialTheme.typography.bodyLarge.withTapAffordance(),
-                color = TextPrimary,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Button chrome wraps only the label -- the row itself (icon + label + description)
+            // stays the actual tap target via the parent Row's own `.clickable` above; this is
+            // chrome-only (no `onClick` passed), matching the module-picker's own reasoning below.
+            Box(modifier = Modifier.workshopButton(filled = false)) {
+                Text(
+                    text = module.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = TextPrimary,
+                )
+            }
             Text(
                 text = module.description,
                 style = MaterialTheme.typography.labelSmall,

@@ -101,7 +101,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import dev.herakles.nightjar.ui.theme.withTapAffordance
+import dev.herakles.nightjar.ui.theme.workshopButton
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -1132,14 +1132,13 @@ fun AcousticModemContent(
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable { onBack() }
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -1212,7 +1211,7 @@ fun AcousticModemContent(
             // import/listen (both feed decode() a captured signal) are the third.
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ActionRow(label = "transmit", enabled = canTransmit, onClick = onTransmit)
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     // Task #31: "save"/"share" run the same encode() step "transmit" does, gated
                     // on the identical canTransmit condition (idle-equivalent + non-empty +
                     // in-budget payload) — there's nothing extra required to write a WAV file
@@ -1220,7 +1219,7 @@ fun AcousticModemContent(
                     ActionRow(label = "save", enabled = canTransmit, onClick = onSave)
                     ActionRow(label = "share", enabled = canTransmit, onClick = onShare)
                 }
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     // Task #32: "import" picks an existing audio file as an alternative to
                     // "listen"'s live mic capture — both feed the same decode() pipeline.
                     ActionRow(label = "import", enabled = canImport, onClick = onImport)
@@ -1260,13 +1259,12 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }
@@ -1334,13 +1332,12 @@ private fun SettingOptionRow(label: String, selected: Boolean, enabled: Boolean,
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, filled = selected, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (selected) TextPrimary else TextSecondary,
         )
     }

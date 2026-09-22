@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -92,7 +91,7 @@ import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
-import dev.herakles.nightjar.ui.theme.withTapAffordance
+import dev.herakles.nightjar.ui.theme.workshopButton
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -946,14 +945,13 @@ fun AudioStegoContent(
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .height(48.dp)
-                .clickable { onBack() }
-                .padding(horizontal = 24.dp),
+                .padding(start = 24.dp, top = 8.dp)
+                .workshopButton(filled = false, onClick = onBack),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = "back",
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(),
+                style = MaterialTheme.typography.labelLarge,
                 color = TextSecondary,
             )
         }
@@ -1103,7 +1101,7 @@ fun AudioStegoContent(
                     )
                     ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
                 }
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     // gate-34: "save"/"share" write the current working clip (after a successful
                     // embed) to Music/Nightjar via MediaStore, matching
                     // AcousticModemScreen.kt's own save/share behaviour and styling. Gated on
@@ -1122,7 +1120,7 @@ fun AudioStegoContent(
                         onClick = onShare,
                     )
                 }
-                Column {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     // gate-34: "open a recording" picks an existing WAV via the Storage Access
                     // Framework and tries all three techniques against it, naming which matched —
                     // an alternative to "extract"'s single-selected-technique read of the working
@@ -1194,32 +1192,33 @@ private fun SelectorRowWithInfo(
     onToggleInfo: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(40.dp),
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxHeight()
-                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+                .workshopButton(enabled = enabled, filled = selected, onClick = onClick),
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+                style = MaterialTheme.typography.labelLarge,
                 color = if (selected) TextPrimary else TextSecondary,
             )
         }
+        // Compact, outline-only -- a "?"/"close" toggle stretched to the main selector's own
+        // padding would look absurd; a small visible gap (8dp) keeps the two button shapes from
+        // reading as one touching block.
         Box(
             modifier = Modifier
-                .fillMaxHeight()
-                .clickable(onClick = onToggleInfo)
-                .padding(start = 16.dp),
-            contentAlignment = Alignment.CenterEnd,
+                .padding(start = 8.dp)
+                .workshopButton(filled = false, compact = true, onClick = onToggleInfo),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = if (infoExpanded) "close" else "?",
-                style = MaterialTheme.typography.labelSmall.withTapAffordance(),
+                style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
             )
         }
@@ -1236,21 +1235,20 @@ private fun SelectorRowWithInfo(
 @Composable
 private fun SectionLabelRow(label: String, infoLabel: String, infoExpanded: Boolean, onToggleInfo: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(40.dp),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Static section label -- stays plain text, no chrome. Only the info toggle below is
+        // tappable.
         Text(text = label, style = MaterialTheme.typography.labelLarge, color = TextSecondary)
         Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .clickable(onClick = onToggleInfo)
-                .padding(horizontal = 8.dp),
-            contentAlignment = Alignment.CenterEnd,
+            modifier = Modifier.workshopButton(filled = false, compact = true, onClick = onToggleInfo),
+            contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = if (infoExpanded) "close" else infoLabel,
-                style = MaterialTheme.typography.labelSmall.withTapAffordance(),
+                style = MaterialTheme.typography.labelSmall,
                 color = TextSecondary,
             )
         }
@@ -1346,13 +1344,12 @@ private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+            .workshopButton(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }
@@ -1374,9 +1371,7 @@ private fun PlaybackRow(
     onPlayWorking: () -> Unit,
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(48.dp),
+        modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(32.dp),
     ) {
         PlaybackVerb(
@@ -1395,14 +1390,12 @@ private fun PlaybackRow(
 @Composable
 private fun PlaybackVerb(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
-            .fillMaxHeight()
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        modifier = Modifier.workshopButton(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge.withTapAffordance(enabled),
+            style = MaterialTheme.typography.labelLarge,
             color = if (enabled) TextPrimary else TextSecondary,
         )
     }
