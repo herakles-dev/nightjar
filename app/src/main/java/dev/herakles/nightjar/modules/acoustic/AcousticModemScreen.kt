@@ -77,6 +77,8 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyVisual
 import dev.herakles.nightjar.modules.fireflyjar.JarGlyph
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.trail.trailHighlight
@@ -434,6 +436,10 @@ fun jarCatchFlow(
     val trailActive = trailState.currentStep == TrailStep.SINGING
     var pendingPracticeCatch by remember { mutableStateOf(false) }
 
+    // W2-5 (design/riddle-trail.md § "Reward lines"): shown once this screen session's own
+    // advance() call fires -- same shape as ImageStegoScreen.kt's/AudioStegoScreen.kt's.
+    var singingTrailRewardStep by remember { mutableStateOf<TrailStep?>(null) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -488,7 +494,7 @@ fun jarCatchFlow(
                 ),
                 controller.lastTransmittedPcm,
             )
-            catchResultMessage = "you caught one — $bytes bytes"
+            catchResultMessage = "you created one — $bytes bytes"
         } else if (status is ModemStatus.DecodedSuccess) {
             // W2-3 (gate-36): AcousticModemController.importAndDecode (the practice-decode path
             // below) sets lastDecodedPcm to the same PCM it actually decoded before this status
@@ -511,6 +517,7 @@ fun jarCatchFlow(
             if (wasPractice) {
                 trailStore.markPractice(id)
                 trailStore.advance(TrailStep.SINGING)
+                singingTrailRewardStep = TrailStep.SINGING
             }
             pendingPracticeCatch = false
         }
@@ -555,6 +562,8 @@ fun jarCatchFlow(
             }
         },
         lookForFirefliesHighlighted = trailActive,
+        trailQuestStep = if (trailActive) TrailStep.SINGING else null,
+        trailRewardStep = singingTrailRewardStep,
         onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
     )
 }
@@ -593,6 +602,10 @@ private fun JarModemFlowContent(
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
     onCatchFromFile: () -> Unit,
+    // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): non-null while SINGING is
+    // the trail's active step / once this session's own SINGING completion has fired.
+    trailQuestStep: TrailStep? = null,
+    trailRewardStep: TrailStep? = null,
 ) {
     val idleEquivalent = status is ModemStatus.Idle ||
         status is ModemStatus.DecodedSuccess ||
@@ -603,9 +616,15 @@ private fun JarModemFlowContent(
     val canToggleLook = idleEquivalent || status is ModemStatus.Listening
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        if (trailQuestStep != null) {
+            TrailQuestLine(trailQuestStep)
+        }
+        if (trailRewardStep != null) {
+            TrailRewardLine(trailRewardStep)
+        }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             JarFlowRow(
-                label = "catch a firefly",
+                label = "create a firefly",
                 accent = FireflyCreated,
                 fill = JarActionCatchFill,
                 border = JarActionCatchBorder,
@@ -703,7 +722,7 @@ private fun JarFlowRow(
 }
 
 /**
- * DESIGN_SPEC.md §5 1d — the expanded "catch a firefly" flow: a small jar preview, the payload
+ * DESIGN_SPEC.md §5 1d — the expanded "create a firefly" flow: a small jar preview, the payload
  * field, the (preserved, restyled) protocol/symbol-rate selector, and the "send" button. Same
  * fields [AcousticModemContent] defines for this module, per gate-13 — nothing here is a second
  * implementation of them.
@@ -891,7 +910,7 @@ private fun JarModemStatusBlock(status: ModemStatus, catchResultMessage: String?
         is ModemStatus.Idle -> if (catchResultMessage != null) {
             Text(text = catchResultMessage, style = JarType.SectionLabel, color = FireflyCreated)
         } else {
-            Text(text = "ready to catch", style = JarType.Footer, color = JarWatchingDim)
+            Text(text = "ready to create", style = JarType.Footer, color = JarWatchingDim)
         }
         is ModemStatus.Encoding -> JarStatusWord("warming up the light")
         is ModemStatus.Transmitting -> JarStatusWord("sending the glow", color = FireflyCreated)

@@ -67,6 +67,8 @@ import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
 import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.trail.trailHighlight
@@ -312,7 +314,8 @@ fun AudioStegoScreen(
  * technique/cover selectors and the payload field), and this surface's whole point is a
  * simpler, softer front door than the technical screen behind it.
  *
- * "catch a firefly" expands into the technique + cover selectors and the payload field inline;
+ * "create a firefly" (v6 verb rule, design/riddle-trail.md § Verb rule) expands into the
+ * technique + cover selectors and the payload field inline;
  * "look for fireflies" has no fields of its own and fires [AudioStegoController.extract]
  * directly — same two-section shape screen-flow.md's diagram specifies. A successful catch/look
  * inserts exactly one [FireflyRecord] into [repository] (`direction = "CREATED"`/`"RECEIVED"`) via a
@@ -383,6 +386,10 @@ fun jarCatchFlow(
     val trailState by trailStore.state.collectAsState()
     val trailActive = trailState.currentStep == TrailStep.HUMMING
     var pendingLookTechniqueOverride by remember { mutableStateOf<AudioStegoTechnique?>(null) }
+
+    // W2-5 (design/riddle-trail.md § "Reward lines"): shown once this screen session's own
+    // advance() call fires -- see ImageStegoScreen.kt's jarCatchFlow for the identical shape.
+    var humTrailRewardStep by remember { mutableStateOf<TrailStep?>(null) }
 
     // S-02: the image jar flow's time-based debounce (ImageStegoScreen.kt's
     // `debounceCatchDispatch`), ported here — this flow had no equivalent, so a double-tap
@@ -491,6 +498,7 @@ fun jarCatchFlow(
                 if (practiceTechnique != null) {
                     trailStore.markPractice(id)
                     trailStore.advance(TrailStep.HUMMING)
+                    humTrailRewardStep = TrailStep.HUMMING
                 }
                 pendingLookTechniqueOverride = null
             }
@@ -541,6 +549,8 @@ fun jarCatchFlow(
         onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
         onExit = onExit,
         lookForFirefliesHighlighted = trailActive,
+        trailQuestStep = if (trailActive) TrailStep.HUMMING else null,
+        trailRewardStep = humTrailRewardStep,
     )
 }
 
@@ -588,6 +598,11 @@ private fun JarAudioStegoCatchFlowContent(
     // "look for fireflies" row. Default keeps every existing @Preview call site compiling
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
+    // W2-5 (design/riddle-trail.md § "Quest lines"/"Reward lines"): non-null while HUMMING is
+    // the trail's active step / once this session's own HUMMING completion has fired. Defaults
+    // keep every existing @Preview call site compiling unchanged.
+    trailQuestStep: TrailStep? = null,
+    trailRewardStep: TrailStep? = null,
 ) {
     val idleEquivalent = status is AudioStegoStatus.Idle ||
         status is AudioStegoStatus.Embedded ||
@@ -598,12 +613,19 @@ private fun JarAudioStegoCatchFlowContent(
     val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // W2-5: above the catch/look rows below.
+        if (trailQuestStep != null) {
+            TrailQuestLine(trailQuestStep)
+        }
+        if (trailRewardStep != null) {
+            TrailRewardLine(trailRewardStep)
+        }
         // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look are the humming
         // jar's two stacked rows (§5 1g); the status readout and back link are their own sections.
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Column {
                 JarFlowRow(
-                    label = "catch a firefly",
+                    label = "create a firefly",
                     enabled = idleEquivalent,
                     fill = JarActionCatchFill,
                     border = JarActionCatchBorder,
@@ -725,7 +747,7 @@ private fun JarAudioStegoCatchFlowContent(
 /** Tinted, rounded jar-mode verb row — [JarFlowRow] is this flow's own thing, not
  *  [ActionRow]/[SelectorRowWithInfo], since the jar surface's palette (design/
  *  firefly-jar-identity.md) is [JarTextPrimary]/[JarTextSecondary], not
- *  [TextPrimary]/[TextSecondary], and this flow has no per-row info toggle. Gold for "catch",
+ *  [TextPrimary]/[TextSecondary], and this flow has no per-row info toggle. Gold for "create",
  *  cyan for "look" (DESIGN_SPEC.md §1's card/row tint table); [radius] defaults to the 8dp
  *  action-row tier, with the inline "let it glow" confirm button passing 12dp instead. */
 @Composable
@@ -759,7 +781,7 @@ private fun JarFlowRow(
     }
 }
 
-/** One selectable technique/cover-clip row inside the expanded "catch a firefly" section — no
+/** One selectable technique/cover-clip row inside the expanded "create a firefly" section — no
  *  info toggle (unlike [SelectorRowWithInfo]), matching this jar-mode flow's simpler field set.
  *  Plain row, not a chip pill: DESIGN_SPEC.md §5 1g's technique chips are a horizontal group,
  *  but re-laying this out as one would rearrange the existing vertical list, not just restyle it
@@ -786,14 +808,14 @@ private fun JarSelectorRow(label: String, selected: Boolean, enabled: Boolean, o
 private fun JarStatusBlock(status: AudioStegoStatus) {
     when (status) {
         is AudioStegoStatus.Idle -> Unit
-        is AudioStegoStatus.Embedding -> Text(text = "catching", style = JarType.Footer, color = JarWatchingDim)
+        is AudioStegoStatus.Embedding -> Text(text = "creating", style = JarType.Footer, color = JarWatchingDim)
         is AudioStegoStatus.Extracting -> Text(text = "looking", style = JarType.Footer, color = JarWatchingDim)
         is AudioStegoStatus.Analyzing -> Text(text = "peeking", style = JarType.Footer, color = JarWatchingDim)
         is AudioStegoStatus.Analyzed -> JarAudioAnalyzedBlock(result = status.result)
         is AudioStegoStatus.Embedded -> {
             val plural = if (status.payloadBytes == 1) "" else "s"
             Text(
-                text = "you caught one — ${status.payloadBytes} byte$plural",
+                text = "you created one — ${status.payloadBytes} byte$plural",
                 // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
                 // accented announcement, not the message body itself.
                 style = JarType.SectionLabel,

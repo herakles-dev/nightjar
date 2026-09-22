@@ -26,14 +26,17 @@ class FireflySwarmContentDescriptionTest {
     )
 
     @Test
-    fun `created firefly reads as caught, with its time and byte count`() {
+    fun `created firefly reads as created, with its time and byte count`() {
         // 1_000L ms epoch -- HH:mm is locale-stable, so only the byte count/phrasing is asserted
         // exactly; the time is asserted as present in the same call by re-deriving it, the same
         // discipline CarrierInsightCaptionsTest's natsToDb() helper uses.
+        //
+        // W2-5 (design/riddle-trail.md § Verb rule): "you caught" -> "you created" for a
+        // CREATED (embedded) firefly -- "catch" now describes receiving only.
         val description = fireflySwarmContentDescription(record(direction = "CREATED", payloadSizeBytes = 14))
 
         assertEquals(
-            "firefly you caught, ${formatFireflyTimeForTest(1_000L)}, 14 bytes",
+            "firefly you created, ${formatFireflyTimeForTest(1_000L)}, 14 bytes",
             description,
         )
     }
