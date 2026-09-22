@@ -24,6 +24,17 @@ decoded payload appears as a firefly. The underlying technical module screens
 (modem, image stego, audio stego, detector) are reachable via a long-press
 reveal gesture from the jar screen.
 
+## Download
+
+Grab the latest signed APK from the [Releases page](https://github.com/herakles-dev/nightjar/releases/latest)
+and install it directly — no Play Store needed. On your phone: download the
+`.apk`, open it, and allow "install unknown apps" for your browser or file
+manager if prompted.
+
+Prefer to track updates automatically? [Obtainium](https://github.com/ImranR98/Obtainium)
+can watch this GitHub repo and notify you of new releases — add
+`herakles-dev/nightjar` as a GitHub source.
+
 ## Requirements
 
 - Android 12+ (minSdk 31), target/compileSdk 35
