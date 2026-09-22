@@ -8,9 +8,11 @@ import org.junit.Test
 
 /**
  * Task W2-2 (spec.md gate-33): "hide one in a photo"'s pure logic -- byte-count/capacity
- * validation (including multi-byte UTF-8) and the sturdy fixed-payload padding scheme
- * ([sturdyPayloadBytes], see `HideInPhotoFlow.kt`'s own KDoc for why space-padding, not
- * zero-padding). No Robolectric needed -- none of this touches a `Bitmap`/`Context`.
+ * validation (including multi-byte UTF-8). Task W2-7 removed this flow's own space-padding now
+ * that [SturdyImageCarrier] carries variable-length messages itself (see
+ * `SturdyImageCarrierTest.kt` for that codec's own round-trip coverage at non-64 lengths); this
+ * flow now just hands the carrier the typed message's raw UTF-8 bytes. No Robolectric needed --
+ * none of this touches a `Bitmap`/`Context`.
  */
 class HideInPhotoFlowTest {
 
@@ -83,39 +85,5 @@ class HideInPhotoFlowTest {
     @Test
     fun `zero capacity never allows hiding anything`() {
         assertFalse(canHidePhotoMessage(messageBytes = 1, capacityBytes = 0))
-    }
-
-    // ==========================================================================================
-    // sturdyPayloadBytes -- fixed-size padding
-    // ==========================================================================================
-
-    @Test
-    fun `a shorter message is padded with trailing spaces out to exactly PAYLOAD_BYTES`() {
-        val payload = sturdyPayloadBytes("hi")
-        assertEquals(SturdyImageCarrier.PAYLOAD_BYTES, payload.size)
-        assertEquals("hi", payload.copyOfRange(0, 2).decodeToString())
-        for (i in 2 until payload.size) {
-            assertEquals("padding byte at index $i must be an ASCII space", ' '.code.toByte(), payload[i])
-        }
-    }
-
-    @Test
-    fun `a message exactly PAYLOAD_BYTES long is returned unpadded`() {
-        val message = "x".repeat(SturdyImageCarrier.PAYLOAD_BYTES)
-        val payload = sturdyPayloadBytes(message)
-        assertEquals(SturdyImageCarrier.PAYLOAD_BYTES, payload.size)
-        assertEquals(message, payload.decodeToString())
-    }
-
-    @Test
-    fun `an empty message is padded entirely with spaces`() {
-        val payload = sturdyPayloadBytes("")
-        assertEquals(SturdyImageCarrier.PAYLOAD_BYTES, payload.size)
-        assertTrue(payload.all { it == ' '.code.toByte() })
-    }
-
-    @Test(expected = IllegalArgumentException::class)
-    fun `a message longer than PAYLOAD_BYTES throws rather than silently truncating`() {
-        sturdyPayloadBytes("x".repeat(SturdyImageCarrier.PAYLOAD_BYTES + 1))
     }
 }

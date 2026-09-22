@@ -1098,12 +1098,14 @@ fun ImageStegoContent(
             status is StegoStatus.Failed
         ) && !isCoverLoading && saveStatus !is SaveStatus.Saving && saveStatus !is SaveStatus.Sharing
     val payloadBytes = payloadText.encodeToByteArray().size
-    // v6 (task W2-4): sturdy's payload is a fixed size (architecture.md "Sturdy image technique
-    // (v6)": "fixed size keeps decoder geometry deterministic"), not an "up to N bytes" capacity
-    // like exact -- so it needs an exact match, plus a Ready cover, rather than exact's <= gate.
+    // v6 (task W2-7): sturdy's SLOT is a fixed size, but the real message length is variable, 1..
+    // maxPayloadBytes (architecture.md "Sturdy image technique (v6)": the frame's own length field
+    // carries the true count, zero-padding the rest of the slot) -- same non-empty-and-within-
+    // capacity gate as exact, plus sturdy's own Ready-cover requirement.
     val canEmbed = idleEquivalent && when (technique) {
         ImageTechnique.EXACT -> payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
-        ImageTechnique.STURDY -> payloadBytes == maxPayloadBytes && sturdyCoverPrep is SturdyCoverPrep.Ready
+        ImageTechnique.STURDY ->
+            payloadBytes in 1..maxPayloadBytes && sturdyCoverPrep is SturdyCoverPrep.Ready
     }
     // Task #34: save/share only unlock once embed() has actually produced a stego image for
     // the currently selected cover (this file's top KDoc CRITICAL note + ImageStegoController
@@ -1272,19 +1274,12 @@ fun ImageStegoContent(
                     // codec-H01: maxPayloadBytes == 0 can mean "this cover can't hold a frame at
                     // all" (ImageStegoCarrier.canEmbed == false), not just "trimmed to zero" --
                     // worth a distinct message rather than a bare `0 / 0 bytes` that reads as a
-                    // typo. v6 (task W2-4): sturdy needs an EXACT byte count, not "up to" --
-                    // architecture.md's fixed-payload-size design -- so it gets its own two-sided
-                    // (short/over) message instead of exact's over-only one.
+                    // typo. v6 (task W2-7): sturdy's gate is the same "1..maxPayloadBytes" shape as
+                    // exact now that the carrier carries the real length in its own frame field
+                    // (architecture.md), so it shares this live "n / max bytes" counter -- no more
+                    // sturdy-only exact-match message.
                     text = when {
                         maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
-                        technique == ImageTechnique.STURDY && payloadBytes != maxPayloadBytes -> {
-                            val diff = maxPayloadBytes - payloadBytes
-                            if (diff > 0) {
-                                stringResource(R.string.workshop_image_sturdy_bytes_add, payloadBytes, maxPayloadBytes, diff)
-                            } else {
-                                stringResource(R.string.workshop_image_sturdy_bytes_trim, payloadBytes, maxPayloadBytes, -diff)
-                            }
-                        }
                         payloadBytes > maxPayloadBytes ->
                             "$payloadBytes / $maxPayloadBytes bytes — " +
                                 "${payloadBytes - maxPayloadBytes} over, trim it"

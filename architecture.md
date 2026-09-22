@@ -865,16 +865,27 @@ The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → 
 Own magic `0x53 0x46` (`"SF"`) — deliberately **not** exact-LSB's `0x4E` — so the two techniques
 never collide and auto-detect can tell them apart (INV-9, INV-12).
 
-| Field    | Bytes | Value / meaning                                             |
-|----------|-------|------------------------------------------------------------|
-| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)        |
-| version  | 1     | `0x01`                                                      |
-| length   | 2     | payload byte count, big-endian (== 64 this version)        |
-| payload  | N     | N = 64 bytes (fixed → decoder geometry needs no side info)  |
-| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+payload, big-endian |
+**Task W2-7 (variable-length messages):** the 64-byte field below is a fixed-size **slot**, not a
+fixed message length. The real message length `n` (0..64) lives in the length field; the message
+occupies the slot's first `n` bytes and the remaining `64-n` bytes are zero-padded. The CRC-32
+covers the **whole slot**, padding included — not just the first `n` bytes — so a corrupted
+padding byte fails CRC exactly like a corrupted message byte (never a silently-shortened message).
+The slot's fixed size is what keeps FEC/interleave/decoder geometry deterministic; only the length
+field and how many of the slot's bytes are "real" vary.
+
+| Field    | Bytes | Value / meaning                                                          |
+|----------|-------|---------------------------------------------------------------------------|
+| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)                     |
+| version  | 1     | `0x01`                                                                   |
+| length   | 2     | the real message length `n`, big-endian, `0 <= n <= 64`                  |
+| slot     | 64    | message (first `n` bytes) + zero padding (`64-n` bytes) — slot is fixed size, decoder geometry needs no side info |
+| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+the whole slot (padding included), big-endian |
 
 Frame = 5 + 64 + 4 = **73 bytes**, RS-encoded as one codeword `RS(73+48, 73) = RS(121, 73)`
-(corrects up to 24 byte-errors).
+(corrects up to 24 byte-errors) — unchanged by task W2-7, since the slot size (and therefore
+`FRAME_BYTES`) never changes with message length. A decode declaring `n = 64` is a valid,
+full-slot message and decodes normally; a forged header claiming `n > 64` is rejected before any
+CRC/RS work, never treated as a plausible-but-damaged frame.
 
 ### Shipped parameters (round-2 retune, measured)
 | Param | Value | Reasoning |
@@ -884,7 +895,7 @@ Frame = 5 + 64 + 4 = **73 bytes**, RS-encoded as one codeword `RS(73+48, 73) = R
 | Max per-pixel luma delta | **5** (= Δ/2) | Worst-case flat shift to reach a lattice point (was 12). |
 | RS parity | **48** → RS(121,73), t=24 | Half-rate FEC; a safety net on top of the repetition. |
 | Repetition `R` | **8** | Soft-combining 8 dispersed copies is what lets Δ drop to 10 and still survive q50. |
-| Payload | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed size keeps decoder geometry deterministic. |
+| Payload slot | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed *slot* size keeps decoder geometry deterministic. Task W2-7: the real message length is variable, 0..64 bytes, carried in the frame's own length field — the slot itself never changes size. |
 
 Bit budget: coded 121 B = 968 bits × R=8 = 7744 cells of 9216.
 

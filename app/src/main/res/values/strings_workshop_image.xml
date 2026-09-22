@@ -10,12 +10,11 @@
     <string name="workshop_image_technique_exact">exact</string>
     <string name="workshop_image_technique_sturdy">sturdy</string>
 
-    <!-- Sturdy's payload is a fixed size (SturdyImageCarrier.PAYLOAD_BYTES = 64), unlike exact's
-         "up to N bytes" capacity: these replace the plain "%1$d / %2$d bytes" counter only when
-         the typed payload isn't exactly that size. %1$d = typed bytes, %2$d = required bytes
-         (always 64 this version), %3$d = how many bytes short/over. -->
-    <string name="workshop_image_sturdy_bytes_add">%1$d / %2$d bytes — sturdy needs exactly %2$d, add %3$d more</string>
-    <string name="workshop_image_sturdy_bytes_trim">%1$d / %2$d bytes — sturdy needs exactly %2$d, trim %3$d</string>
+    <!-- v6 (task W2-7): sturdy's payload SLOT is a fixed size (SturdyImageCarrier.PAYLOAD_BYTES =
+         64), but the real message length is now variable, 1..64 (the frame's own length field
+         carries it, zero-padding the rest of the slot), so sturdy shares exact's plain
+         "%1$d / %2$d bytes" live counter (ImageStegoScreen.kt) and no longer needs its own
+         exact-byte-count strings. -->
 
     <!-- General actions caption (task #28's original), sturdy variant: the exact-technique
          string this replaces always writes PNG, which is no longer true once sturdy writes
