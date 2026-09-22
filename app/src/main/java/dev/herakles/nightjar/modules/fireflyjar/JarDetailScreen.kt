@@ -779,6 +779,10 @@ private fun FireflyDetailContent(
     // write failure (full disk, revoked storage permission) crashed the app instead of
     // surfacing feedback. Resets per [firefly.id], same as the busy/keep-copy state above.
     var sendErrorMessage by remember(firefly.id) { mutableStateOf<String?>(null) }
+    // Review finding #2 (v6/review-fix): KeepCopy.keepOutgoingCopy is documented to throw
+    // IOException on a failed MediaStore write -- same gap, same fix shape, as [sendErrorMessage]
+    // above, for the separate "keep a copy" gesture.
+    var keepErrorMessage by remember(firefly.id) { mutableStateOf<String?>(null) }
 
     // No JarNightSky here — JarDetailContent already has this composable inside one, and a
     // second backdrop would just run a duplicate starfield under the first.
@@ -978,11 +982,18 @@ private fun FireflyDetailContent(
                             if (!keptCopy) {
                                 Modifier.clickable {
                                     coroutineScope.launch {
-                                        val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
-                                        if (bytes != null) {
-                                            withContext(Dispatchers.IO) { keepOutgoingCopy(context, bytes, outgoingKind) }
+                                        keepErrorMessage = null
+                                        try {
+                                            val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
+                                            if (bytes != null) {
+                                                withContext(Dispatchers.IO) { keepOutgoingCopy(context, bytes, outgoingKind) }
+                                            }
+                                            keptCopy = true
+                                        } catch (failure: IOException) {
+                                            // Review finding #2 (v6/review-fix): never let a
+                                            // failed MediaStore write crash the app.
+                                            keepErrorMessage = context.getString(R.string.send_keep_failed)
                                         }
-                                        keptCopy = true
                                     }
                                 }
                             } else {
@@ -990,6 +1001,9 @@ private fun FireflyDetailContent(
                             },
                         ),
                     )
+                }
+                keepErrorMessage?.let {
+                    Text(text = it, style = JarType.Footer, color = JarTextTertiary)
                 }
             }
         }

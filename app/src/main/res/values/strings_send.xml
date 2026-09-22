@@ -25,6 +25,7 @@
     <string name="send_keep_a_copy">keep a copy</string>
     <string name="send_kept_a_copy">kept a copy</string>
     <string name="send_send_failed">couldn\'t send that. try again.</string>
+    <string name="send_keep_failed">couldn\'t keep a copy. try again.</string>
 
     <string name="send_sturdy_carrier_caption">it hides in the brightness of a grid of small cells, not in the last bit of each color.</string>
 
