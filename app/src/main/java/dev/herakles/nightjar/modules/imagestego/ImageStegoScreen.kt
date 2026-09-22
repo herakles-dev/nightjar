@@ -105,6 +105,7 @@ import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import dev.herakles.nightjar.ui.theme.workshopButton
+import dev.herakles.nightjar.ui.theme.WorkshopBackLink
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.roundToInt
@@ -1193,19 +1194,6 @@ fun ImageStegoContent(
     val canSaveOrShare = idleEquivalent && hasEmbeddedPayload
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .padding(start = 24.dp, top = 8.dp)
-                .workshopButton(filled = false, onClick = onBack),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = "back",
-                style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary,
-            )
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1425,6 +1413,8 @@ fun ImageStegoContent(
             StatusBlock(status = status)
             SaveStatusBlock(status = saveStatus, technique = technique)
         }
+
+        WorkshopBackLink(onBack)
     }
 }
 

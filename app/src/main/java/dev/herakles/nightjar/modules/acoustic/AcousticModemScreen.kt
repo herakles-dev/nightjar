@@ -102,6 +102,7 @@ import dev.herakles.nightjar.ui.theme.JarWatchingDim
 import dev.herakles.nightjar.ui.theme.TextPrimary
 import dev.herakles.nightjar.ui.theme.TextSecondary
 import dev.herakles.nightjar.ui.theme.workshopButton
+import dev.herakles.nightjar.ui.theme.WorkshopBackLink
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -1130,19 +1131,6 @@ fun AcousticModemContent(
     val listenLabel = if (status is ModemStatus.Listening) "stop" else "listen"
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .padding(start = 24.dp, top = 8.dp)
-                .workshopButton(filled = false, onClick = onBack),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            Text(
-                text = "back",
-                style = MaterialTheme.typography.labelLarge,
-                color = TextSecondary,
-            )
-        }
-
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -1251,6 +1239,8 @@ fun AcousticModemContent(
 
             StatusBlock(status = status)
         }
+
+        WorkshopBackLink(onBack)
     }
 }
 

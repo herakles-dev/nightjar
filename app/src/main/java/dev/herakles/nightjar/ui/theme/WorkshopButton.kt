@@ -3,10 +3,15 @@ package dev.herakles.nightjar.ui.theme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -94,3 +99,41 @@ fun Modifier.workshopButton(
     .then(if (enabled) Modifier.border(width = 1.dp, color = BorderDefault, shape = WorkshopButtonShape) else Modifier)
     .then(if (enabled && onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
     .padding(if (compact) WorkshopButtonCompactPadding else WorkshopButtonPadding)
+
+/**
+ * **Owner report, 2026-09-22: "back" stopped responding to taps on every technical screen.**
+ * Every one of the five screens shares one structural shape: `Box(fillMaxSize()) { <back-link
+ * Box>; Column(fillMaxSize().verticalScroll(...).padding(top = 56.dp, ...)) { ...screen body... } }`
+ * — the back link composed FIRST, the scrollable content Column composed SECOND (and so drawn,
+ * and hit-tested, on top of it). Compose dispatches pointer input to overlapping siblings in a
+ * `Box` in reverse composition order (last-composed first), so the scrollable Column's own
+ * `verticalScroll` gesture detector — whose bounds are the FULL `fillMaxSize()` box regardless of
+ * its content's top padding, since padding only moves where content *draws*, not where the
+ * scrollable's own pointer input listens — was intercepting the tap before it ever reached the
+ * back link's `clickable` underneath it. Confirmed by direct on-device tap testing: identical
+ * code in `ModulePicker.kt`'s plain, non-overlapping `Column` back link (no competing sibling)
+ * responded correctly every time; the same code as a Box-sibling to an overlapping scrollable
+ * Column did not, on any of the four affected screens.
+ *
+ * This pre-dates today's button chrome — the same Box/Column overlap shape existed with the
+ * older plain-text back link too — but wasn't user-visible: the old link's own `Modifier.height
+ * (48.dp)` (a firm bound) vs. this override's `workshopButton`-driven `heightIn(min = 48.dp)`
+ * changed enough about the composable's measured bounds, in a screen already this close to a
+ * genuine Compose overlapping-sibling hit-test race, to tip it from "worked by luck" to "doesn't."
+ *
+ * Fix: call this composable LAST inside each screen's outer `Box`, after the scrollable Column,
+ * not first — the standard, deterministic way to win the tie in Compose (last-composed sibling
+ * gets touch-dispatch priority). Shared here rather than duplicated per screen since all four
+ * affected screens use the exact same "back" label and styling.
+ */
+@Composable
+fun WorkshopBackLink(onBack: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .padding(start = 24.dp, top = 8.dp)
+            .workshopButton(filled = false, onClick = onBack),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(text = "back", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+    }
+}
