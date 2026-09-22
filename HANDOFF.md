@@ -54,28 +54,36 @@ but the branch has **not** been merged to main yet:
 
 ## Merge status
 
-`feat/v6-sharing-trail` is 63 commits ahead of `main`, a clean fast-forward with no
-conflicts — but it has not been merged. Do not merge until gate-41 below is run.
+**Merged to `main` 2026-09-22** via PR #2 (`gh pr merge --merge`, same convention as PR #1) —
+`e59038b`, 71 commits, clean merge, no conflicts. This happened on explicit owner direction
+("merge and wrap up") ahead of gate-41's full close below; two of gate-41's five items were
+completed as part of the merge (see next section), the rest remain open on `main`, not just
+on a feature branch.
 
-## Gate 41 — not yet run (required before v6 is done)
+## Gate 41 — partially run (2 of 5 items closed; still not fully done)
 
-Gate 41 ("safety and close") is the closing audit for the whole v6 sprint and has **not**
-been executed yet. It is the next required step, not optional cleanup:
+Gate 41 ("safety and close") is the closing audit for the whole v6 sprint. Status as of the
+2026-09-22 doc-reconciliation pass that preceded the merge:
 
+- ~~Doc reconciliation~~ — **done**. `architecture.md` had 6 confirmed drift points (stale
+  "not built" status on shipped gates 8-9/22-25, a stale `Module` enum snippet, an undercounted
+  exhaustive-`when` table, ~1900 undocumented lines across `incoming/`+`trail/`) — all fixed
+  and verified against real code. `design/riddle-trail.md` and `spec.md` also reconciled
+  (WorkshopButton doctrine override recorded, meadow self-loop open item resolved honestly:
+  code has a determined default, hardware reliability still unmeasured). `design/screen-flow.md`
+  and `design/firefly-jar-identity.md` were not re-audited this pass — still worth a look.
+- ~~Full unit suite run to green~~ — **done**. `./gradlew compileDebugKotlin` clean,
+  `./gradlew test` green, all 63 unit test files, 0 failures, run immediately before the merge.
 - Safety-scope checklist re-run (INV-1 benign payloads, INV-10 no new network/storage
   permission), plus a fresh review of the new incoming-intent surface specifically for
-  malformed and oversized files.
-- Doc reconciliation: `architecture.md`, `design/screen-flow.md` and
-  `design/firefly-jar-identity.md` against the code as actually shipped (several of the above
-  bullets — MIME handling, button chrome, back-button fix — landed after the docs were last
-  touched).
-- Full unit suite run to green (not just the tests touched by each individual gate).
+  malformed and oversized files. **Still open.**
 - v1–v5 on-device spot check on Hek, to catch any regression the sharing/trail work
-  introduced in the older modules.
+  introduced in the older modules. **Still open.**
 - covert-data module-1 cross-reference for the sturdy technique (module-2/§06 were already
-  cross-referenced in the v5 close-out; module-1 is v6's addition).
+  cross-referenced in the v5 close-out; module-1 is v6's addition). **Still open.**
 
-Until this runs, v6 should be considered feature-complete but **not** fully closed out.
+The three still-open items are real gaps, not paperwork — the next session should run them
+against `main`, not treat the merge as having closed them.
 
 ## Test coverage state
 
