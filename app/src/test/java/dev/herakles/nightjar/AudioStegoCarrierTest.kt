@@ -547,6 +547,129 @@ class AudioStegoCarrierTest {
         assertTrue("expected Failure but got $result", result is DecodeResult.Failure)
     }
 
+    // --- Phase-coding: capacity, round trip, capacity enforcement, non-stego decode ---
+    //
+    // [PHASE_BASE_BIN] (4), [PHASE_BITS_PER_GROUP] (4), and [PHASE_SEGMENTS_PER_GROUP] (4) below
+    // mirror AudioStegoCarrier's documented phase-coding constants exactly, same convention as
+    // this file's other technique sections.
+
+    @Test
+    fun phaseCodingMaxPayloadBytesMatchesTheCapacityFormula() {
+        val numSegments = 240 // 60 whole groups of 4
+        val cover = ShortArray(SPECTROGRAM_FRAME_SIZE * numSegments)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+
+        val numGroups = numSegments / PHASE_SEGMENTS_PER_GROUP
+        val totalCapacityBytes = (numGroups * PHASE_BITS_PER_GROUP) / 8
+        val expectedMaxPayload = (totalCapacityBytes - HEADER_TRAILER_OVERHEAD_BYTES).coerceAtLeast(0)
+
+        assertEquals(expectedMaxPayload, carrier.maxPayloadBytes)
+    }
+
+    @Test
+    fun phaseCodingTrailingPartialGroupHoldsNoCapacity() {
+        // 61 segments = 15 whole groups (60 segments) + 1 leftover segment that can never form a
+        // full group -- capacity must come from exactly 15 groups, not be inflated by the leftover.
+        val numSegments = 61
+        val cover = ShortArray(SPECTROGRAM_FRAME_SIZE * numSegments)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+
+        val fullGroups = numSegments / PHASE_SEGMENTS_PER_GROUP // 15
+        val expectedTotalCapacityBytes = (fullGroups * PHASE_BITS_PER_GROUP) / 8
+        val expectedMaxPayload = (expectedTotalCapacityBytes - HEADER_TRAILER_OVERHEAD_BYTES).coerceAtLeast(0)
+
+        assertEquals(expectedMaxPayload, carrier.maxPayloadBytes)
+    }
+
+    @Test
+    fun phaseCodingRoundTripsExactPayloadBytes() {
+        val cover = spectrogramNoiseCover(numFrames = 400, seed = 2026)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+        val payload = "nightjar phase-coding round trip".toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            "test payload (${payload.size}B) exceeds this cover's phase-coding capacity " +
+                "(${carrier.maxPayloadBytes}B)",
+            payload.size <= carrier.maxPayloadBytes,
+        )
+
+        val stego = carrier.encode(payload)
+        assertEquals(cover.size, stego.size) // mono, cover-length, like SPECTROGRAM_LSB
+        val result = carrier.decode(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(0, result.correctedByteErrors)
+    }
+
+    @Test
+    fun phaseCodingRoundTripsAnEmptyPayload() {
+        val cover = spectrogramNoiseCover(numFrames = 100, seed = 2027)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+
+        val stego = carrier.encode(ByteArray(0))
+        val result = carrier.decode(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertEquals(0, (result as DecodeResult.Success).payload.size)
+    }
+
+    @Test
+    fun phaseCodingRoundTripsAPayloadNearMaxCapacity() {
+        val cover = spectrogramNoiseCover(numFrames = 234, seed = 2028) // one bundled-cover-sized clip
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+        val payload = ByteArray(carrier.maxPayloadBytes) { (it % 256).toByte() }
+
+        val stego = carrier.encode(payload)
+        val result = carrier.decode(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+    }
+
+    @Test
+    fun phaseCodingEncodeThrowsWhenPayloadExceedsCapacity() {
+        val cover = ShortArray(SPECTROGRAM_FRAME_SIZE * 240)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+        val tooBig = ByteArray(carrier.maxPayloadBytes + 1)
+
+        try {
+            carrier.encode(tooBig)
+            fail("expected encode() to throw IllegalArgumentException for an over-capacity payload")
+        } catch (expected: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun phaseCodingDecodeReturnsFailureForANonStegoCoverInsteadOfThrowing() {
+        val cover = spectrogramNoiseCover(numFrames = 240, seed = 2029)
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+
+        val result = carrier.decode(cover) // never encoded
+
+        assertTrue("expected Failure but got $result", result is DecodeResult.Failure)
+    }
+
+    @Test
+    fun phaseCodingRoundTripsAtSeveralPayloadSizesIncludingOnesThatLeaveAPartialFinalGroup() {
+        // buildFrame's own header+trailer overhead (11 bytes = 88 bits) is not a multiple of
+        // PHASE_BITS_PER_GROUP (4), so even a 0-byte payload already leaves some group with
+        // fewer than 4 substituted bins -- but a range of payload sizes exercises this more
+        // thoroughly, across different offsets into a group.
+        val cover = spectrogramNoiseCover(numFrames = 240, seed = 2030)
+        for (len in intArrayOf(0, 1, 2, 3, 5, 9)) {
+            val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING)
+            val payload = ByteArray(len) { (it % 256).toByte() }
+            val stego = carrier.encode(payload)
+            val result = carrier.decode(stego)
+            assertTrue("len=$len: expected Success but got $result", result is DecodeResult.Success)
+            assertTrue(
+                "len=$len: payload mismatch",
+                payload.contentEquals((result as DecodeResult.Success).payload),
+            )
+        }
+    }
+
     // --- codec-H02: canEmbed / tiny-cover contract self-consistency, one per technique ---
 
     @Test
@@ -606,7 +729,7 @@ class AudioStegoCarrierTest {
     }
 
     @Test
-    fun canEmbedIsTrueForOrdinaryCoversOnAllThreeTechniques() {
+    fun canEmbedIsTrueForOrdinaryCoversOnAllFourTechniques() {
         assertTrue(AudioStegoCarrier(noiseCover(SEGMENT_SAMPLES * 800, 1), AudioStegoTechnique.PHASE_INVERSION).canEmbed)
         assertTrue(
             AudioStegoCarrier(
@@ -616,6 +739,26 @@ class AudioStegoCarrierTest {
             ).canEmbed,
         )
         assertTrue(AudioStegoCarrier(mfskNoiseCover(3), AudioStegoTechnique.MFSK).canEmbed)
+        assertTrue(AudioStegoCarrier(spectrogramNoiseCover(240, 4), AudioStegoTechnique.PHASE_CODING).canEmbed)
+    }
+
+    @Test
+    fun phaseCodingCanEmbedIsFalseForATinyCoverBelowFrameOverhead() {
+        // 20 segments / 4 per group = 5 groups * 4 bits/group = 20 bits = 2 bytes, under 11.
+        val tinyCover = ShortArray(SPECTROGRAM_FRAME_SIZE * 20)
+        val carrier = AudioStegoCarrier(tinyCover, AudioStegoTechnique.PHASE_CODING)
+
+        assertEquals(0, carrier.maxPayloadBytes)
+        assertTrue("a 20-segment cover (2-byte capacity) should not report canEmbed", !carrier.canEmbed)
+        try {
+            carrier.encode(ByteArray(0))
+            fail("expected encode() to throw for a cover too small to hold a frame")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "expected message to explain the cover is too small, was: ${expected.message}",
+                expected.message.orEmpty().contains("too small"),
+            )
+        }
     }
 
     // --- MFSK clipping fix (design-v5.md §12.2, revised after rev-2 MAJOR): TONE_AMPLITUDE * up
@@ -1003,6 +1146,15 @@ class AudioStegoCarrierTest {
 
         /** Mirrors AudioStegoCarrier's documented spectrogram-LSB bins-per-strength-level (8). */
         private const val SPECTROGRAM_BINS_PER_STRENGTH_LEVEL = 8
+
+        /** Mirrors AudioStegoCarrier's documented phase-coding first dedicated bin. */
+        private const val PHASE_BASE_BIN = 4
+
+        /** Mirrors AudioStegoCarrier's documented phase-coding dedicated-bin count per group. */
+        private const val PHASE_BITS_PER_GROUP = 4
+
+        /** Mirrors AudioStegoCarrier's documented phase-coding segments-per-group. */
+        private const val PHASE_SEGMENTS_PER_GROUP = 4
 
         /** Mirrors AudioStegoCarrier's documented spectrogram-LSB first eligible bin (bin 32). */
         private const val SPECTROGRAM_ELIGIBLE_BIN_START = 32

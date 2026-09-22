@@ -139,9 +139,37 @@ files.
 
 ## Deferred follow-ups
 
-- **True phase-coding codec for audio stego** — the current phase-inversion technique is a
-  simpler stereo-invert trick, not full phase coding; a proper phase-coding implementation
-  is real, separate scope.
+~~**True phase-coding codec for audio stego**~~ — **shipped 2026-09-22, fidelity not yet
+owner-verified.** New `AudioStegoTechnique.PHASE_CODING`, a genuine implementation of Bender,
+Gruhl, Morimoto & Lu 1996's literature phase coding (segment-phase-substitution +
+inter-segment delta-chain), distinct from `PHASE_INVERSION` (the dual-mono trick
+`covert-data/library/03_audio_steganography.md` actually documents as "phase inversion" —
+this follow-up's whole premise was that they're different techniques, and now the app has
+both). 4th technique picker row, fully wired (encode/decode/capacity/UI); no detector
+coverage yet (`AudioStegDetector` has no fourth statistic — a genuine, documented gap,
+matching how spectrogram-LSB/MFSK detector coverage each landed a full sprint after their own
+codecs did per `covert-data/module_2_audio_steganography/README.md`'s own "Detection
+escalation" precedent).
+
+Real, measured fidelity problems found and fixed along the way, not glossed over: the first
+working version measured -16.87 dBFS residual and a ~22,000-magnitude single-sample boundary
+jump on `AudioSampleCover.SOFT_SYNTH` — a loud click, traced to the dedicated phase bins
+(originally bin 4, ~188 Hz) colliding with that cover's own 220 Hz fundamental. Relocated to
+bin 20 (~938 Hz), clear of SOFT_SYNTH's fundamental and its first three harmonics — same
+"avoid the highest-energy content" mistake `SPECTROGRAM_LSB`'s own bin choice already avoids,
+rediscovered the hard way here. Measured after the fix: -43.75 dBFS / ~1,100-magnitude worst
+jump (SOFT_SYNTH), -35.73 dBFS (`SPOKEN_WORD`, more modest improvement — noise-based content
+has no single bin to collide with, so there was less to fix). Still worse than the other three
+techniques' own owner-verified levels (`MFSK`'s click fix reached -70 dBFS with real margin);
+**this technique's fidelity claim in the UI is honest about being measured, not ear-verified**
+— flagged as a real open item for the next session's on-device gate-8-style pass, not silently
+promised. A separate, real bug also found and fixed: a near-zero magnitude at the dedicated
+bins made phase numerically unreadable on decode (SPOKEN_WORD's own header failed to decode
+at all before a magnitude floor — 100, `PHASE_MAGNITUDE_FLOOR` — was added).
+
+Capacity is deliberately low (measured 18 bytes on either 5 s bundled cover, lowest of the
+four techniques) — literature-honest, not a missed optimization: most of every group's samples
+exist purely for phase continuity, not to carry bits.
 
 ~~**SLSB near-silent-frame skip (versioned embedding format)**~~ — **shipped 2026-09-22.**
 `AudioStegoCarrier`'s spectrogram-LSB technique now has a v2 frame format

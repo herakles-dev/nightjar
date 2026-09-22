@@ -1284,10 +1284,15 @@ private fun tradeoffExplainer(): String =
  * other two. `internal` so [AudioStegoScreenTest] can assert each string actually says so.
  *
  * Capacity claims below are checked against [dev.herakles.nightjar.AudioStegoCarrier]'s real
- * `maxPayloadBytes` for the bundled 5s covers, not asserted from memory: MFSK = 37B,
- * PHASE_INVERSION = 51B, SPECTROGRAM_LSB = 457B ([AudioStegoScreenTest]'s
- * `mfskHasTheLowestCapacityOfTheThreeTechniques`) — MFSK is the *lowest*-capacity technique, not
- * phase-inversion; the prior copy had that backwards.
+ * `maxPayloadBytes` for the bundled 5s covers, not asserted from memory (on `SPOKEN_WORD`,
+ * current as of the v6 near-silent-frame-skip + phase-coding follow-ups): PHASE_CODING = 18B,
+ * MFSK = 37B, PHASE_INVERSION = 51B, SPECTROGRAM_LSB = 368B ([AudioStegoScreenTest]'s
+ * `phaseCodingHasTheLowestCapacityOfTheFourTechniques` /
+ * `mfskHasTheLowestCapacityOfTheThreeTechniques`) — PHASE_CODING is the *lowest*-capacity
+ * technique now, not MFSK (true when this file was first written, for the original three).
+ * SPECTROGRAM_LSB's own number dropped from an originally-measured 457B once its near-silent
+ * frames stopped being embedded into (`AudioStegoCarrier`'s own "near-silent-frame skip (v2)"
+ * section) -- a real, expected reduction, not drift to chase back to the old figure.
  */
 internal fun techniqueExplainer(technique: AudioStegoTechnique): String = when (technique) {
     AudioStegoTechnique.PHASE_INVERSION ->
@@ -1309,9 +1314,18 @@ internal fun techniqueExplainer(technique: AudioStegoTechnique): String = when (
         "Encodes your message as a sequence of tones layered on top of the cover clip, then " +
             "wraps the whole thing in real error-correcting math (Reed-Solomon — the same family " +
             "of code behind QR codes and CDs). The tones sit near the top of hearing (about " +
-            "19.7-20 kHz) and are audible to most listeners as a faint high tone. Lowest, fixed " +
-            "capacity of the three, but built to recover the message even if part of the clip " +
-            "gets corrupted or noisy."
+            "19.7-20 kHz) and are audible to most listeners as a faint high tone. Fixed capacity, " +
+            "lower than phase-inversion or spectrogram-LSB — only phase-coding fits less — but " +
+            "built to recover the message even if part of the clip gets corrupted or noisy."
+    AudioStegoTechnique.PHASE_CODING ->
+        "Splits the clip into short segments and hides your message by directly overwriting the " +
+            "phase of a few low frequencies in one segment out of every four — a genuine " +
+            "phase-coding technique from the published research, not another version of the " +
+            "phase-inversion trick above. Measured offline (not yet checked on real headphones) " +
+            "to sit around -35 to -45 dB below full volume, roughly comparable to a quiet " +
+            "background hiss rather than a clean, faint change. Lowest capacity of the four by " +
+            "design: most of every clip only exists so the phase change doesn't snap abruptly, " +
+            "not to carry bits."
 }
 
 /** Plain-language explanation of what a sample cover clip actually is — grounded in
@@ -1405,6 +1419,7 @@ private fun techniqueLabel(technique: AudioStegoTechnique): String = when (techn
     AudioStegoTechnique.PHASE_INVERSION -> "phase inversion"
     AudioStegoTechnique.SPECTROGRAM_LSB -> "spectrogram lsb"
     AudioStegoTechnique.MFSK -> "mfsk"
+    AudioStegoTechnique.PHASE_CODING -> "phase coding"
 }
 
 @Composable
@@ -2288,6 +2303,7 @@ private val previewCapacities = mapOf(
     AudioStegoTechnique.PHASE_INVERSION to 51,
     AudioStegoTechnique.SPECTROGRAM_LSB to 512,
     AudioStegoTechnique.MFSK to 37,
+    AudioStegoTechnique.PHASE_CODING to 18,
 )
 
 @Composable

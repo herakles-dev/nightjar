@@ -18,6 +18,15 @@ import kotlin.math.sqrt
  * LSB replacement. Honest framing for the UI: *"looks for this app's own three techniques.
  * 'clear' means none of those three, not that nothing is hidden."*
  *
+ * **Detection escalation, [AudioStegoTechnique.PHASE_CODING] (deferred v6 follow-up)**: this
+ * detector has no fourth statistic for it — [analyze] never scores it, so a genuine
+ * `PHASE_CODING` firefly reads as "clear" here, same as any other file this detector wasn't
+ * built to recognize (the honest framing above already covers this: "not that nothing is
+ * hidden"). Mirrors `covert-data/module_2_audio_steganography/README.md`'s own "Detection
+ * escalation (Gen-N)" sequencing precedent — spectrogram-LSB and MFSK each shipped a full sprint
+ * before their own detector coverage did. Phase-coding's own Gen-N slot is future work, not
+ * silently promised here.
+ *
  * **INV-7 (blind posture, enforced structurally, not just by convention)**: this file never
  * constructs an [AudioStegoCarrier], never invokes its decode entry point, and never reads
  * nightjar's frame header (magic byte, version, length, CRC). Every statistic below is a property
@@ -554,6 +563,10 @@ class AudioStegDetector : CovertDetector<WavFile.ParsedWav> {
         AudioStegoTechnique.PHASE_INVERSION -> "phase-inversion"
         AudioStegoTechnique.SPECTROGRAM_LSB -> "spectrogram-lsb"
         AudioStegoTechnique.MFSK -> "mfsk"
+        // PHASE_CODING has no detection routine here at all (see class KDoc's TODO below) --
+        // this label exists only so the `when` is exhaustive; [analyze] never actually scores
+        // this technique, so [formatTechniqueDetail] never calls this branch with it today.
+        AudioStegoTechnique.PHASE_CODING -> "phase-coding"
     }
 
     /** Splits [samples] into one `ShortArray` per channel (`samples[frame * numChannels + ch]`).

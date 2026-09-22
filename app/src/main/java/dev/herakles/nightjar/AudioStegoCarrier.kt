@@ -3,6 +3,7 @@ package dev.herakles.nightjar
 import java.util.zip.CRC32
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
@@ -271,6 +272,80 @@ import kotlin.math.sqrt
  * [PHASE_INVERSION]/[SPECTROGRAM_LSB]/[ImageStegoCarrier], none of which apply any FEC (see the
  * "Framing" section below).
  *
+ * ## Phase-coding technique (deferred v6 follow-up)
+ *
+ * The literature technique the HANDOFF.md deferred-follow-ups note was actually contrasting
+ * [PHASE_INVERSION] against: Bender, Gruhl, Morimoto & Lu, "Techniques for Data Hiding," *IBM
+ * Systems Journal* 35(3-4), 1996 — not documented in `covert-data/library/03_audio_steganography.md`
+ * (that doc's own "phase inversion" section is [PHASE_INVERSION]'s dual-mono trick, a different,
+ * simpler technique), so this section cites the source directly, matching the precedent
+ * `covert-data/module_2_audio_steganography/README.md` already sets for citing an external paper
+ * (Kirovski & Malvar) the local library doc doesn't cover.
+ *
+ * **Core idea**: unlike every other technique in this class, [PHASE_CODING] never touches
+ * magnitude at all — only phase, and only in a bounded, DC-adjacent slice of the spectrum
+ * ([PHASE_BASE_BIN] through `PHASE_BASE_BIN + PHASE_BITS_PER_GROUP - 1`). [cover] is split into
+ * non-overlapping [FRAME_SIZE]-sample segments, grouped [PHASE_SEGMENTS_PER_GROUP] at a time. In
+ * each group:
+ *  1. The group's *first* segment carries [PHASE_BITS_PER_GROUP] payload bits — one per dedicated
+ *     bin — via absolute phase substitution: bit 0 sets that bin's phase to `+PI/2`, bit 1 to
+ *     `-PI/2` (Bender's own convention), magnitude left untouched.
+ *  2. Every *other* segment in the group re-derives its new phase, per bin, as `newPhase[k] =
+ *     newPhase[k-1] + (originalPhase[k] - originalPhase[k-1])` — i.e. it keeps its *original*
+ *     phase delta relative to the (possibly-substituted) previous segment, rather than being
+ *     touched directly. This is what lets an abrupt phase override at one segment fade back
+ *     toward the cover's own natural phase trajectory across the rest of the group, instead of a
+ *     single hard jump — the literature's own mechanism for keeping this audible-but-tolerable
+ *     rather than an outright click, not a bolted-on ramp the way [MFSK]'s click fix needed one.
+ *
+ * **Why this is real "phase coding," not another [PHASE_INVERSION]**: [PHASE_INVERSION] never
+ * computes or examines phase at all — it is a time-domain dual-mono amplitude trick. This
+ * technique is genuinely frequency-domain, substitutes phase directly (not merely correlated with
+ * it), and needs no second channel — [encode]'s output here is mono, [cover]'s own length,
+ * exactly like [SPECTROGRAM_LSB].
+ *
+ * **Decode** only ever reads a group's *first* segment — the continuity segments exist purely for
+ * encode-side smoothness and carry no bits of their own, so [decodePhaseCoding] never inspects
+ * them. Reading is a sign check on the recomputed phase at each dedicated bin (`phase > 0` → bit
+ * 0, matching encode's `+PI/2`; `phase <= 0` → bit 1) — a robust threshold, not a near-zero
+ * tiebreak, mirroring [PHASE_INVERSION]'s own "robust sign check" reasoning: `+PI/2` and `-PI/2`
+ * sit a full PI apart, so round-trip (`ifft`-then-round-to-`Short`-then-`fft`) phase noise would
+ * have to be enormous to flip which side of zero a recovered phase lands on.
+ *
+ * **[PHASE_BASE_BIN] = 20** (~938 Hz at [NightjarAcoustics.SAMPLE_RATE_HZ]) — not
+ * [SPECTROGRAM_LSB]'s `ELIGIBLE_BIN_START` = 32 (~1500 Hz), and not near [MFSK]'s ~19.7 kHz tone
+ * band, so this technique's dedicated bins stay clear of both others' spectral real estate on a
+ * cover this app also uses for them. Low-frequency, matching where the literature places phase
+ * coding, but **not the lowest available bins** — an earlier choice of bin 4 (~188 Hz) measured
+ * badly on `AudioSampleCover.SOFT_SYNTH` specifically: that cover's own 220 Hz fundamental sits
+ * right inside bins 4-7, so forcing phase there collided with real, substantial musical energy
+ * (offline JVM measurement: -16.87 dBFS whole-clip residual, a ~22,000-magnitude single-sample
+ * jump at a segment boundary — a loud click, not the "faint" artifact every other technique in
+ * this class settles for). Moving to bin 20-23, clear of SOFT_SYNTH's fundamental and its first
+ * three harmonics (220/440/660 Hz), measured -43.75 dBFS and a ~1,100-magnitude worst jump on the
+ * same cover — the same mistake [SPECTROGRAM_LSB]'s own `ELIGIBLE_BIN_START` KDoc already warns
+ * about avoiding ("comfortably past DC and the highest-energy bass content"), just rediscovered
+ * empirically here rather than anticipated. `AudioSampleCover.SPOKEN_WORD` (filtered noise, no
+ * concentrated harmonics to collide with) improved more modestly, -36 to -43 dBFS depending on
+ * strength -- consistent with the diagnosis: SPOKEN_WORD never had a bin-collision problem to fix
+ * in the first place, since its energy is spread across the whole passband rather than
+ * concentrated at a few frequencies.
+ *
+ * **Fidelity is measured, not owner-verified**: unlike [PHASE_INVERSION]/[SPECTROGRAM_LSB]/
+ * [MFSK], no gate-8-style real-headphone listening pass has confirmed how this actually sounds --
+ * the numbers above are offline residual/jump metrics, a proxy, not a substitute for an ear. Still
+ * a real, measured improvement over the initial (badly broken) attempt, and still real, correct
+ * literature-grounded phase coding (round-trip correctness was never in question, only fidelity).
+ *
+ * **Low, literature-honest capacity, by design**: [PHASE_BITS_PER_GROUP] = 4 bits cost
+ * [PHASE_SEGMENTS_PER_GROUP] = 4 whole [FRAME_SIZE]-sample segments (4096 samples, ~85 ms at
+ * [NightjarAcoustics.SAMPLE_RATE_HZ]) — three of every four segments carry zero payload bits of
+ * their own, existing solely for phase continuity. This is not a missed optimization:
+ * Bender's own paper describes phase coding's data rate as low *because* of exactly this
+ * structure, and inventing a denser packing would stop this being the technique the deferred
+ * follow-up asked for. Measured capacity on both 5 s bundled covers, screen default settings, is
+ * in [AudioStegoScreenTest]/`AudioStegDetectorTest`'s own measured-capacity tables.
+ *
  * ## Framing
  *
  * Identical shape to [ImageStegoCarrier]'s frame (architecture.md §5's acoustic framing adapted
@@ -372,6 +447,7 @@ class AudioStegoCarrier(
             AudioStegoTechnique.PHASE_INVERSION -> phaseInversionCapacityBytes(cover.size)
             AudioStegoTechnique.SPECTROGRAM_LSB -> spectrogramLsbCapacityBytesV2(cover)
             AudioStegoTechnique.MFSK -> mfskCapacityBytes(cover.size)
+            AudioStegoTechnique.PHASE_CODING -> phaseCodingCapacityBytes(cover.size)
         }
     }
 
@@ -395,12 +471,14 @@ class AudioStegoCarrier(
         AudioStegoTechnique.PHASE_INVERSION -> encodePhaseInversion(payload)
         AudioStegoTechnique.SPECTROGRAM_LSB -> encodeSpectrogramLsb(payload)
         AudioStegoTechnique.MFSK -> encodeMfsk(payload)
+        AudioStegoTechnique.PHASE_CODING -> encodePhaseCoding(payload)
     }
 
     override fun decode(carrier: PcmAudio): DecodeResult = when (technique) {
         AudioStegoTechnique.PHASE_INVERSION -> decodePhaseInversion(carrier)
         AudioStegoTechnique.SPECTROGRAM_LSB -> decodeSpectrogramLsb(carrier)
         AudioStegoTechnique.MFSK -> decodeMfsk(carrier)
+        AudioStegoTechnique.PHASE_CODING -> decodePhaseCoding(carrier)
     }
 
     // --- Phase-inversion encode/decode ---
@@ -1027,6 +1105,251 @@ class AudioStegoCarrier(
         return if (sorted.size % 2 == 0) (sorted[mid - 1] + sorted[mid]) / 2.0 else sorted[mid]
     }
 
+    // --- Phase-coding encode/decode ---
+
+    /**
+     * Builds the phase-substituted, delta-chained carrier -- see the class KDoc's "Phase-coding
+     * technique" section. Returns a mono [PcmAudio] the same length as [cover] (like
+     * [SPECTROGRAM_LSB], no stereo interleaving needed, unlike [PHASE_INVERSION]).
+     */
+    private fun encodePhaseCoding(payload: ByteArray): PcmAudio {
+        require(canEmbed) {
+            "cover (${cover.size} samples, $totalCapacityBytes-byte phase-coding capacity) " +
+                "cannot hold even an empty payload frame ($FRAME_OVERHEAD_BYTES bytes) -- this " +
+                "cover is too small to hide anything"
+        }
+        require(payload.size <= maxPayloadBytes) {
+            "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
+                "phase-coding capacity of $maxPayloadBytes bytes"
+        }
+        val frame = buildFrame(payload)
+        val totalBits = frame.size * 8
+        val numSegments = cover.size / FRAME_SIZE
+        val numGroups = numSegments / PHASE_SEGMENTS_PER_GROUP
+        check(totalBits <= numGroups.toLong() * PHASE_BITS_PER_GROUP) {
+            "frame bits ($totalBits) exceed available groups " +
+                "(${numGroups.toLong() * PHASE_BITS_PER_GROUP}) -- should be unreachable once " +
+                "canEmbed and the payload-size check above both hold"
+        }
+
+        val out = cover.copyOf()
+        var bitIndex = 0
+        var groupIndex = 0
+        while (groupIndex < numGroups && bitIndex < totalBits) {
+            val groupStart = groupIndex * PHASE_SEGMENTS_PER_GROUP
+
+            // Fresh FFT of every segment in this group, before any modification -- both the
+            // magnitude (never touched) and the ORIGINAL phase (needed by every segment's own
+            // delta-chain below, including segment 0's, before it gets overwritten) come from
+            // this untouched pass.
+            val re = Array(PHASE_SEGMENTS_PER_GROUP) { DoubleArray(FRAME_SIZE) }
+            val im = Array(PHASE_SEGMENTS_PER_GROUP) { DoubleArray(FRAME_SIZE) }
+            for (s in 0 until PHASE_SEGMENTS_PER_GROUP) {
+                val start = (groupStart + s) * FRAME_SIZE
+                for (i in 0 until FRAME_SIZE) re[s][i] = cover[start + i].toDouble()
+                fft(re[s], im[s])
+            }
+            val originalPhase = Array(PHASE_SEGMENTS_PER_GROUP) { s ->
+                DoubleArray(PHASE_BITS_PER_GROUP) { b -> atan2(im[s][PHASE_BASE_BIN + b], re[s][PHASE_BASE_BIN + b]) }
+            }
+            val magnitude = Array(PHASE_SEGMENTS_PER_GROUP) { s ->
+                DoubleArray(PHASE_BITS_PER_GROUP) { b ->
+                    val bin = PHASE_BASE_BIN + b
+                    sqrt(re[s][bin] * re[s][bin] + im[s][bin] * im[s][bin])
+                }
+            }
+
+            // Segment 0: substitute phase at each dedicated bin this group still has a bit for
+            // (+PI/2 for bit 0, -PI/2 for bit 1); any bin beyond this group's own last bit (only
+            // possible in the final, partially-filled group) keeps its original phase. Segments
+            // 1..N-1: re-derive new phase per bin as newPhase[s] = newPhase[s-1] +
+            // (originalPhase[s] - originalPhase[s-1]) -- the delta-chain that lets the group fade
+            // back toward the cover's own natural phase trajectory (class KDoc). For a bin this
+            // group never substituted, newPhase[0] == originalPhase[0], so the chain reproduces
+            // every segment's own original phase exactly -- an untouched bin stays untouched
+            // across the whole group, not just at segment 0.
+            val bitsThisGroup = minOf(PHASE_BITS_PER_GROUP, totalBits - bitIndex)
+            val newPhase = Array(PHASE_SEGMENTS_PER_GROUP) { DoubleArray(PHASE_BITS_PER_GROUP) }
+            for (b in 0 until PHASE_BITS_PER_GROUP) {
+                newPhase[0][b] = if (b < bitsThisGroup) {
+                    if (bitAt(frame, bitIndex + b) == 0) PHASE_BIT_ZERO else PHASE_BIT_ONE
+                } else {
+                    originalPhase[0][b]
+                }
+                for (s in 1 until PHASE_SEGMENTS_PER_GROUP) {
+                    newPhase[s][b] = newPhase[s - 1][b] + (originalPhase[s][b] - originalPhase[s - 1][b])
+                }
+            }
+            bitIndex += bitsThisGroup
+
+            // Apply: each segment's dedicated bins become (magnitude, new phase), mirrored for
+            // conjugate symmetry (same requirement embedBitInBin's own KDoc documents for
+            // SPECTROGRAM_LSB), then ifft + round + writeback for the whole group.
+            //
+            // Every segment's magnitude (not just segment 0's) is floored to
+            // max(originalMagnitude, PHASE_MAGNITUDE_FLOOR) at bins this group actually carries a
+            // bit on (b < bitsThisGroup): a near-silent bin's phase is numerically unstable
+            // (atan2 of two near-zero floats is dominated by rounding noise), both here and when
+            // [readPhaseCodingBit] recomputes it from the round-tripped carrier -- the same
+            // failure mode SPECTROGRAM_LSB's LOG_MAGNITUDE_FLOOR exists to prevent for its own
+            // log-index computation. `AudioSampleCover.SPOKEN_WORD` -- which has genuine
+            // near-silent passages -- failed to decode its own header at all before this floor
+            // existed. Flooring every segment independently (not forcing a shared value -- each
+            // still keeps its own natural level once that level clears the floor) also removes
+            // any risk of a segment-to-segment magnitude mismatch at these bins, though that
+            // turned out NOT to be the real driver of this technique's larger fidelity problem --
+            // see [PHASE_BASE_BIN]'s own KDoc for the actual cause (a bin-choice collision with
+            // real cover content) and its fix.
+            for (s in 0 until PHASE_SEGMENTS_PER_GROUP) {
+                for (b in 0 until bitsThisGroup) {
+                    val bin = PHASE_BASE_BIN + b
+                    val mirror = FRAME_SIZE - bin
+                    val mag = maxOf(magnitude[s][b], PHASE_MAGNITUDE_FLOOR)
+                    val newRe = mag * cos(newPhase[s][b])
+                    val newIm = mag * sin(newPhase[s][b])
+                    re[s][bin] = newRe
+                    im[s][bin] = newIm
+                    re[s][mirror] = newRe
+                    im[s][mirror] = -newIm
+                }
+                // Unused bins this group never substituted (only possible in the final,
+                // partially-filled group) keep their bare original magnitude AND phase --
+                // newPhase[s][b] already equals originalPhase[s][b] there (see above), so this
+                // leaves them genuinely untouched, matching every other technique's own
+                // "past the last embedded bit, byte-exact" contract.
+                for (b in bitsThisGroup until PHASE_BITS_PER_GROUP) {
+                    val bin = PHASE_BASE_BIN + b
+                    val mirror = FRAME_SIZE - bin
+                    re[s][bin] = magnitude[s][b] * cos(newPhase[s][b])
+                    im[s][bin] = magnitude[s][b] * sin(newPhase[s][b])
+                    re[s][mirror] = re[s][bin]
+                    im[s][mirror] = -im[s][bin]
+                }
+                ifft(re[s], im[s])
+                val start = (groupStart + s) * FRAME_SIZE
+                for (i in 0 until FRAME_SIZE) out[start + i] = roundToShort(re[s][i])
+            }
+
+            groupIndex++
+        }
+        check(bitIndex == totalBits) {
+            "cover ran out of groups while embedding ($bitIndex/$totalBits bits) -- should be " +
+                "unreachable once canEmbed and the payload-size check above both hold"
+        }
+        return out
+    }
+
+    /**
+     * Recovers a payload from a phase-coding [carrier] by reading, for each group, only its
+     * *first* segment's phase at each dedicated bin -- see the class KDoc's "Phase-coding
+     * technique" section for why the continuity segments carry no bits of their own and are
+     * never inspected here.
+     */
+    private fun decodePhaseCoding(carrier: PcmAudio): DecodeResult {
+        val numSegments = carrier.size / FRAME_SIZE
+        val numGroups = numSegments / PHASE_SEGMENTS_PER_GROUP
+        val carrierCapacityBytes = phaseCodingCapacityBytes(carrier.size)
+        if (carrierCapacityBytes < HEADER_BYTES) {
+            return DecodeResult.Failure(
+                DecodeFailure.NO_PAYLOAD_FOUND,
+                "carrier ($numGroups usable groups of $PHASE_SEGMENTS_PER_GROUP frames) is too " +
+                    "short to hold a header at $PHASE_BITS_PER_GROUP bits/group",
+            )
+        }
+
+        val header = extractPhaseCodingBytes(carrier, 0, HEADER_BYTES)
+        if ((header[0].toInt() and 0xFF) != MAGIC) {
+            return DecodeResult.Failure(DecodeFailure.NO_PAYLOAD_FOUND, "no stego magic byte found")
+        }
+        if ((header[1].toInt() and 0xFF) != VERSION) {
+            return DecodeResult.Failure(
+                DecodeFailure.HEADER_INVALID,
+                "unsupported frame version ${header[1].toInt() and 0xFF}",
+            )
+        }
+        val declaredHeaderCrc = header[6].toInt() and 0xFF
+        val computedHeaderCrc = crc8(header, 0, 6)
+        if (declaredHeaderCrc != computedHeaderCrc) {
+            return DecodeResult.Failure(DecodeFailure.HEADER_INVALID, "header CRC-8 mismatch")
+        }
+
+        val length = ((header[2].toInt() and 0xFF) shl 24) or
+            ((header[3].toInt() and 0xFF) shl 16) or
+            ((header[4].toInt() and 0xFF) shl 8) or
+            (header[5].toInt() and 0xFF)
+        if (length < 0) {
+            return DecodeResult.Failure(DecodeFailure.HEADER_INVALID, "negative declared length $length")
+        }
+        val maxPayloadForCarrier = (carrierCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
+        if (length > maxPayloadForCarrier) {
+            return DecodeResult.Failure(
+                DecodeFailure.PAYLOAD_TOO_LARGE,
+                "declared length $length exceeds this carrier's $maxPayloadForCarrier-byte capacity",
+            )
+        }
+
+        val payload = extractPhaseCodingBytes(carrier, HEADER_BYTES * 8, length)
+        val trailer = extractPhaseCodingBytes(carrier, (HEADER_BYTES + length) * 8, TRAILER_BYTES)
+        val declaredCrc32 = ((trailer[0].toLong() and 0xFF) shl 24) or
+            ((trailer[1].toLong() and 0xFF) shl 16) or
+            ((trailer[2].toLong() and 0xFF) shl 8) or
+            (trailer[3].toLong() and 0xFF)
+        val actualCrc32 = crc32Of(payload)
+        if (declaredCrc32 != actualCrc32) {
+            return DecodeResult.Failure(DecodeFailure.INTEGRITY_MISMATCH, "payload CRC-32 mismatch")
+        }
+
+        return DecodeResult.Success(payload = payload, correctedByteErrors = 0)
+    }
+
+    /**
+     * Total embeddable bytes for a phase-coding carrier/cover of `sampleCount` samples:
+     * `floor((numGroups * PHASE_BITS_PER_GROUP) / 8)`, where `numGroups = (sampleCount /
+     * FRAME_SIZE) / PHASE_SEGMENTS_PER_GROUP` -- a whole number of groups only; a trailing
+     * partial group (fewer than [PHASE_SEGMENTS_PER_GROUP] leftover segments) holds no capacity,
+     * matching [decodePhaseCoding]'s own "usable groups" framing.
+     */
+    private fun phaseCodingCapacityBytes(sampleCount: Int): Int {
+        val numSegments = sampleCount / FRAME_SIZE
+        val numGroups = numSegments / PHASE_SEGMENTS_PER_GROUP
+        return (numGroups * PHASE_BITS_PER_GROUP) / 8
+    }
+
+    /**
+     * Recovers one payload bit from [carrier] at bit position [bitIndex]: FFTs the OWNING
+     * group's *first* segment only (`groupIndex * PHASE_SEGMENTS_PER_GROUP`) and reads the sign
+     * of the recomputed phase at the dedicated bin -- `> 0` is bit 0 (matching encode's
+     * `PHASE_BIT_ZERO` = `+PI/2`), `<= 0` is bit 1 (matching `PHASE_BIT_ONE` = `-PI/2`). A robust
+     * sign check, not a near-zero tiebreak: the two substituted values sit a full PI apart, so
+     * round-trip phase noise would have to be enormous to flip which side of zero a recovered
+     * phase lands on (class KDoc).
+     */
+    private fun readPhaseCodingBit(carrier: PcmAudio, bitIndex: Int): Int {
+        val groupIndex = bitIndex / PHASE_BITS_PER_GROUP
+        val binSlot = bitIndex % PHASE_BITS_PER_GROUP
+        val bin = PHASE_BASE_BIN + binSlot
+        val segmentStart = groupIndex * PHASE_SEGMENTS_PER_GROUP * FRAME_SIZE
+        val re = DoubleArray(FRAME_SIZE) { i -> carrier[segmentStart + i].toDouble() }
+        val im = DoubleArray(FRAME_SIZE)
+        fft(re, im)
+        val phase = atan2(im[bin], re[bin])
+        return if (phase > 0.0) 0 else 1
+    }
+
+    private fun extractPhaseCodingBytes(carrier: PcmAudio, startBitIndex: Int, numBytes: Int): ByteArray {
+        val out = ByteArray(numBytes)
+        var bitIndex = startBitIndex
+        for (i in 0 until numBytes) {
+            var value = 0
+            repeat(8) {
+                value = (value shl 1) or readPhaseCodingBit(carrier, bitIndex)
+                bitIndex++
+            }
+            out[i] = value.toByte()
+        }
+        return out
+    }
+
     // --- Frame assembly (same shape as ImageStegoCarrier.buildFrame) ---
 
     /** [version] defaults to [VERSION] (0x01) -- every technique except [SPECTROGRAM_LSB] passes
@@ -1479,6 +1802,60 @@ class AudioStegoCarrier(
             val idx = Math.round(logMagnitude / QUANTIZATION_STEP)
             return Math.floorMod(idx, 2L).toInt()
         }
+
+        // --- Phase-coding constants (deferred v6 follow-up; class KDoc's "Phase-coding
+        // technique" section has the full design) ---
+
+        /**
+         * First of [PHASE_BITS_PER_GROUP] consecutive dedicated phase-coding bins (~938 Hz at
+         * [NightjarAcoustics.SAMPLE_RATE_HZ]). Low-frequency (the literature's own placement for
+         * phase coding), clear of both other techniques' spectral real estate on a cover this app
+         * also uses for them -- but NOT the lowest available bins: bin 4 measured badly on
+         * `AudioSampleCover.SOFT_SYNTH`, whose own 220 Hz fundamental collides with bins 4-7. See
+         * class KDoc's full measured before/after for why 20, the same "avoid the highest-energy
+         * content" reasoning [SPECTROGRAM_LSB]'s own `ELIGIBLE_BIN_START` KDoc already documents.
+         */
+        private const val PHASE_BASE_BIN = 20
+
+        /** Dedicated phase-coding bins per group's first segment -- one payload bit per bin. */
+        private const val PHASE_BITS_PER_GROUP = 4
+
+        /**
+         * [FRAME_SIZE]-sample segments per phase-coding group: 1 bit-carrying segment (the
+         * group's first) plus 3 continuity segments that re-derive their phase from the cover's
+         * own original inter-segment deltas rather than being substituted directly (class KDoc).
+         * The literature's own low-data-rate trait, not a limitation of this implementation: most
+         * of every group's samples carry zero bits of their own, existing purely so the phase
+         * substitution fades back toward the cover's natural trajectory instead of snapping.
+         */
+        private const val PHASE_SEGMENTS_PER_GROUP = 4
+
+        /** Substituted phase (radians) for bit 0 -- Bender et al. 1996's own convention. */
+        private const val PHASE_BIT_ZERO = PI / 2.0
+
+        /** Substituted phase (radians) for bit 1 -- a full PI from [PHASE_BIT_ZERO], the margin
+         *  [readPhaseCodingBit]'s sign-check robustness relies on. */
+        private const val PHASE_BIT_ONE = -PI / 2.0
+
+        /**
+         * Minimum magnitude a phase-coding bit-carrying bin's OUTPUT is floored to -- same role
+         * as [LOG_MAGNITUDE_FLOOR] plays for [SPECTROGRAM_LSB]'s QIM, and for the identical
+         * reason: [atan2] of a near-zero (real, imaginary) pair is dominated by floating-point/
+         * round-trip noise, both when this class computes it here and when [readPhaseCodingBit]
+         * recomputes it from the round-tripped carrier. Found empirically, not chosen
+         * defensively: `AudioSampleCover.SPOKEN_WORD` -- which has genuine near-silent passages --
+         * failed to decode its own header at all before this floor existed (offline JVM
+         * measurement, not a hypothetical).
+         *
+         * 100, not [LOG_MAGNITUDE_FLOOR]'s 1000: measured to make no difference at all to the
+         * boundary-jump fidelity problem [PHASE_BASE_BIN]'s KDoc describes (identical residual/
+         * jump numbers at 1000 vs 100) -- confirming that artifact was never about this floor's
+         * exact value (the floor was rarely even the binding constraint; real covers' natural
+         * magnitude at these bins is usually well above either value), only about which bin was
+         * chosen. Left at the smaller, still-safely-stable value rather than reverted, since
+         * smaller is strictly less of an artificial magnitude change when the floor does bind.
+         */
+        private const val PHASE_MAGNITUDE_FLOOR = 100.0
     }
 }
 
@@ -1502,4 +1879,13 @@ enum class AudioStegoTechnique {
      * [AudioStegoCarrier]'s class KDoc "MFSK technique" section.
      */
     MFSK,
+
+    /**
+     * Literature phase coding (Bender, Gruhl, Morimoto & Lu 1996) — implemented, see
+     * [AudioStegoCarrier]'s class KDoc "Phase-coding technique" section. Deferred v6 follow-up:
+     * distinct from [PHASE_INVERSION], which is the simpler dual-mono phase-cancellation trick
+     * `covert-data/library/03_audio_steganography.md` calls "the simple trick," not the DFT
+     * segment-phase-substitution algorithm this technique actually implements.
+     */
+    PHASE_CODING,
 }

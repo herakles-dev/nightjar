@@ -75,25 +75,42 @@ class AudioStegoScreenTest {
     }
 
     @Test
-    fun mfskExplainerStatesAudibleHighTonesAndLowestCapacity() {
+    fun mfskExplainerStatesAudibleHighTonesAndFixedLowCapacity() {
         val text = techniqueExplainer(AudioStegoTechnique.MFSK)
         assertTrue("should say the tones are audible", text.contains("audible"))
         assertTrue("should name the tone-band frequency range", text.contains("19.7"))
         // MFSK's crackle was a separate encoder bug, not this technique's real tradeoff -- the
         // audibility explanation must not describe it as a feature of the technique.
         assertFalse("must not describe the MFSK crackle bug as a feature", text.contains("crackle"))
-        assertTrue(
-            "MFSK is the actual lowest-capacity technique (37B vs 51B/457B) -- its text should say so",
+        // MFSK is no longer the lowest-capacity technique -- PHASE_CODING (deferred v6
+        // follow-up) measures lower. Its text must not overclaim "lowest" now that a fourth,
+        // smaller technique exists; it should instead name what it IS lower than.
+        assertFalse(
+            "MFSK is no longer the lowest-capacity technique (phase-coding is) -- its text " +
+                "must not claim to be",
             text.lowercase().contains("lowest"),
         )
     }
 
     // ==========================================================================================
-    // Capacity ordering: the ground truth the three tooltips' capacity claims are checked
+    // Capacity ordering: the ground truth the four tooltips' capacity claims are checked
     // against, computed from the real AudioStegoCarrier (not hardcoded or trusted from memory --
     // design-v5.md §2.7 review note: an earlier copy pass had phase-inversion and MFSK's
-    // "lowest capacity" claim backwards).
+    // "lowest capacity" claim backwards; the same discipline applies now that PHASE_CODING has
+    // overtaken MFSK for the actual lowest spot).
     // ==========================================================================================
+
+    @Test
+    fun phaseCodingHasTheLowestCapacityOfTheFourTechniques() {
+        val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
+        val phaseCodingBytes = AudioStegoCarrier(cover, AudioStegoTechnique.PHASE_CODING).maxPayloadBytes
+        val mfskBytes = AudioStegoCarrier(cover, AudioStegoTechnique.MFSK).maxPayloadBytes
+
+        assertTrue(
+            "phase-coding ($phaseCodingBytes B) should be lower-capacity than MFSK ($mfskBytes B)",
+            phaseCodingBytes < mfskBytes,
+        )
+    }
 
     @Test
     fun mfskHasTheLowestCapacityOfTheThreeTechniques() {
