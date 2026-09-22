@@ -7,6 +7,8 @@ import dev.herakles.nightjar.NightjarAcoustics
 import dev.herakles.nightjar.PcmAudio
 import dev.herakles.nightjar.WavFile
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.share.OutgoingKind
+import dev.herakles.nightjar.share.outgoingMimeAndExtensionFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -90,6 +92,40 @@ class IncomingRouterAudioTest {
         outcome as IncomingOutcome.Caught
         assertEquals(Module.ACOUSTIC_MODEM, outcome.module)
         assertEquals("audio", outcome.extension)
+    }
+
+    @Test
+    fun `a modem firefly caught from a fake M4A container shares as audio-mp4, not audio-wav`() {
+        // Closes the loop review finding #3 flagged: FileSniffer used to collapse every compressed
+        // audio container into one OTHER_AUDIO bucket (defaultExtension "audio"), so
+        // outgoingMimeAndExtensionFor's real extension->MIME map could never match. Now the
+        // sniffer records the real container, so a caught modem firefly's own file extension is
+        // "m4a" end to end, and export resolves the real audio/mp4 MIME instead of the audio/wav
+        // fallback.
+        val m4aContainer = byteArrayOf(0, 0, 0, 0x20) + "ftyp".toByteArray(Charsets.US_ASCII) + "M4A ".toByteArray(Charsets.US_ASCII) + ByteArray(8)
+        val sniffed = FileSniffer.sniff(m4aContainer)
+        assertEquals(SniffedType.M4A, sniffed)
+        val extension = sniffed.defaultExtension()
+        assertEquals("m4a", extension)
+
+        // The modem's demuxed PCM is produced separately by IncomingAndroidAdapters in production
+        // (Android media decoding, not exercised here) -- this simulates a successful demux
+        // yielding the same modem-tone PCM the acoustic carrier itself encodes.
+        val modemPcm = AcousticCarrier().encode(payload)
+
+        val outcome = IncomingRouter.routeCompressedAudio(m4aContainer, modemPcm = modemPcm, extension = extension)
+
+        assertTrue("expected Caught but got $outcome", outcome is IncomingOutcome.Caught)
+        outcome as IncomingOutcome.Caught
+        assertEquals(Module.ACOUSTIC_MODEM, outcome.module)
+        assertEquals(IncomingRouter.ACOUSTIC_MODEM_TECHNIQUE, outcome.technique)
+        assertTrue(payload.contentEquals(outcome.payload))
+        assertEquals("m4a", outcome.extension)
+
+        val mediaPath = "a1b2c3d4.${outcome.extension}"
+        val (mimeType, exportExtension) = outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, mediaPath)
+        assertEquals("audio/mp4", mimeType)
+        assertEquals("m4a", exportExtension)
     }
 
     private fun silentCover(samples: Int): PcmAudio = ShortArray(samples)

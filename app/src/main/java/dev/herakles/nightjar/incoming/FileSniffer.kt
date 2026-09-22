@@ -25,7 +25,11 @@ enum class SniffedType(val domain: SniffedDomain, val lossless: Boolean) {
     WEBP(SniffedDomain.IMAGE, lossless = false),
     HEIF(SniffedDomain.IMAGE, lossless = false),
     WAV(SniffedDomain.AUDIO, lossless = true),
-    OTHER_AUDIO(SniffedDomain.AUDIO, lossless = false),
+    M4A(SniffedDomain.AUDIO, lossless = false),
+    MP3(SniffedDomain.AUDIO, lossless = false),
+    OGG(SniffedDomain.AUDIO, lossless = false),
+    OPUS(SniffedDomain.AUDIO, lossless = false),
+    AMR(SniffedDomain.AUDIO, lossless = false),
     UNKNOWN(SniffedDomain.UNSUPPORTED, lossless = false),
 }
 
@@ -38,7 +42,11 @@ fun SniffedType.defaultExtension(): String = when (this) {
     SniffedType.WEBP -> "webp"
     SniffedType.HEIF -> "heic"
     SniffedType.WAV -> "wav"
-    SniffedType.OTHER_AUDIO -> "audio"
+    SniffedType.M4A -> "m4a"
+    SniffedType.MP3 -> "mp3"
+    SniffedType.OGG -> "ogg"
+    SniffedType.OPUS -> "opus"
+    SniffedType.AMR -> "amr"
     SniffedType.UNKNOWN -> "bin"
 }
 
@@ -56,6 +64,12 @@ object FileSniffer {
     private val ID3_MAGIC = byteArrayOf(0x49, 0x44, 0x33) // "ID3" -- MP3 with a leading ID3 tag
     // Narrowband ("#!AMR\n") and wideband ("#!AMR-WB\n") share this 5-byte prefix.
     private val AMR_MAGIC = byteArrayOf(0x23, 0x21, 0x41, 0x4D, 0x52)
+    // "OpusHead" -- the codec-identification header that opens the very first Ogg page's payload,
+    // right after that page's own header (whose length varies with segment count).
+    private val OPUS_HEAD_MAGIC = byteArrayOf(0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64)
+    // Bounds the OpusHead search well short of fully parsing the Ogg page structure -- the header
+    // is typically ~28 bytes plus a small segment table, so "OpusHead" starts well inside this.
+    private const val OPUS_HEAD_SEARCH_BOUND = 96
 
     /** ISO-BMFF `ftyp` major/compatible brands that mark the HEIC/HEIF family, as opposed to an
      *  MP4/M4A brand (both container families share the same `ftyp` box shape). */
@@ -72,12 +86,12 @@ object FileSniffer {
             // (image/*, audio/*) is an MP4-family audio container (M4A/AAC) -- HEIF is the only
             // ISO-BMFF *image* brand family nightjar can be sent, so an unrecognized brand
             // defaults to audio rather than a third "maybe video" bucket this app never receives.
-            return if (brand in HEIF_BRANDS) SniffedType.HEIF else SniffedType.OTHER_AUDIO
+            return if (brand in HEIF_BRANDS) SniffedType.HEIF else SniffedType.M4A
         }
-        if (matches(bytes, 0, OGG_MAGIC)) return SniffedType.OTHER_AUDIO
-        if (matches(bytes, 0, ID3_MAGIC)) return SniffedType.OTHER_AUDIO
-        if (matches(bytes, 0, AMR_MAGIC)) return SniffedType.OTHER_AUDIO
-        if (isMp3FrameSync(bytes)) return SniffedType.OTHER_AUDIO
+        if (matches(bytes, 0, OGG_MAGIC)) return if (hasOpusHead(bytes)) SniffedType.OPUS else SniffedType.OGG
+        if (matches(bytes, 0, ID3_MAGIC)) return SniffedType.MP3
+        if (matches(bytes, 0, AMR_MAGIC)) return SniffedType.AMR
+        if (isMp3FrameSync(bytes)) return SniffedType.MP3
         return SniffedType.UNKNOWN
     }
 
@@ -92,6 +106,16 @@ object FileSniffer {
      *  a permissive check for a raw MP3 stream with no leading ID3 tag. */
     private fun isMp3FrameSync(bytes: ByteArray): Boolean =
         bytes.size >= 2 && (bytes[0].toInt() and 0xFF) == 0xFF && (bytes[1].toInt() and 0xE0) == 0xE0
+
+    /** Plain Ogg Vorbis/FLAC-in-Ogg has no "OpusHead" anywhere in the search window, so this stays
+     *  false for it -- only Opus-in-Ogg streams carry this codec-identification header. */
+    private fun hasOpusHead(bytes: ByteArray): Boolean {
+        val lastOffset = minOf(bytes.size, OPUS_HEAD_SEARCH_BOUND) - OPUS_HEAD_MAGIC.size
+        for (offset in 0..lastOffset) {
+            if (matches(bytes, offset, OPUS_HEAD_MAGIC)) return true
+        }
+        return false
+    }
 
     private fun matches(bytes: ByteArray, offset: Int, magic: ByteArray): Boolean {
         if (bytes.size < offset + magic.size) return false
