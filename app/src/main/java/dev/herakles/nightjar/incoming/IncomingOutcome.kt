@@ -6,9 +6,9 @@ import dev.herakles.nightjar.picker.Module
  * Outcome of routing one incoming file through [IncomingRouter] (spec.md v6 receive-plumbing,
  * INV-12, gate-31/32). Exactly five cases -- INV-12: "every incoming file resolves to exactly one
  * of caught, squeezed, damaged, no firefly, or unsupported, and a message is shown only after its
- * checksum verifies." `MainActivity.kt`'s `IncomingPlaceholderScreen` renders these as plain text
- * for now; task W2-1 replaces that with the real jar-voice copy from design/screen-flow.md's
- * "five outcomes" table.
+ * checksum verifies." Rendered by [IncomingScreen] (task W2-1) with the real jar-voice copy from
+ * design/screen-flow.md's "five outcomes" table -- replaces task W1-2's MINIMAL plain-text
+ * placeholder.
  */
 sealed interface IncomingOutcome {
 

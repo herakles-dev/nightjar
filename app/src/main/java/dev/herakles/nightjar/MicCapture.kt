@@ -64,12 +64,12 @@ internal object MicCapture {
 
         if (unprocessedSupported) {
             buildAudioRecord(MediaRecorder.AudioSource.UNPROCESSED, recordBufferBytes)?.let {
-                Log.i(TAG, "capture: using AudioSource.UNPROCESSED")
+                if (BuildConfig.DEBUG) Log.i(TAG, "capture: using AudioSource.UNPROCESSED")
                 return it
             }
         }
         buildAudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, recordBufferBytes)?.let {
-            Log.i(TAG, "capture: using AudioSource.VOICE_RECOGNITION")
+            if (BuildConfig.DEBUG) Log.i(TAG, "capture: using AudioSource.VOICE_RECOGNITION")
             return it
         }
         val mic = buildAudioRecord(MediaRecorder.AudioSource.MIC, recordBufferBytes)
@@ -147,16 +147,16 @@ internal object MicCapture {
         create: () -> AudioEffect?,
     ) {
         if (!availableOnDevice) {
-            Log.i(TAG, "effects: $name not available on this device")
+            if (BuildConfig.DEBUG) Log.i(TAG, "effects: $name not available on this device")
             return
         }
         val effect = create()
         if (effect == null) {
-            Log.i(TAG, "effects: $name available but create() returned null for this session")
+            if (BuildConfig.DEBUG) Log.i(TAG, "effects: $name available but create() returned null for this session")
             return
         }
         effect.setEnabled(false)
         disabled += effect
-        Log.i(TAG, "effects: $name found on this session, disabled")
+        if (BuildConfig.DEBUG) Log.i(TAG, "effects: $name found on this session, disabled")
     }
 }
