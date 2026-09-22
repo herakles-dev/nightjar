@@ -119,6 +119,17 @@ anywhere in the covert-data research base.
     `design/riddle-trail.md` § Welcome + game layer. Verb rule app-wide: you *create*
     fireflies and *catch* other people's; "catch" never describes making one. The trail's
     send step teaches creating one of your own ("hide one in a photo")
+  - **Workshop button chrome** (owner direction, 2026-09-22) — the five technical
+    screens (`ModulePicker`, `AcousticModemScreen`, `ImageStegoScreen`,
+    `AudioStegoScreen`, `DetectorScreen`) build real filled/outlined button chrome
+    (`WorkshopButton.kt`) in place of the underline-only tappable affordance the
+    owner tried on-device and rejected ("not enough. make them look like buttons.
+    ignore the ai tell rules theyre tok strict."), overriding `design/identity.md`'s
+    no-button-fill-surface doctrine for this specific, scoped need — a recorded
+    exception, not a silent departure from doctrine. It does not touch the Firefly
+    Jar surface (`design/firefly-jar-identity.md`), which already has its own
+    tinted-fill/border button language and was never under this restriction. See
+    `identity.md` § Workshop button chrome override for the full record.
   - **The meadow** — the detector's tile, "the watching jar", becomes "the
     meadow" in all user-facing copy (it never keeps a firefly, it only notices
     them), and moves to 4th on the shelf, swapping with the humming jar, so the

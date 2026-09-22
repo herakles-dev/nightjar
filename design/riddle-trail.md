@@ -392,7 +392,18 @@ reason (a future reorder of the trail shouldn't silently remap anyone's in-progr
 
 - Whether the meadow's self-loop (Branch A, § Step 4) is real enough to ship as the default
   path is a W1 measurement question, not a design one — this doc specs both branches so either
-  answer is buildable without a doc revision.
+  answer is buildable without a doc revision. **Resolved in code, still open on reliability
+  (checked 2026-09-22):** `jarWatchFlow` (`DetectorScreen.kt` lines 264–308) has no feature flag
+  choosing between the branches — every active trail-watch session unconditionally auto-plays
+  the singing jar's practice WAV and tries Branch A first (a real flagged detection advances
+  immediately, lines 271–278); Branch B's honest fallback only shows if nothing flags within the
+  20s window (`MEADOW_HONEST_FALLBACK_TIMEOUT_MS`, line 344; `meadowHonestFallbackDue`, line
+  358). So Branch A ships as the default, always-attempted path in code. The actual W1 question
+  this bullet raises — whether Branch A *reliably* triggers on the Pixel 6a's own speaker/mic
+  geometry, per the "if W1's measurement finds it never reliably works, Branch A should be cut"
+  clause above — is still unmeasured on real hardware: `MeadowTrailTest.kt` only covers the
+  timeout arithmetic (JVM, no mic/speaker involved), and no on-device result is recorded
+  anywhere in the repo.
 - The send step (§ Step 5) always points at the art jar's practice firefly specifically. If the
   owner would rather it be "whichever jar you finish third" (order-dependent, since this trail
   is fixed-order that's moot today, but would matter if steps 1–3 ever become reorderable),
