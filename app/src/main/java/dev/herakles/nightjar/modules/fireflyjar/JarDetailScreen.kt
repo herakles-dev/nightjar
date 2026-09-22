@@ -104,6 +104,7 @@ import dev.herakles.nightjar.ui.theme.JarTextSecondary
 import dev.herakles.nightjar.ui.theme.JarTextTertiary
 import dev.herakles.nightjar.ui.theme.JarType
 import dev.herakles.nightjar.ui.theme.JarWatchingDim
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -773,6 +774,11 @@ private fun FireflyDetailContent(
     // composition, [keptCopy] once the operator actually taps it; both reset per [firefly.id].
     var showKeepCopy by remember(firefly.id) { mutableStateOf(false) }
     var keptCopy by remember(firefly.id) { mutableStateOf(false) }
+    // Review finding #1 (v6/review-fix): FireflyShare.prepareOutgoing is documented to throw
+    // IOException on a failed write -- this call site used to have no catch at all, so a real
+    // write failure (full disk, revoked storage permission) crashed the app instead of
+    // surfacing feedback. Resets per [firefly.id], same as the busy/keep-copy state above.
+    var sendErrorMessage by remember(firefly.id) { mutableStateOf<String?>(null) }
 
     // No JarNightSky here — JarDetailContent already has this composable inside one, and a
     // second backdrop would just run a duplicate starfield under the first.
@@ -925,6 +931,7 @@ private fun FireflyDetailContent(
                                 Modifier.clickable {
                                     coroutineScope.launch {
                                         sendBusy = true
+                                        sendErrorMessage = null
                                         try {
                                             val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
                                             if (bytes != null) {
@@ -935,6 +942,12 @@ private fun FireflyDetailContent(
                                                 onSendOpened()
                                                 showKeepCopy = true
                                             }
+                                        } catch (failure: IOException) {
+                                            // Review finding #1 (v6/review-fix): never let a
+                                            // failed write crash the app -- same "couldn't ...,
+                                            // try again" jar voice HideInPhotoFlow.kt's own send
+                                            // call already uses for the equivalent failure.
+                                            sendErrorMessage = context.getString(R.string.send_send_failed)
                                         } finally {
                                             sendBusy = false
                                         }
@@ -952,6 +965,9 @@ private fun FireflyDetailContent(
                         style = JarType.ButtonLabel,
                         color = if (sendBusy) JarTextTertiary else accent,
                     )
+                }
+                sendErrorMessage?.let {
+                    Text(text = it, style = JarType.Footer, color = JarTextTertiary)
                 }
                 if (showKeepCopy) {
                     Text(
