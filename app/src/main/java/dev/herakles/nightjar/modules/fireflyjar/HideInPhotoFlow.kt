@@ -133,7 +133,12 @@ fun HideInPhotoFlow(
     }
 
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        HideBackRow(onClick = onCancel)
+        // Review finding #4 (v6/review-fix): disabled while busy, matching every other control
+        // in this composable (the message field, both HideTechniqueRow tiles) -- a tap here
+        // after repository.insertWithMedia() has already persisted the record but before
+        // prepareOutgoing()/startActivity()/onSent() run would cancel this coroutine mid-flight,
+        // leaving a real CREATED firefly in the jar that was never actually shared.
+        HideBackRow(onClick = onCancel, enabled = !busy)
 
         Text(text = stringResource(R.string.send_message_label), style = JarType.SectionLabel, color = JarTextTertiary)
         BasicTextField(
@@ -254,12 +259,12 @@ fun HideInPhotoFlow(
 }
 
 @Composable
-private fun HideBackRow(onClick: () -> Unit) {
+private fun HideBackRow(onClick: () -> Unit, enabled: Boolean) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(36.dp)
-            .clickable(onClick = onClick),
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(text = "← ${stringResource(R.string.send_back)}", style = JarType.BackLink, color = JarTextSecondary)
