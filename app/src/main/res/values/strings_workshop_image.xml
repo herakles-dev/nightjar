@@ -26,7 +26,7 @@
          SturdyImageSteganalysisRealPhotoTest.kt: on real photos this check's flagged/clear
          reading tracks the photo's own JPEG pattern, not whether anything is hidden, and mostly
          stops flagging anything at all once a photo is actually sent. -->
-    <string name="workshop_image_check_caption_sturdy">this check hunts for exact\'s byte swaps, not sturdy\'s luma-cell shifts. on real photos it flags sturdy output about as often as an untouched photo, and after a real send it rarely flags either — flagged or clear here says little about sturdy.</string>
+    <string name="workshop_image_check_caption_sturdy">this check looks for exact\'s last-bit changes, not sturdy\'s brightness-cell shifts. in a small test on real photos it flagged sturdy output exactly as often as the same photos untouched, and after a real send it rarely flagged either, so flagged or clear here says little about sturdy.</string>
 
     <!-- Save/share: sturdy always writes a JPEG (Pictures/Nightjar, image/jpeg) so the hidden
          data survives; exact's own "saved to your photo gallery as PNG" string is unchanged. -->
