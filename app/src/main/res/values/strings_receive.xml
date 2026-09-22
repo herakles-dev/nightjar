@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v6 receive-outcome copy: covers the "five
+  outcomes" table and send/receive tone. All new receive-surface copy lives here per the doctrine "all v6 copy lives in
+  strings.xml"; res/values/strings.xml itself is left untouched by this task.
+
+  Jar voice throughout: lowercase, no exclamation, no emoji.
+  receive_squeezed_* (never guess): Squeezed only means the file arrived in a lossy
+  container and nothing decoded, so the copy states that known fact ("arrived compressed") and
+  keeps the firefly conditional ("if someone hid a firefly in it"). An ordinary photo or voice
+  note lands here too, and the copy must stay true for it.
+-->
+<resources>
+    <string name="receive_caught_title">you caught one</string>
+    <string name="receive_caught_body">%1$d bytes, hidden in %2$s.</string>
+    <string name="receive_caught_open_action">open %1$s</string>
+
+    <string name="receive_squeezed_title">no firefly came through</string>
+    <string name="receive_squeezed_image_body">this picture arrived compressed. if someone hid a firefly in it, the app it traveled through may have squeezed it away. ask them to send it as a file, or to use a sturdy firefly.</string>
+    <string name="receive_squeezed_audio_body">this recording arrived compressed, the way voice notes are. if someone hid a firefly in it, the compression may have squeezed it away. ask them to send it as a file or document.</string>
+
+    <string name="receive_damaged_title">damaged on the way</string>
+    <string name="receive_damaged_body">this one got damaged on the way over. ask whoever sent it to send it again.</string>
+
+    <string name="receive_no_firefly_title">no firefly here</string>
+    <string name="receive_no_firefly_body">no firefly hiding in this file.</string>
+
+    <string name="receive_unsupported_title">can\'t read this one</string>
+    <string name="receive_unsupported_body">nightjar doesn\'t know this kind of file.</string>
+
+    <string name="receive_too_large_title">too big for the jar</string>
+    <string name="receive_too_large_body">this one\'s too large for nightjar to check. ask them to send a smaller photo or a shorter recording.</string>
+
+    <string name="receive_out_of_space_title">no room to keep it</string>
+    <string name="receive_out_of_space_body">a firefly was in there, but there\'s no space left on the phone to keep it. free up some room and try again.</string>
+
+    <string name="receive_back_to_jar">back to the jar</string>
+    <string name="receive_catch_from_file_row">catch from a photo or file</string>
+</resources>

@@ -1,0 +1,2316 @@
+package dev.herakles.nightjar.modules.audiostego
+
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import dev.herakles.nightjar.AudioStegDetector
+import dev.herakles.nightjar.AudioStegoCarrier
+import dev.herakles.nightjar.AudioStegoTechnique
+import dev.herakles.nightjar.CovertCarrier
+import dev.herakles.nightjar.CovertDetector
+import dev.herakles.nightjar.DebugProbe
+import dev.herakles.nightjar.DecodeFailure
+import dev.herakles.nightjar.DecodeResult
+import dev.herakles.nightjar.DetectionResult
+import dev.herakles.nightjar.ModuleId
+import dev.herakles.nightjar.NightjarAcoustics
+import dev.herakles.nightjar.PcmAudio
+import dev.herakles.nightjar.R
+import dev.herakles.nightjar.WavFile
+import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.IncomingPipeline
+import dev.herakles.nightjar.modules.fireflyjar.FireflyPlayer
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
+import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.MAX_STORED_MESSAGE_CHARS
+import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.trail.PracticeFireflies
+import dev.herakles.nightjar.trail.TrailQuestLine
+import dev.herakles.nightjar.trail.TrailRewardLine
+import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
+import dev.herakles.nightjar.trail.trailHighlight
+import dev.herakles.nightjar.ui.theme.AccentSignal
+import dev.herakles.nightjar.ui.theme.BgBase
+import dev.herakles.nightjar.ui.theme.BorderDefault
+import dev.herakles.nightjar.ui.theme.FireflyCreated
+import dev.herakles.nightjar.ui.theme.FireflyReceived
+import dev.herakles.nightjar.ui.theme.JarActionCatchBorder
+import dev.herakles.nightjar.ui.theme.JarActionCatchFill
+import dev.herakles.nightjar.ui.theme.JarActionCheckBorder
+import dev.herakles.nightjar.ui.theme.JarActionCheckFill
+import dev.herakles.nightjar.ui.theme.JarActionLookBorder
+import dev.herakles.nightjar.ui.theme.JarActionLookFill
+import dev.herakles.nightjar.ui.theme.JarTextPrimary
+import dev.herakles.nightjar.ui.theme.JarTextSecondary
+import dev.herakles.nightjar.ui.theme.JarTextTertiary
+import dev.herakles.nightjar.ui.theme.JarTileFill
+import dev.herakles.nightjar.ui.theme.JarType
+import dev.herakles.nightjar.ui.theme.JarWatchingDim
+import dev.herakles.nightjar.ui.theme.TextPrimary
+import dev.herakles.nightjar.ui.theme.TextSecondary
+import dev.herakles.nightjar.ui.theme.workshopButton
+import dev.herakles.nightjar.ui.theme.WorkshopBackLink
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * Module 2 (audio steganography) real UI — the closest architectural analog is
+ * [dev.herakles.nightjar.modules.imagestego.ImageStegoScreen] ("Screen 4"): a carrier bound to a
+ * specific cover at construction time, not a live-transmission carrier like the acoustic modem.
+ * Written against the [CovertCarrier] interface only — zero references to the concrete
+ * `AudioStegoCarrier` class anywhere in this file, the same discipline every other module screen
+ * in this app already follows.
+ *
+ * Cover-bound-at-construction plus an operator-selectable *technique* is one more axis than
+ * [dev.herakles.nightjar.modules.imagestego.ImageStegoScreen] has to handle (that screen only
+ * switches cover image, never codec), so [carrierFactory] here takes both
+ * `(PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>` — still zero references to the
+ * concrete class, just one more factory parameter.
+ *
+ * No bundled audio assets exist anywhere in this app (no `res/raw/`, no `assets/`) — both sample
+ * cover clips are synthesized in-memory PCM via [synthesizeSampleCover]
+ * (`AudioStegoSampleCovers.kt`), matching how the rest of this app already treats [PcmAudio] as
+ * in-memory-only.
+ *
+ * Scope boundary (same one `AcousticModemScreen.kt`'s KDoc draws): [CovertCarrier] is a pure
+ * codec over in-memory buffers, not the audio transport. This screen owns the "play cover"/"play
+ * working" UX, delegating the actual `android.media.AudioTrack` construction/stop machinery to
+ * [FireflyPlayer] (Stage C lift, shared with the carrier detail screen) rather than keeping its
+ * own copy. One necessary departure: [AudioStegoTechnique.PHASE_INVERSION]'s `encode()` output is
+ * interleaved stereo (`AudioStegoCarrier`'s class KDoc), twice the mono cover's sample count —
+ * [AudioStegoController] tracks the working clip's channel count alongside its samples so "play
+ * working" can hand [FireflyPlayer] the correct channel count instead of assuming mono like the
+ * acoustic modem's own playback (which is always mono).
+ */
+
+/**
+ * The 8 states this screen's embed/extract/check cycle can be in, mirroring
+ * [dev.herakles.nightjar.modules.imagestego.StegoStatus]'s shape — this later
+ * addition adds [Analyzing]/[Analyzed], this module's own
+ * [AudioStegDetector] counterpart to that screen's `check for hidden data`.
+ */
+sealed interface AudioStegoStatus {
+    data object Idle : AudioStegoStatus
+    data object Embedding : AudioStegoStatus
+    data object Extracting : AudioStegoStatus
+    data object Analyzing : AudioStegoStatus
+    data class Embedded(val payloadBytes: Int) : AudioStegoStatus
+    data class ExtractedSuccess(val text: String) : AudioStegoStatus
+    data class ExtractedFailure(val reason: DecodeFailure, val detail: String?) : AudioStegoStatus
+    data class Analyzed(val result: DetectionResult) : AudioStegoStatus
+}
+
+/**
+ * Which clip is currently playing, if any — drives the playback row's "playing cover"/
+ * "playing working" label swap (UX pass: previously neither verb gave any feedback that
+ * anything was happening). Bare status-word convention, same as [StatusWord] — no waveform, no
+ * meter, no accent color, per this screen's approved non-goals.
+ */
+enum class PlaybackTarget { COVER, WORKING }
+
+/**
+ * Whether [AudioStegoController.saveToDevice]/[shareFromDevice]'s async
+ * MediaStore write is currently in flight, and which one — rendered as a bare status word under
+ * the action rows, the same "saving"/"sharing" busy-word convention
+ * [dev.herakles.nightjar.modules.acoustic.AcousticModemScreen]'s own save/share actions
+ * established (see that file's `fileActionBusyLabel` KDoc).
+ */
+enum class FileActionKind { SAVING, SHARING }
+
+/**
+ * Outcome of the most recently completed [AudioStegoController.saveToDevice]/[shareFromDevice]
+ * write — cleared back to `null` implicitly by a fresh [FileActionKind] busy label taking over
+ * the same display slot while the next write runs (mirrors the acoustic modem screen's
+ * `fileActionMessage` shape, split into a sealed result here instead of a raw string since this
+ * screen's new copy has to live in `strings_workshop_audio.xml`, not an inline literal).
+ */
+sealed interface FileActionResult {
+    data object Saved : FileActionResult
+    data object WriteFailed : FileActionResult
+}
+
+/**
+ * Outcome of [AudioStegoController.openRecording] — "open a recording" tries
+ * every [AudioStegoTechnique] against a picked WAV and reports which one (if any) matched, or
+ * that the picked file wasn't a WAV at all ([Compressed] — an m4a/ogg/opus/mp3/amr voice note
+ * arrived compressed and this screen never attempts to decode one, per the measured MFSK
+ * codec survival). Deliberately not folded into [AudioStegoStatus]: unlike `embed`/`extract`,
+ * this action tries three techniques and has its own honest "couldn't read this as audio at all"
+ * outcome that doesn't correspond to any existing [AudioStegoStatus] case, and keeping it out of
+ * that sealed interface means [dev.herakles.nightjar.modules.fireflyjar.JarDetailScreen]'s jar
+ * flow (which shares [AudioStegoStatus] but has no "open a recording" verb) never has to branch
+ * on states it can't produce.
+ */
+sealed interface OpenRecordingResult {
+    /** [technique] decoded [text] successfully out of the picked WAV. */
+    data class Matched(val technique: AudioStegoTechnique, val text: String) : OpenRecordingResult
+
+    /** The file was a real WAV, but none of the three techniques' headers matched it. */
+    data object NoMatch : OpenRecordingResult
+
+    /** Not a WAV — a compressed container (m4a/ogg/opus/mp3/amr, ...), never attempted. */
+    data object Compressed : OpenRecordingResult
+
+    /** Couldn't even read/parse the picked file as audio (I/O failure, or a WAV whose `fmt ` this
+     *  app's [WavFile.decodePcm16] can't parse). */
+    data object ReadFailed : OpenRecordingResult
+}
+
+/**
+ * Stateful root: owns the [AudioStegoController], the technique/cover selection, and the payload
+ * text field. [AudioStegoContent] below is the pure/previewable UI (no side effects, no
+ * `Context`, no audio synthesis/playback).
+ */
+@Composable
+fun AudioStegoScreen(
+    carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
+    detector: CovertDetector<WavFile.ParsedWav>,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val controller = remember(carrierFactory, detector) {
+        AudioStegoController(carrierFactory, detector, context.applicationContext)
+    }
+    DisposableEffect(controller) {
+        onDispose { controller.dispose() }
+    }
+
+    var technique by remember { mutableStateOf(AudioStegoTechnique.PHASE_INVERSION) }
+    var cover by remember { mutableStateOf(AudioSampleCover.SPOKEN_WORD) }
+    var payloadText by remember { mutableStateOf("") }
+
+    // Pure/deterministic synthesis (AudioStegoSampleCovers.kt) — safe to call directly from
+    // composition, same as ImageStegoScreen's BitmapFactory.decodeResource for its bundled
+    // sample covers.
+    val coverAudio = remember(cover) { synthesizeSampleCover(cover) }
+    val maxPayloadBytes = remember(coverAudio, technique) { controller.maxPayloadBytesFor(coverAudio, technique) }
+    // UX pass: capacity for EVERY technique against the current cover, so the technique rows can
+    // show "· NB" inline — comparing techniques no longer requires selecting each one first.
+    // Cheap: AudioStegoCarrier's maxPayloadBytes is O(1) arithmetic at construction, no FFT runs
+    // until encode()/decode() actually execute.
+    val techniqueCapacities = remember(coverAudio) {
+        AudioStegoTechnique.entries.associateWith { controller.maxPayloadBytesFor(coverAudio, it) }
+    }
+
+    // Switching EITHER selector (technique or cover clip) resets the working clip back to the
+    // newly-selected cover's raw samples and resets status to Idle — keyed on both, so either
+    // change alone re-fires this effect (mirrors ImageStegoScreen's single-key
+    // LaunchedEffect(coverBitmap), extended to this screen's second axis).
+    LaunchedEffect(coverAudio, technique) {
+        controller.selectCover(coverAudio)
+    }
+
+    // "open a recording" — Storage Access Framework pick, any audio/* mime,
+    // matching `AcousticModemScreen.kt`'s own import launcher exactly. No runtime permission
+    // needed; SAF grants read access to whatever the operator selects.
+    val openLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri != null) {
+            controller.openRecording(uri)
+        }
+    }
+
+    AudioStegoContent(
+        status = controller.status,
+        technique = technique,
+        onSelectTechnique = { technique = it },
+        techniqueCapacities = techniqueCapacities,
+        cover = cover,
+        onSelectCover = { cover = it },
+        payloadText = payloadText,
+        onPayloadTextChange = { payloadText = it },
+        maxPayloadBytes = maxPayloadBytes,
+        nowPlaying = controller.nowPlaying,
+        onPlayCover = { controller.playCover(coverAudio) },
+        onPlayWorking = { controller.playWorking() },
+        onEmbed = { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) },
+        onExtract = { controller.extract(technique) },
+        onCheck = { controller.analyze() },
+        canSaveOrShare = controller.hasEmbeddedContent,
+        onSave = { controller.saveToDevice() },
+        onShare = { controller.shareFromDevice() },
+        fileActionBusyLabel = controller.fileActionBusyLabel,
+        fileActionResult = controller.fileActionResult,
+        onOpenRecording = { openLauncher.launch(arrayOf("audio/*")) },
+        openBusy = controller.openBusy,
+        openResult = controller.openResult,
+        onBack = onBack,
+    )
+}
+
+/**
+ * The real jar-framed catch flow for [Module.AUDIO_STEGANOGRAPHY] ("the humming
+ * jar", [dev.herakles.nightjar.picker.JarRole.CREATION]). `JarCatchFlows.kt`'s `catchFlowFor`
+ * dispatcher calls this directly. Per design/screen-flow.md § Screen 7, this is "a
+ * themed skin over the exact same state machines and carrier calls Screens 2, 4, and 5 already
+ * define" — it re-presents [AudioStegoController]/[AudioStegoStatus], it does not reimplement
+ * them. [AudioStegoCarrier] itself is untouched.
+ *
+ * One departure from this file's top-of-file "zero references to the concrete
+ * [AudioStegoCarrier] class" discipline: that rule describes [AudioStegoScreen]/
+ * [AudioStegoContent], whose `carrierFactory` is injected from `MainActivity.kt`. The Firefly
+ * Jar dispatcher's stub signature (`jarCatchFlow(repository: FireflyRepository, onExit: () -> Unit)`,
+ * not touched by this task) has no factory-injection slot, so this composable builds its own
+ * [AudioStegoController] the same way `MainActivity.kt` builds the technical screen's one —
+ * `AudioStegoCarrier(cover, technique)` — just inlined here instead of at a call site.
+ *
+ * Deliberately narrower than [AudioStegoContent]: no A/B playback, no per-technique/per-cover
+ * info popouts, no cross-technique capacity comparison — none of those appear in
+ * screen-flow.md § Screen 7's diagram for this surface ("no extra fields needed" beyond the
+ * technique/cover selectors and the payload field), and this surface's whole point is a
+ * simpler, softer front door than the technical screen behind it.
+ *
+ * "create a firefly" (v6 verb rule) expands into the
+ * technique + cover selectors and the payload field inline;
+ * "look for fireflies" has no fields of its own and fires [AudioStegoController.extract]
+ * directly — same two-section shape screen-flow.md's diagram specifies. A successful catch/look
+ * inserts exactly one [FireflyRecord] into [repository] (`direction = "CREATED"`/`"RECEIVED"`) via a
+ * `LaunchedEffect` keyed on [AudioStegoController.status]: [AudioStegoController.embed]/
+ * [AudioStegoController.extract] are fire-and-forget from their own coroutine (they mutate
+ * `status`, no completion callback to hang the insert off directly), and each real transition
+ * into a terminal status is a genuinely new sealed-class instance (there's always an
+ * `Embedding`/`Extracting` step in between two terminal states), so the effect reliably fires
+ * once per completed action rather than only once per distinct value.
+ *
+ * v6 addition: a fourth row, "catch from a photo or file"
+ * (design/screen-flow.md's v6 "Receiving" section), opens the system document picker
+ * (`ActivityResultContracts.OpenDocument`, any audio MIME type -- this jar's own carrier is
+ * audio; no permission added) and routes the picked `Uri` through
+ * [IncomingPipeline.route] -- the same routing `MainActivity.kt` uses for a share-sheet/
+ * open-with `Intent`, never duplicated here. [onIncomingOutcome] hands the resulting
+ * [IncomingOutcome] back up to `MainActivity.kt` (via `JarDetailScreen`/`catchFlowFor`) to
+ * navigate to `Screen.Incoming`.
+ */
+@Composable
+fun jarCatchFlow(
+    repository: FireflyRepository,
+    trailStore: TrailStateStore,
+    onExit: () -> Unit,
+    onIncomingOutcome: (IncomingOutcome) -> Unit,
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val controller = remember {
+        AudioStegoController(
+            carrierFactory = { cover, technique -> AudioStegoCarrier(cover, technique) },
+            detector = AudioStegDetector(),
+            appContext = context.applicationContext,
+        )
+    }
+    DisposableEffect(controller) {
+        onDispose { controller.dispose() }
+    }
+
+    // v6: "catch from a photo or file". A null Uri means the operator
+    // backed out of the picker -- no-op, same as every other picker launcher in this app.
+    val catchFromFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                IncomingPipeline.route(context, uri, action = "PICKER")
+            }
+            onIncomingOutcome(outcome)
+        }
+    }
+
+    var technique by remember { mutableStateOf(AudioStegoTechnique.PHASE_INVERSION) }
+    var cover by remember { mutableStateOf(AudioSampleCover.SPOKEN_WORD) }
+    var payloadText by remember { mutableStateOf("") }
+    var catchExpanded by remember { mutableStateOf(false) }
+
+    // Riddle trail: while this jar's step is the
+    // active one, "look for fireflies" decodes the SPECTROGRAM_LSB practice carrier
+    // PracticeFireflies wrote, not whatever technique/cover the selector is currently showing.
+    // [pendingLookTechniqueOverride] carries the technique actually used for the decode -- and
+    // doubles as the "was this a practice catch" signal -- from dispatch time through to the
+    // ExtractedSuccess handler below, deliberately WITHOUT touching the `technique`/`cover`
+    // selector state vars themselves: changing either would retrigger the `LaunchedEffect
+    // (coverAudio, technique)` below and overwrite `controller.workingAudio` back to the selected
+    // sample cover before `extract()` ever runs. Reset on every dispatch (practice or not).
+    val trailState by trailStore.state.collectAsState()
+    val trailActive = trailState.currentStep == TrailStep.HUMMING
+    var pendingLookTechniqueOverride by remember { mutableStateOf<AudioStegoTechnique?>(null) }
+
+    // Shown once this screen session's own
+    // advance() call fires -- see ImageStegoScreen.kt's jarCatchFlow for the identical shape.
+    var humTrailRewardStep by remember { mutableStateOf<TrailStep?>(null) }
+
+    // S-02: the image jar flow's time-based debounce (ImageStegoScreen.kt's
+    // `debounceCatchDispatch`), ported here — this flow had no equivalent, so a double-tap
+    // delivery on "let it glow"/"look for fireflies" could still insert two fireflies even after
+    // the synchronous status-write fix above, exactly the gap that fix alone doesn't close (see
+    // ImageStegoScreen.kt's jarCatchFlow KDoc for the full "one slow double-click vs. two fast
+    // legitimate clicks" rationale -- identical reasoning applies to this screen's tiny synthetic
+    // covers). Rejects any second catch/look dispatch within 500ms of the last one, regardless of
+    // its origin.
+    var lastCatchDispatchAtMillis by remember { mutableStateOf(0L) }
+    fun debounceCatchDispatch(action: () -> Unit) {
+        val now = System.currentTimeMillis()
+        if (now - lastCatchDispatchAtMillis < 500L) return
+        lastCatchDispatchAtMillis = now
+        action()
+    }
+
+    val coverAudio = remember(cover) { synthesizeSampleCover(cover) }
+    val maxPayloadBytes = remember(coverAudio, technique) { controller.maxPayloadBytesFor(coverAudio, technique) }
+
+    // Same reset-on-selector-change behavior as AudioStegoScreen's own LaunchedEffect above.
+    LaunchedEffect(coverAudio, technique) {
+        controller.selectCover(coverAudio)
+    }
+
+    // Logs a firefly the moment the controller's own state machine lands on a terminal success —
+    // see this function's KDoc for why a status-keyed effect is the right hook point here.
+    //
+    // Captures controller.status into a local val ONCE per composition rather than re-reading
+    // controller.status inside the effect body, matching AcousticModemScreen.kt's jarCatchFlow.
+    // Re-reading the live property inside the coroutine let a fast decode() race
+    // ahead of Compose's recomposition scheduling: the Extracting-triggered effect body could
+    // observe status having already moved on to ExtractedSuccess and insert a firefly for it,
+    // then the genuine ExtractedSuccess-triggered relaunch inserted a second, identical row for
+    // the same completed extract (live-reproduced double insert, ids 8 & 9).
+    val fireflyStatus = controller.status
+
+    // Persist the carrier WAV alongside the FireflyRecord at both
+    // catch sites below, so a caught firefly keeps the actual audio the message was hidden in.
+    // Same `controller.workingAudio`/`controller.workingChannelCount` source "play working"
+    // already reads from. Mirrors ImageStegoScreen.kt's `jarCatchFlow` shape: a local
+    // suspend helper called from inside each existing transition-guarded arm, with the WAV
+    // encode pushed off the composition (Main) dispatcher via `withContext(Dispatchers.Default)`.
+    // Falls back to the existing media-less insert() when there's no audio to attach --
+    // `workingAudio` is a non-null `PcmAudio` that defaults to an empty `ShortArray`, so this
+    // guards with `isNotEmpty()` rather than a null check -- or when `workingChannelCount` is
+    // neither 1 nor 2. That second case is not currently reachable: `AudioStegoController` only
+    // ever sets `workingChannelCount` to 1 (`selectCover`, and `embed` for every technique except
+    // PHASE_INVERSION) or 2 (`embed` for PHASE_INVERSION). Guarded anyway rather than assumed, so
+    // a future technique with a different channel count degrades to a media-less insert instead
+    // of guessing an encoder.
+    suspend fun insertFireflyWithCarrier(record: FireflyRecord): Long {
+        val pcm = controller.workingAudio
+        val channelCount = controller.workingChannelCount
+        if (pcm.isEmpty() || (channelCount != 1 && channelCount != 2)) {
+            return repository.insert(record)
+        }
+        val wavBytes = withContext(Dispatchers.Default) {
+            if (channelCount == 2) {
+                WavFile.encodePcm16Stereo(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            } else {
+                WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            }
+        }
+        return repository.insertWithMedia(record.copy(carrierKind = "AUDIO"), wavBytes, "wav")
+    }
+
+    LaunchedEffect(fireflyStatus) {
+        // A peek writes no FireflyRecord -- isFireflyCatchEvent(fireflyStatus)
+        // is false for Analyzing/Analyzed, so this guard alone keeps them out of the insert
+        // below without an explicit Analyzed branch (see isFireflyCatchEvent's KDoc for why
+        // that predicate is factored out and unit-tested rather than left inline here).
+        if (!isFireflyCatchEvent(fireflyStatus)) return@LaunchedEffect
+        when (fireflyStatus) {
+            is AudioStegoStatus.Embedded -> insertFireflyWithCarrier(
+                FireflyRecord(
+                    moduleId = Module.AUDIO_STEGANOGRAPHY.name,
+                    direction = "CREATED",
+                    timestampMillis = System.currentTimeMillis(),
+                    payloadSizeBytes = fireflyStatus.payloadBytes,
+                    technique = technique.name,
+                    payloadPreview = payloadText.take(MAX_STORED_MESSAGE_CHARS),
+                ),
+            )
+            is AudioStegoStatus.ExtractedSuccess -> {
+                // controller.workingAudio/[workingChannelCount] are already the
+                // practice PCM by this point -- this jarCatchFlow's own onExtract dispatch below
+                // called controller.selectCover(practicePcm) then controller.extract(...)
+                // synchronously, and extract() captures `workingAudio` into a local before ever
+                // suspending (AudioStegoController.extract's own KDoc), so no later selector
+                // change can race it. [pendingLookTechniqueOverride] only needs to correct the
+                // *label* on the persisted record (the UI's own `technique` selector state was
+                // deliberately left untouched -- see this file's jarCatchFlow KDoc above) and to
+                // signal that this was a practice catch.
+                val practiceTechnique = pendingLookTechniqueOverride
+                val id = insertFireflyWithCarrier(
+                    FireflyRecord(
+                        moduleId = Module.AUDIO_STEGANOGRAPHY.name,
+                        direction = "RECEIVED",
+                        timestampMillis = System.currentTimeMillis(),
+                        payloadSizeBytes = fireflyStatus.text.encodeToByteArray().size,
+                        technique = (practiceTechnique ?: technique).name,
+                        payloadPreview = fireflyStatus.text.take(MAX_STORED_MESSAGE_CHARS),
+                    ),
+                )
+                if (practiceTechnique != null) {
+                    trailStore.markPractice(id)
+                    trailStore.advance(TrailStep.HUMMING)
+                    humTrailRewardStep = TrailStep.HUMMING
+                }
+                pendingLookTechniqueOverride = null
+            }
+            else -> Unit
+        }
+    }
+
+    JarAudioStegoCatchFlowContent(
+        status = controller.status,
+        catchExpanded = catchExpanded,
+        onToggleCatchExpanded = { catchExpanded = !catchExpanded },
+        technique = technique,
+        onSelectTechnique = { technique = it },
+        cover = cover,
+        onSelectCover = { cover = it },
+        payloadText = payloadText,
+        onPayloadTextChange = { payloadText = it },
+        maxPayloadBytes = maxPayloadBytes,
+        onEmbed = {
+            debounceCatchDispatch { controller.embed(coverAudio, technique, payloadText.encodeToByteArray()) }
+        },
+        onExtract = {
+            debounceCatchDispatch {
+                if (trailActive) {
+                    // Review finding #5 (v6/review-fix): the practice file's own read + decode
+                    // (File.readBytes + WavFile.decodePcm16) is real file I/O/CPU work -- run it
+                    // off the main thread, same discipline AcousticModemScreen.kt's SINGING trail
+                    // step already follows via its Dispatchers.IO-backed controller scope. Only
+                    // the decode moves; catch/advance/error behavior below is unchanged.
+                    coroutineScope.launch {
+                        val practicePcm = withContext(Dispatchers.IO) {
+                            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.HUMMING)
+                            if (practiceFile.exists()) WavFile.decodePcm16(practiceFile.readBytes()) else null
+                        }
+                        if (practicePcm != null) {
+                            pendingLookTechniqueOverride = AudioStegoTechnique.SPECTROGRAM_LSB
+                            controller.selectCover(practicePcm.samples)
+                            controller.extract(AudioStegoTechnique.SPECTROGRAM_LSB)
+                        } else {
+                            // Practice file not generated/readable yet -- degrade to the normal
+                            // decode rather than doing nothing; the trail step just doesn't complete.
+                            pendingLookTechniqueOverride = null
+                            controller.extract(technique)
+                        }
+                    }
+                } else {
+                    pendingLookTechniqueOverride = null
+                    controller.extract(technique)
+                }
+            }
+        },
+        onPeekInside = { controller.analyze() },
+        onCatchFromFile = { catchFromFileLauncher.launch(arrayOf("audio/*")) },
+        onExit = onExit,
+        lookForFirefliesHighlighted = trailActive,
+        trailQuestStep = if (trailActive) TrailStep.HUMMING else null,
+        trailRewardStep = humTrailRewardStep,
+    )
+}
+
+/**
+ * Whether [status] represents a genuine catch/reception event that should insert a
+ * [FireflyRecord] — true only for [AudioStegoStatus.Embedded]/[AudioStegoStatus.ExtractedSuccess],
+ * false for everything else including [AudioStegoStatus.Analyzing]/[AudioStegoStatus.Analyzed]
+ * (per the rule that "a check or peek writes no firefly"). Factored out of [jarCatchFlow]'s
+ * status-keyed `LaunchedEffect` as a plain, `internal` predicate purely so that contract is
+ * unit-testable without a Compose test harness (none exists in this project — see
+ * `AudioStegoScreenTest`), the same reasoning [downsampleFactor]
+ * ([dev.herakles.nightjar.modules.imagestego.ImageStegoScreen]) is pulled out of its composable.
+ */
+internal fun isFireflyCatchEvent(status: AudioStegoStatus): Boolean =
+    status is AudioStegoStatus.Embedded || status is AudioStegoStatus.ExtractedSuccess
+
+/**
+ * Pure/previewable jar-mode content — same stateful-root/pure-content split [AudioStegoContent]
+ * itself follows. Rendered directly inside `JarDetailContent`'s own padded, scrollable `Column`
+ * (`JarDetailScreen.kt`'s `moduleFlow` slot) alongside the firefly swarm and the "back to the
+ * shelf" row already provided there, so this content owns no outer padding, background, or top-
+ * level back affordance of its own — except a second, bottom-anchored "back to the shelf" link:
+ * the swarm plus an expanded catch section can scroll the real one out of view, and this flow's
+ * own [onExit] parameter exists precisely to give a way out that doesn't require scrolling back
+ * up.
+ */
+@Composable
+private fun JarAudioStegoCatchFlowContent(
+    status: AudioStegoStatus,
+    catchExpanded: Boolean,
+    onToggleCatchExpanded: () -> Unit,
+    technique: AudioStegoTechnique,
+    onSelectTechnique: (AudioStegoTechnique) -> Unit,
+    cover: AudioSampleCover,
+    onSelectCover: (AudioSampleCover) -> Unit,
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    maxPayloadBytes: Int,
+    onEmbed: () -> Unit,
+    onExtract: () -> Unit,
+    onPeekInside: () -> Unit,
+    onCatchFromFile: () -> Unit,
+    onExit: () -> Unit,
+    // True while this jar's trail step is the active one -- glows the
+    // "look for fireflies" row. Default keeps every existing @Preview call site compiling
+    // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
+    lookForFirefliesHighlighted: Boolean = false,
+    // Non-null while HUMMING is
+    // the trail's active step / once this session's own HUMMING completion has fired. Defaults
+    // keep every existing @Preview call site compiling unchanged.
+    trailQuestStep: TrailStep? = null,
+    trailRewardStep: TrailStep? = null,
+) {
+    val idleEquivalent = status is AudioStegoStatus.Idle ||
+        status is AudioStegoStatus.Embedded ||
+        status is AudioStegoStatus.ExtractedSuccess ||
+        status is AudioStegoStatus.ExtractedFailure ||
+        status is AudioStegoStatus.Analyzed
+    val payloadBytes = payloadText.encodeToByteArray().size
+    val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Above the catch/look rows below.
+        if (trailQuestStep != null) {
+            TrailQuestLine(trailQuestStep)
+        }
+        if (trailRewardStep != null) {
+            TrailRewardLine(trailRewardStep)
+        }
+        // DESIGN_SPEC.md §3: "6px between stacked action rows" — catch/look are the humming
+        // jar's two stacked rows (§5 1g); the status readout and back link are their own sections.
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column {
+                JarFlowRow(
+                    label = "create a firefly",
+                    enabled = idleEquivalent,
+                    fill = JarActionCatchFill,
+                    border = JarActionCatchBorder,
+                    onClick = onToggleCatchExpanded,
+                )
+                if (catchExpanded) {
+                    Column(
+                        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(text = "technique", style = JarType.SectionLabel, color = JarTextTertiary)
+                            AudioStegoTechnique.entries.forEach { option ->
+                                JarSelectorRow(
+                                    label = techniqueLabel(option),
+                                    selected = option == technique,
+                                    enabled = idleEquivalent,
+                                    onClick = { onSelectTechnique(option) },
+                                )
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(text = "cover clip", style = JarType.SectionLabel, color = JarTextTertiary)
+                            AudioSampleCover.entries.forEach { option ->
+                                JarSelectorRow(
+                                    label = option.label,
+                                    selected = option == cover,
+                                    enabled = idleEquivalent,
+                                    onClick = { onSelectCover(option) },
+                                )
+                            }
+                        }
+                        BasicTextField(
+                            value = payloadText,
+                            onValueChange = onPayloadTextChange,
+                            singleLine = true,
+                            textStyle = JarType.Body.copy(color = JarTextPrimary),
+                            cursorBrush = SolidColor(JarTextPrimary),
+                            enabled = idleEquivalent,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(JarTileFill)
+                                .border(width = 1.dp, color = JarActionCatchBorder, shape = RoundedCornerShape(8.dp))
+                                .padding(12.dp),
+                            decorationBox = { innerTextField ->
+                                if (payloadText.isEmpty()) {
+                                    Text(text = "what do you want to hide?", style = JarType.Body, color = JarTextTertiary)
+                                }
+                                innerTextField()
+                            },
+                        )
+                        Text(
+                            // codec-H02: a cover/technique combo too small to hold even an empty
+                            // frame gets its own line rather than a bare `0 / 0 bytes` counter.
+                            text = when {
+                                maxPayloadBytes <= 0 -> "too small to hide anything in this jar"
+                                payloadBytes > maxPayloadBytes ->
+                                    "too big for this jar — trim it or try a different light"
+                                else -> "$payloadBytes / $maxPayloadBytes bytes"
+                            },
+                            style = JarType.TileCaption,
+                            color = JarTextTertiary,
+                        )
+                        // A primary confirm action, not another list row — 12dp per
+                        // DESIGN_SPEC.md §3's "12px (primary buttons...)" radius tier.
+                        JarFlowRow(
+                            label = "let it glow",
+                            enabled = canEmbed,
+                            fill = JarActionCatchFill,
+                            border = JarActionCatchBorder,
+                            onClick = onEmbed,
+                            radius = 12.dp,
+                        )
+                    }
+                }
+            }
+
+            JarFlowRow(
+                label = "look for fireflies",
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onExtract,
+                highlighted = lookForFirefliesHighlighted,
+            )
+            JarFlowRow(
+                label = "peek inside",
+                enabled = idleEquivalent,
+                fill = JarActionCheckFill,
+                border = JarActionCheckBorder,
+                onClick = onPeekInside,
+            )
+            // v6: "catch from a photo or file" -- last in the action group,
+            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint, same as "look for
+            // fireflies" -- this row can land a firefly in ANY jar, not necessarily this one.
+            JarFlowRow(
+                label = stringResource(R.string.receive_catch_from_file_row),
+                enabled = idleEquivalent,
+                fill = JarActionLookFill,
+                border = JarActionLookBorder,
+                onClick = onCatchFromFile,
+            )
+        }
+
+        JarStatusBlock(status = status)
+
+        Text(
+            text = "← back to the shelf",
+            style = JarType.BackLink,
+            color = JarTextSecondary,
+            modifier = Modifier
+                .clickable(onClick = onExit)
+                .padding(top = 4.dp),
+        )
+    }
+}
+
+/** Tinted, rounded jar-mode verb row — [JarFlowRow] is this flow's own thing, not
+ *  [ActionRow]/[SelectorRowWithInfo], since the jar surface's palette is
+ *  [JarTextPrimary]/[JarTextSecondary], not
+ *  [TextPrimary]/[TextSecondary], and this flow has no per-row info toggle. Gold for "create",
+ *  cyan for "look" (DESIGN_SPEC.md §1's card/row tint table); [radius] defaults to the 8dp
+ *  action-row tier, with the inline "let it glow" confirm button passing 12dp instead. */
+@Composable
+private fun JarFlowRow(
+    label: String,
+    enabled: Boolean,
+    fill: Color,
+    border: Color,
+    onClick: () -> Unit,
+    radius: Dp = 8.dp,
+    // Glows this row as the trail's current target (trail/TrailHighlight.kt) -- a no-op
+    // Modifier when false, so every existing call site keeps its default styling untouched.
+    highlighted: Boolean = false,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(radius))
+            .background(fill)
+            .border(width = 1.dp, color = border, shape = RoundedCornerShape(radius))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .trailHighlight(active = highlighted, description = label)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = JarType.TileTitle,
+            color = if (enabled) JarTextPrimary else JarTextTertiary,
+        )
+    }
+}
+
+/** One selectable technique/cover-clip row inside the expanded "create a firefly" section — no
+ *  info toggle (unlike [SelectorRowWithInfo]), matching this jar-mode flow's simpler field set.
+ *  Plain row, not a chip pill: DESIGN_SPEC.md §5 1g's technique chips are a horizontal group,
+ *  but re-laying this out as one would rearrange the existing vertical list, not just restyle it
+ *  — selected/unselected color follows the chip convention (gold chosen, tertiary otherwise)
+ *  without the chip's own fill/border/shape. */
+@Composable
+private fun JarSelectorRow(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = JarType.TileTitle,
+            color = if (selected) FireflyCreated else JarTextTertiary,
+        )
+    }
+}
+
+@Composable
+private fun JarStatusBlock(status: AudioStegoStatus) {
+    when (status) {
+        is AudioStegoStatus.Idle -> Unit
+        is AudioStegoStatus.Embedding -> Text(text = "creating", style = JarType.Footer, color = JarWatchingDim)
+        is AudioStegoStatus.Extracting -> Text(text = "looking", style = JarType.Footer, color = JarWatchingDim)
+        is AudioStegoStatus.Analyzing -> Text(text = "peeking", style = JarType.Footer, color = JarWatchingDim)
+        is AudioStegoStatus.Analyzed -> JarAudioAnalyzedBlock(result = status.result)
+        is AudioStegoStatus.Embedded -> {
+            val plural = if (status.payloadBytes == 1) "" else "s"
+            Text(
+                text = "you created one — ${status.payloadBytes} byte$plural",
+                // DESIGN_SPEC.md §2's "Result label" role (8sp/0.5sp tracking) — a short
+                // accented announcement, not the message body itself.
+                style = JarType.SectionLabel,
+                // FireflyCreated fires on every
+                // successful catch on this surface, unlike the usual "silence is success" rule.
+                color = FireflyCreated,
+            )
+        }
+        is AudioStegoStatus.ExtractedSuccess -> Text(
+            text = status.text,
+            // DESIGN_SPEC.md §2's "Message/body text" role — cream, not the FireflyReceived
+            // accent; only a short result label above a real message takes the accent color.
+            style = JarType.Body,
+            color = JarTextPrimary,
+        )
+        is AudioStegoStatus.ExtractedFailure -> Text(
+            text = jarExtractFailureMessage(status.reason),
+            style = JarType.Body,
+            color = JarTextSecondary,
+        )
+    }
+}
+
+/** "peek inside"'s readout — same shape as the framed jar's `JarAnalyzedBlock`
+ *  ([dev.herakles.nightjar.modules.imagestego.ImageStegoScreen]): confidence percentage,
+ *  flagged/clear word, and the byte estimate when one exists ("about N bytes, near as we can
+ *  tell" — [AudioStegDetector]'s measured ±4-byte worst case). One
+ *  addition the framed jar's block doesn't carry: [JAR_PEEK_CAVEAT], the
+ *  honesty line for this jar — this detector's blind posture only knows the app's own
+ *  three techniques, so "all quiet" never means "nothing hidden." */
+@Composable
+private fun JarAudioAnalyzedBlock(result: DetectionResult) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "${(result.confidence * 100).roundToInt()}%",
+            style = JarType.Numeral,
+            color = JarTextPrimary,
+        )
+        Text(
+            text = if (result.flagged) "something's out there" else "all quiet",
+            style = JarType.TileTitle,
+            color = if (result.flagged) FireflyReceived else JarTextPrimary,
+        )
+        result.estimatedPayloadBytes?.let { bytes ->
+            Text(
+                text = "about $bytes bytes, near as we can tell",
+                style = JarType.TileCaption,
+                color = JarTextTertiary,
+            )
+        }
+        Text(
+            text = JAR_PEEK_CAVEAT,
+            style = JarType.TileCaption,
+            color = JarTextTertiary,
+        )
+    }
+}
+
+/** Jar-mode copy mapping for [DecodeFailure] — exact strings from design/screen-flow.md § Screen
+ *  7's "Copy mapping" table, distinct from [extractFailureMessage]'s technical-screen wording. */
+private fun jarExtractFailureMessage(reason: DecodeFailure): String = when (reason) {
+    DecodeFailure.NO_PAYLOAD_FOUND -> "nothing's glowing in here right now."
+    DecodeFailure.HEADER_INVALID -> "that light doesn't look right — probably not one of yours."
+    DecodeFailure.PAYLOAD_TOO_LARGE -> "too big to fit in the jar."
+    DecodeFailure.UNRECOVERABLE_FEC -> "the light faded before it got here."
+    DecodeFailure.INTEGRITY_MISMATCH -> "it flickered wrong on the way — the message got scrambled."
+}
+
+/**
+ * Pure UI: no side effects, no synthesis, no playback. Dense single column, no cards, no icons.
+ * No [dev.herakles.nightjar.ui.theme.AccentSignal] anywhere on this screen — this screen's own
+ * approved design explicitly opts out even for the playback moments (see design/screen-flow.md
+ * "Screen 5"), unlike the acoustic modem's `transmitting`/`listening` accent treatment.
+ */
+@Composable
+fun AudioStegoContent(
+    status: AudioStegoStatus,
+    technique: AudioStegoTechnique,
+    onSelectTechnique: (AudioStegoTechnique) -> Unit,
+    techniqueCapacities: Map<AudioStegoTechnique, Int>,
+    cover: AudioSampleCover,
+    onSelectCover: (AudioSampleCover) -> Unit,
+    payloadText: String,
+    onPayloadTextChange: (String) -> Unit,
+    maxPayloadBytes: Int,
+    nowPlaying: PlaybackTarget?,
+    onPlayCover: () -> Unit,
+    onPlayWorking: () -> Unit,
+    onEmbed: () -> Unit,
+    onExtract: () -> Unit,
+    onCheck: () -> Unit,
+    canSaveOrShare: Boolean,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    fileActionBusyLabel: FileActionKind?,
+    fileActionResult: FileActionResult?,
+    onOpenRecording: () -> Unit,
+    openBusy: Boolean,
+    openResult: OpenRecordingResult?,
+    onBack: () -> Unit,
+) {
+    val idleEquivalent = status is AudioStegoStatus.Idle ||
+        status is AudioStegoStatus.Embedded ||
+        status is AudioStegoStatus.ExtractedSuccess ||
+        status is AudioStegoStatus.ExtractedFailure ||
+        status is AudioStegoStatus.Analyzed
+    val payloadBytes = payloadText.encodeToByteArray().size
+    val canEmbed = idleEquivalent && payloadText.isNotEmpty() && payloadBytes <= maxPayloadBytes
+
+    // Design pass: "info popouts for learning" -- this app exists to teach these techniques, so
+    // explaining WHY each one works (not just letting the user click through blind) is core to
+    // the point, not decoration. Local, purely-presentational UI state (no business logic, no
+    // Context) -- doesn't need to be hoisted to the stateful root, same reasoning `remember`
+    // already gets used for elsewhere in genuinely-pure composables. Accordion (one open at a
+    // time) so the screen doesn't grow into a wall of text if someone taps through all of them.
+    var expandedInfo by remember { mutableStateOf<InfoKey?>(null) }
+    fun toggleInfo(key: InfoKey) {
+        expandedInfo = if (expandedInfo == key) null else key
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .padding(top = 56.dp, start = 24.dp, end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "audio steganography",
+                    style = MaterialTheme.typography.displayLarge,
+                    color = TextPrimary,
+                )
+                Text(
+                    text = audioStegoTagline(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionLabelRow(
+                    label = "technique",
+                    infoLabel = "what's the tradeoff?",
+                    infoExpanded = expandedInfo == InfoKey.Tradeoff,
+                    onToggleInfo = { toggleInfo(InfoKey.Tradeoff) },
+                )
+                if (expandedInfo == InfoKey.Tradeoff) {
+                    InfoText(tradeoffExplainer())
+                }
+                AudioStegoTechnique.entries.forEach { option ->
+                    val capacity = techniqueCapacities[option]
+                    val infoKey = InfoKey.Technique(option)
+                    SelectorRowWithInfo(
+                        // Inline capacity (UX pass) -- comparing techniques no longer requires
+                        // selecting each one first to see its byte counter.
+                        label = if (capacity != null) "${techniqueLabel(option)} · ${capacity}B" else techniqueLabel(option),
+                        selected = option == technique,
+                        enabled = idleEquivalent,
+                        onClick = { onSelectTechnique(option) },
+                        infoExpanded = expandedInfo == infoKey,
+                        onToggleInfo = { toggleInfo(infoKey) },
+                    )
+                    if (expandedInfo == infoKey) {
+                        InfoText(techniqueExplainer(option))
+                    }
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "cover clip",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = TextSecondary,
+                )
+                AudioSampleCover.entries.forEach { option ->
+                    val infoKey = InfoKey.Cover(option)
+                    SelectorRowWithInfo(
+                        label = option.label,
+                        selected = option == cover,
+                        enabled = idleEquivalent,
+                        onClick = { onSelectCover(option) },
+                        infoExpanded = expandedInfo == infoKey,
+                        onToggleInfo = { toggleInfo(infoKey) },
+                    )
+                    if (expandedInfo == infoKey) {
+                        InfoText(coverExplainer(option))
+                    }
+                }
+            }
+
+            // A/B listening test: lets the operator compare cover vs. working directly instead
+            // of taking fidelity on faith -- the owner's own headphone pass found this is NOT
+            // always "sounds unchanged" (see audioStegoTagline()'s KDoc).
+            // Available in any idle-equivalent state; never changes `status`.
+            PlaybackRow(
+                enabled = idleEquivalent,
+                nowPlaying = nowPlaying,
+                onPlayCover = onPlayCover,
+                onPlayWorking = onPlayWorking,
+            )
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "payload",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = TextSecondary,
+                )
+                BasicTextField(
+                    value = payloadText,
+                    onValueChange = onPayloadTextChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = TextPrimary),
+                    cursorBrush = SolidColor(TextPrimary),
+                    enabled = idleEquivalent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(width = 1.dp, color = BorderDefault)
+                        .padding(12.dp),
+                    decorationBox = { innerTextField ->
+                        if (payloadText.isEmpty()) {
+                            Text(
+                                text = "text to hide",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = TextSecondary,
+                            )
+                        }
+                        innerTextField()
+                    },
+                )
+                Text(
+                    // UX pass: over-capacity previously just silently grayed out "embed" with no
+                    // explanation -- now the counter itself says why. codec-H02: maxPayloadBytes
+                    // == 0 can mean "this cover/technique combo can't hold a frame at all"
+                    // (AudioStegoCarrier.canEmbed == false), not just "trimmed to zero" -- a
+                    // distinct message rather than a bare `0 / 0 bytes` that reads as a typo.
+                    text = when {
+                        maxPayloadBytes <= 0 -> "this cover is too small to hide anything"
+                        payloadBytes > maxPayloadBytes ->
+                            "$payloadBytes / $maxPayloadBytes bytes — " +
+                                "${payloadBytes - maxPayloadBytes} over, trim it or switch technique"
+                        else -> "$payloadBytes / $maxPayloadBytes bytes"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+
+            // 3 clusters via spacing alone (12dp between, 0dp within), same
+            // grouping discipline `AcousticModemScreen.kt`'s own action rows use — embed alone;
+            // save+share (both act on the current stego working clip); open+extract+check (all
+            // three read a carrier rather than write one, "open a recording" being an alternative
+            // input source to the working clip "extract"/"check" already operate on).
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column {
+                    Text(
+                        text = "embed hides text in the clip, extract reads it back, " +
+                            "check looks for hidden data without reading it",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    ActionRow(label = "embed", enabled = canEmbed, onClick = onEmbed)
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // "save"/"share" write the current working clip (after a successful
+                    // embed) to Music/Nightjar via MediaStore, matching
+                    // AcousticModemScreen.kt's own save/share behaviour and styling. Gated on
+                    // canSaveOrShare (idle-equivalent AND an embed has actually produced a stego
+                    // clip this session) rather than idleEquivalent alone — otherwise these rows
+                    // would happily save the pristine, nothing-hidden cover and call it a "stego
+                    // WAV," which isn't true until embed() has run.
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_save),
+                        enabled = canSaveOrShare,
+                        onClick = onSave,
+                    )
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_share),
+                        enabled = canSaveOrShare,
+                        onClick = onShare,
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // "open a recording" picks an existing WAV via the Storage Access
+                    // Framework and tries all three techniques against it, naming which matched —
+                    // an alternative to "extract"'s single-selected-technique read of the working
+                    // clip. Gated on idleEquivalent alone, same as "extract"/"check" (no payload
+                    // field to also validate).
+                    ActionRow(
+                        label = stringResource(R.string.workshop_audio_action_open),
+                        enabled = idleEquivalent,
+                        onClick = onOpenRecording,
+                    )
+                    ActionRow(label = "extract", enabled = idleEquivalent, onClick = onExtract)
+                    ActionRow(label = "check for hidden data", enabled = idleEquivalent, onClick = onCheck)
+                }
+            }
+
+            // Last save/share outcome ("saved to Music/Nightjar", "save failed", ...),
+            // null until the first save/share action runs. While a write is actually in flight,
+            // [fileActionBusyLabel] ("saving"/"sharing") takes this same spot instead — same
+            // labelSmall/TextSecondary vocabulary AcousticModemScreen.kt's own fileActionMessage/
+            // fileActionBusyLabel pair uses.
+            if (fileActionBusyLabel != null) {
+                Text(
+                    text = when (fileActionBusyLabel) {
+                        FileActionKind.SAVING -> stringResource(R.string.workshop_audio_busy_saving)
+                        FileActionKind.SHARING -> stringResource(R.string.workshop_audio_busy_sharing)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            } else if (fileActionResult != null) {
+                Text(
+                    text = when (fileActionResult) {
+                        FileActionResult.Saved -> stringResource(R.string.workshop_audio_saved)
+                        FileActionResult.WriteFailed -> stringResource(R.string.workshop_audio_save_failed)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+
+            // "open a recording"'s outcome — bodyLarge/TextPrimary-or-TextSecondary,
+            // matching how a decoded payload is weighted everywhere else on this screen
+            // (ExtractedSuccess/ExtractedFailure in StatusBlock below), since this is structurally
+            // an "extract, but against a picked file instead of the working clip" result.
+            if (openBusy) {
+                StatusWord(stringResource(R.string.workshop_audio_busy_opening))
+            } else if (openResult != null) {
+                OpenRecordingBlock(result = openResult)
+            }
+
+            StatusBlock(status = status)
+        }
+
+        WorkshopBackLink(onBack)
+    }
+}
+
+/**
+ * One selectable technique/cover-clip row — 40dp tap target, matches `ImageStegoScreen.kt`'s
+ * `CoverRow` / `AcousticModemScreen.kt`'s `SettingOptionRow` styling, plus a separate trailing
+ * "?"/"close" info toggle (design pass — independent tap target from row selection, so learning
+ * about a technique never requires switching to it first).
+ */
+@Composable
+private fun SelectorRowWithInfo(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    infoExpanded: Boolean,
+    onToggleInfo: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .workshopButton(enabled = enabled, filled = selected, onClick = onClick),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (selected) TextPrimary else TextSecondary,
+            )
+        }
+        // Compact, outline-only -- a "?"/"close" toggle stretched to the main selector's own
+        // padding would look absurd; a small visible gap (8dp) keeps the two button shapes from
+        // reading as one touching block.
+        Box(
+            modifier = Modifier
+                .padding(start = 8.dp)
+                .workshopButton(filled = false, compact = true, onClick = onToggleInfo),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (infoExpanded) "close" else "?",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+    }
+}
+
+/**
+ * Section label ("technique") plus a trailing info toggle — same row-level split as
+ * [SelectorRowWithInfo], for a section-wide explainer rather than a per-option one. The toggle
+ * gets a real 40dp touch target (not just the text glyphs' own tight bounds) — a bare
+ * `Modifier.clickable` directly on a `labelSmall` `Text` measured out too small to hit reliably
+ * (caught by an actual missed tap during on-device verification, not a style guess).
+ */
+@Composable
+private fun SectionLabelRow(label: String, infoLabel: String, infoExpanded: Boolean, onToggleInfo: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Static section label -- stays plain text, no chrome. Only the info toggle below is
+        // tappable.
+        Text(text = label, style = MaterialTheme.typography.labelLarge, color = TextSecondary)
+        Box(
+            modifier = Modifier.workshopButton(filled = false, compact = true, onClick = onToggleInfo),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (infoExpanded) "close" else infoLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+    }
+}
+
+/** Expanded info-popout body text — indented slightly to read as nested under its parent row/
+ *  section, `labelSmall`/`TextSecondary` like every other explanatory caption on this screen
+ *  (the intro line, the byte counter) — no new color, no card, no background fill. */
+@Composable
+private fun InfoText(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelSmall,
+        color = TextSecondary,
+        modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 6.dp, end = 8.dp),
+    )
+}
+
+/** Which info popout (at most one) is currently expanded — see [AudioStegoContent]'s `expandedInfo`. */
+private sealed interface InfoKey {
+    data object Tradeoff : InfoKey
+    data class Technique(val technique: AudioStegoTechnique) : InfoKey
+    data class Cover(val cover: AudioSampleCover) : InfoKey
+}
+
+/**
+ * The fidelity/capacity/survivability tradeoff every technique on this screen sits somewhere on —
+ * straight from the steganography literature (which frames it as a triangle where "at most two
+ * can be maximized at once"), not invented for this UI.
+ */
+private fun tradeoffExplainer(): String =
+    "Every technique trades off three things: how natural the clip still sounds (fidelity), how " +
+        "much you can hide (capacity), and how well it survives being re-compressed or corrupted " +
+        "(survivability). At most two of the three, ever."
+
+/**
+ * Plain-language explanation of what each technique is actually doing — grounded in
+ * [dev.herakles.nightjar.AudioStegoCarrier]'s own class KDoc, simplified for a reader who
+ * doesn't already know DSP. Each closing sentence now states
+ * this technique's *real*, owner-verified audibility (Pixel 6a, headphones) instead of the prior
+ * copy's blanket "sounds unchanged" claim, which was true for spectrogram-LSB but false for the
+ * other two. `internal` so [AudioStegoScreenTest] can assert each string actually says so.
+ *
+ * Capacity claims below are checked against [dev.herakles.nightjar.AudioStegoCarrier]'s real
+ * `maxPayloadBytes` for the bundled 5s covers, not asserted from memory (on `SPOKEN_WORD`,
+ * current as of the v6 near-silent-frame-skip + phase-coding follow-ups): PHASE_CODING = 18B,
+ * MFSK = 37B, PHASE_INVERSION = 51B, SPECTROGRAM_LSB = 368B ([AudioStegoScreenTest]'s
+ * `phaseCodingHasTheLowestCapacityOfTheFourTechniques` /
+ * `mfskHasTheLowestCapacityOfTheThreeTechniques`) — PHASE_CODING is the *lowest*-capacity
+ * technique now, not MFSK (true when this file was first written, for the original three).
+ * SPECTROGRAM_LSB's own number dropped from an originally-measured 457B once its near-silent
+ * frames stopped being embedded into (`AudioStegoCarrier`'s own "near-silent-frame skip (v2)"
+ * section) -- a real, expected reduction, not drift to chase back to the old figure.
+ */
+internal fun techniqueExplainer(technique: AudioStegoTechnique): String = when (technique) {
+    AudioStegoTechnique.PHASE_INVERSION ->
+        "Splits the clip into two channels: one is the original cover, the other an inverted " +
+            "copy with your message mixed in as a barely-there signal. On headphones it's " +
+            "clearly audible as a difference from the cover — wider and more hollow — though " +
+            "harder to tell apart on a phone speaker. Summing the channels to mono cancels the " +
+            "cover and the message alike, which is also why it's fragile. Simple to reason " +
+            "about, modest capacity."
+    AudioStegoTechnique.SPECTROGRAM_LSB ->
+        "Converts the clip into its frequency-domain representation (a spectrogram) and nudges " +
+            "specific frequency bins by tiny, controlled amounts to encode your message — the " +
+            "same principle Module 1 uses for images, just applied to sound frequencies instead " +
+            "of pixels. Near-transparent on headphones: indistinguishable from the cover on " +
+            "spoken-word audio, with only a faint crackle in the soft-synth cover's near-silent " +
+            "fade-in. Every frame contributes several bits instead of one, so capacity is far " +
+            "higher than the other two."
+    AudioStegoTechnique.MFSK ->
+        "Encodes your message as a sequence of tones layered on top of the cover clip, then " +
+            "wraps the whole thing in real error-correcting math (Reed-Solomon — the same family " +
+            "of code behind QR codes and CDs). The tones sit near the top of hearing (about " +
+            "19.7-20 kHz) and are audible to most listeners as a faint high tone. Fixed capacity, " +
+            "lower than phase-inversion or spectrogram-LSB — only phase-coding fits less — but " +
+            "built to recover the message even if part of the clip gets corrupted or noisy."
+    AudioStegoTechnique.PHASE_CODING ->
+        "Splits the clip into short segments and hides your message by directly overwriting the " +
+            "phase of a few low frequencies in one segment out of every four — a genuine " +
+            "phase-coding technique from the published research, not another version of the " +
+            "phase-inversion trick above. Confirmed on real headphones: clean and effectively " +
+            "inaudible on the noise-like spoken-word cover, but an audible gurgle/warble on the " +
+            "tonal soft-synth cover — the forced phase reset every fourth segment lands against " +
+            "that cover's own coherent tone, even at a bin chosen to dodge its fundamental and " +
+            "harmonics. Broadband covers mask it; tonal covers don't. Lowest capacity of the " +
+            "four by design: most of every clip only exists so the phase change doesn't snap " +
+            "abruptly, not to carry bits."
+}
+
+/** Plain-language explanation of what a sample cover clip actually is — grounded in
+ *  `AudioStegoSampleCovers.kt`'s own KDoc (both clips are synthesized, never bundled/recorded
+ *  audio; this popout is where that honesty-about-synthetic-content fact reaches the user, not
+ *  just source comments). */
+private fun coverExplainer(cover: AudioSampleCover): String = when (cover) {
+    AudioSampleCover.SPOKEN_WORD ->
+        "A synthesized approximation of speech — amplitude-modulated noise shaped into " +
+            "speech-like syllable bursts. This app has no real recordings bundled in, so this is " +
+            "a stand-in with speech-like texture, not an actual voice."
+    AudioSampleCover.SOFT_SYNTH ->
+        "A synthesized pad tone — a few sine waves layered together with a slow fade in and " +
+            "out, meant to sound like a simple ambient synth note."
+}
+
+/** 48dp verb button — matches `ImageStegoScreen.kt`'s `ActionRow` exactly (no icon, no fill). */
+@Composable
+private fun ActionRow(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .workshopButton(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (enabled) TextPrimary else TextSecondary,
+        )
+    }
+}
+
+/**
+ * "play cover" / "play working" side by side (wireframe: `play cover        play working`) — two
+ * 48dp-tall verbs sharing one row, unlike every other verb on this screen (which is full-width).
+ * No waveform/scrubber/level-meter, per the approved design's explicit non-goals — but the label
+ * itself swaps to "playing cover"/"playing working" while [nowPlaying] matches (UX pass: neither
+ * verb previously gave ANY feedback that a tap had done anything). Same bare-status-word
+ * convention [StatusWord] already uses elsewhere on this screen, not a new pattern.
+ */
+@Composable
+private fun PlaybackRow(
+    enabled: Boolean,
+    nowPlaying: PlaybackTarget?,
+    onPlayCover: () -> Unit,
+    onPlayWorking: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(32.dp),
+    ) {
+        PlaybackVerb(
+            label = if (nowPlaying == PlaybackTarget.COVER) "playing cover" else "play cover",
+            enabled = enabled,
+            onClick = onPlayCover,
+        )
+        PlaybackVerb(
+            label = if (nowPlaying == PlaybackTarget.WORKING) "playing working" else "play working",
+            enabled = enabled,
+            onClick = onPlayWorking,
+        )
+    }
+}
+
+@Composable
+private fun PlaybackVerb(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier.workshopButton(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (enabled) TextPrimary else TextSecondary,
+        )
+    }
+}
+
+/**
+ * Display copy for [AudioStegoTechnique]. Kept local to this screen — not codec state.
+ *
+ * Fix: MFSK previously read "mfsk (robust)" here. Measured against real codecs,
+ * MFSK round-trips AAC-LC >= 128 kbps and MP3 128 kbps but fails after Opus 16-64 kbps and
+ * AAC 64-96 kbps — narrower than "robust" implies, and not something a five-word row label can
+ * state honestly in-line. The qualifier is dropped rather than replaced with a shorter, still-
+ * misleading one; [techniqueExplainer]'s own "?" popout is where the real, measured tradeoff
+ * lives, matching [AudioStegDetector]'s own bare `"mfsk"` label (no qualifier there either).
+ */
+private fun techniqueLabel(technique: AudioStegoTechnique): String = when (technique) {
+    AudioStegoTechnique.PHASE_INVERSION -> "phase inversion"
+    AudioStegoTechnique.SPECTROGRAM_LSB -> "spectrogram lsb"
+    AudioStegoTechnique.MFSK -> "mfsk"
+    AudioStegoTechnique.PHASE_CODING -> "phase coding"
+}
+
+@Composable
+private fun StatusBlock(status: AudioStegoStatus) {
+    when (status) {
+        is AudioStegoStatus.Idle -> Unit // nothing running, nothing to report
+        is AudioStegoStatus.Embedding -> StatusWord("embedding")
+        is AudioStegoStatus.Extracting -> StatusWord("extracting")
+        is AudioStegoStatus.Analyzing -> StatusWord("analyzing")
+        is AudioStegoStatus.Analyzed -> AnalyzedBlock(result = status.result)
+        is AudioStegoStatus.Embedded -> {
+            val plural = if (status.payloadBytes == 1) "" else "s"
+            Text(
+                text = "embedded ${status.payloadBytes} byte$plural into the working clip",
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextPrimary,
+            )
+        }
+        is AudioStegoStatus.ExtractedSuccess -> Text(
+            text = status.text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextPrimary,
+        )
+        is AudioStegoStatus.ExtractedFailure -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = extractFailureMessage(status.reason),
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextSecondary,
+            )
+            // The "one rough edge per shipping screen" rule — the raw codec detail string,
+            // not just the mapped human copy above (mirrors ImageStegoScreen's AnalyzedBlock
+            // surfacing DetectionResult.detail verbatim).
+            status.detail?.let { detail ->
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusWord(word: String) {
+    Text(
+        text = word,
+        style = MaterialTheme.typography.labelLarge,
+        color = TextSecondary,
+    )
+}
+
+/**
+ * "open a recording"'s result — bodyLarge, TextPrimary for a genuine match
+ * (mirrors [AudioStegoStatus.ExtractedSuccess] in [StatusBlock] above) or TextSecondary for
+ * every honest non-match outcome (mirrors [AudioStegoStatus.ExtractedFailure]'s message line).
+ * [OpenRecordingResult.Compressed]'s copy is an honesty correction reaching the "open a
+ * recording" surface: this screen never attempts a compressed-container decode, so it says so
+ * plainly instead of silently failing or guessing.
+ */
+@Composable
+private fun OpenRecordingBlock(result: OpenRecordingResult) {
+    when (result) {
+        is OpenRecordingResult.Matched -> Text(
+            text = stringResource(
+                R.string.workshop_audio_open_matched,
+                techniqueLabel(result.technique),
+                result.text,
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextPrimary,
+        )
+        is OpenRecordingResult.NoMatch -> Text(
+            text = stringResource(R.string.workshop_audio_open_no_match),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        is OpenRecordingResult.Compressed -> Text(
+            text = stringResource(R.string.workshop_audio_open_compressed),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+        is OpenRecordingResult.ReadFailed -> Text(
+            text = stringResource(R.string.workshop_audio_open_read_failed),
+            style = MaterialTheme.typography.bodyLarge,
+            color = TextSecondary,
+        )
+    }
+}
+
+/**
+ * Maps [DecodeFailure] to on-voice copy for `extract` — exact strings specified by the approved
+ * design (lowercase, no exclamation, informational not destructive, same voice contract
+ * `ImageStegoScreen.kt`'s `extractFailureMessage` uses).
+ */
+private fun extractFailureMessage(reason: DecodeFailure): String = when (reason) {
+    DecodeFailure.NO_PAYLOAD_FOUND -> "no hidden payload found in this clip."
+    DecodeFailure.HEADER_INVALID -> "header didn't check out. this clip may not hold a nightjar payload."
+    DecodeFailure.PAYLOAD_TOO_LARGE -> "declared payload is too large for this clip. frame rejected."
+    DecodeFailure.UNRECOVERABLE_FEC -> "too much signal loss to recover."
+    DecodeFailure.INTEGRITY_MISMATCH -> "checksum didn't match. the payload was altered or corrupted."
+}
+
+/**
+ * "check for hidden data"'s readout — same shape as `ImageStegoScreen.kt`'s `AnalyzedBlock`
+ * (confidence, flagged/clear, the detector's verbatim [DetectionResult.detail], the byte
+ * estimate when one exists), plus [DETECTOR_CAVEAT] (the
+ * evasion matrix) — the one addition over the image screen's block, since [AudioStegDetector]'s
+ * blind posture has documented misses this screen has to be honest about on every result,
+ * not just a rough-edge detail line.
+ */
+@Composable
+private fun AnalyzedBlock(result: DetectionResult) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "${(result.confidence * 100).roundToInt()}%",
+            style = MaterialTheme.typography.displayLarge,
+            color = TextPrimary,
+        )
+        Text(
+            text = if (result.flagged) "flagged" else "clear",
+            style = MaterialTheme.typography.labelLarge,
+            color = if (result.flagged) AccentSignal else TextSecondary,
+        )
+        result.detail?.let { detail ->
+            Text(
+                text = detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        result.estimatedPayloadBytes?.let { bytes ->
+            Text(
+                text = "about $bytes bytes, near as we can tell",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        Text(
+            text = DETECTOR_CAVEAT,
+            style = MaterialTheme.typography.labelSmall,
+            color = TextSecondary,
+        )
+    }
+}
+
+/**
+ * This screen's tagline — `internal` so [AudioStegoScreenTest]
+ * can assert it directly. The prior copy ("playback proves it sounds unchanged") was a promise
+ * the owner's own headphone listening pass disproved for two of the three techniques
+ * (phase-inversion reads clearly wider/hollow, MFSK's tones are audible) — this tells the
+ * operator to listen and judge instead of asserting a result that isn't true for every technique.
+ * Kept close to the prior copy's length rather than spelling out per-technique caveats here —
+ * each technique's own "?" tooltip ([techniqueExplainer]) is where those live.
+ */
+internal fun audioStegoTagline(): String =
+    "hide text inside a clip. play cover and working, then judge for yourself."
+
+/**
+ * Static honesty line appended to every "check for hidden data" verdict on the technical screen
+ * (`AnalyzedBlock` copy, plus the owner note that anti-phase stereo
+ * with a surviving residual — not only this app's own phase-inversion output — reads as flagged;
+ * a plain polarity flip with nothing mixed in reads clear, per
+ * [AudioStegDetectorTest.cleanCoversAndStereoVariantsAreNotFlagged]'s "pure-inverted stereo"
+ * case). `internal` so [AudioStegoScreenTest] can assert it matches [AudioStegDetectorTest]'s
+ * tested evasion matrix (SLSB re-level/off-grid trim, MFSK low-pass) rather than drifting out of
+ * sync with it.
+ */
+internal const val DETECTOR_CAVEAT =
+    "knows this app's three techniques only. re-levelled, off-grid-trimmed or re-compressed " +
+        "clips slip past it. anti-phase stereo with something left in the mix reads as " +
+        "phase-inversion too, not just this app's own — a plain flip alone reads clear. clear " +
+        "means none of those three, not nothing hidden."
+
+/** The humming jar's shorter honesty line for "peek inside". */
+internal const val JAR_PEEK_CAVEAT = "it only knows this jar's own three tricks."
+
+/**
+ * Owns the [CovertCarrier] round-trip work for this screen, plus the "play cover"/"play working"
+ * UX (target tracking, tap-to-cutover, auto-stop after playback finishes) built on top of a
+ * shared [FireflyPlayer] instance that actually owns the `AudioTrack` transport (Stage C lift —
+ * see that class's KDoc). Same split `AcousticModemController`/`ImageStegoController` already use
+ * (codec is a pure in-memory interface call; transport is a separate concern).
+ *
+ * Two separate [CoroutineScope]s, on purpose: [codecScope] runs on [Dispatchers.Default] (CPU-
+ * bound embed/extract math — FFTs, Reed-Solomon — exactly like `ImageStegoController`, NOT
+ * `Dispatchers.IO`), while [playbackScope] runs on [Dispatchers.IO] (genuinely I/O-adjacent
+ * `AudioTrack` construction/`write()`/`play()` inside [fireflyPlayer], mirroring
+ * `AcousticModemController.playPcm`).
+ *
+ * A later addition adds a third scope, [fileScope], also [Dispatchers.IO], for
+ * [saveToDevice]/[shareFromDevice]/[openRecording]'s `MediaStore`/`ContentResolver` I/O — kept
+ * separate from [playbackScope] so a save/share/open never shares a lifecycle with in-flight
+ * playback, and separate from [codecScope] because file I/O, unlike embed/extract/analyze, isn't
+ * CPU-bound. [openRecording] hops onto [codecScope]'s dispatcher via `withContext` for its own
+ * FFT/Reed-Solomon-heavy technique trials, same reasoning as the split above.
+ */
+class AudioStegoController(
+    private val carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
+    private val detector: CovertDetector<WavFile.ParsedWav>,
+    private val appContext: Context,
+) {
+    var status: AudioStegoStatus by mutableStateOf(AudioStegoStatus.Idle)
+        private set
+
+    /**
+     * The clip `extract` operates on and "play working" plays: the selected cover's pristine
+     * samples until a successful [embed] replaces it with the produced stego clip. Empty only
+     * before the screen's first [selectCover] call (mirrors `ImageStegoController.workingBitmap`'s
+     * KDoc — the stateful root's `LaunchedEffect(coverAudio, technique)` fires before first
+     * render, so this is never actually observed empty in practice).
+     */
+    var workingAudio: PcmAudio by mutableStateOf(ShortArray(0))
+        private set
+
+    /**
+     * Channel count of [workingAudio] — 1 (mono) for the pristine cover and for
+     * [AudioStegoTechnique.SPECTROGRAM_LSB]/[AudioStegoTechnique.MFSK] output, 2 for
+     * [AudioStegoTechnique.PHASE_INVERSION] output (interleaved stereo — `AudioStegoCarrier`'s
+     * class KDoc). "play working" needs this to build an `AudioTrack` with the correct channel
+     * mask instead of assuming mono.
+     */
+    var workingChannelCount: Int by mutableStateOf(1)
+        private set
+
+    private val codecScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val playbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fileScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var playbackJob: Job? = null
+
+    /**
+     * True once a successful [embed] has made [workingAudio] a genuine stego
+     * clip, since the last [selectCover] reset — [saveToDevice]/[shareFromDevice] gate on this
+     * (in addition to [idleEquivalent]) so they only ever write a real "current stego WAV," never
+     * the pristine, nothing-hidden cover mislabeled as one. Stays `true` across a subsequent
+     * `extract`/`analyze` (neither touches [workingAudio]), and resets to `false` the moment
+     * either selector changes and [selectCover] fires again.
+     */
+    var hasEmbeddedContent: Boolean by mutableStateOf(false)
+        private set
+
+    /** See [FileActionKind]'s KDoc. `null` when no save/share write is in flight. */
+    var fileActionBusyLabel: FileActionKind? by mutableStateOf(null)
+        private set
+
+    /** Outcome of the most recently completed [saveToDevice]/[shareFromDevice] write. `null`
+     *  until the first one runs. */
+    var fileActionResult: FileActionResult? by mutableStateOf(null)
+        private set
+
+    /** True while [openRecording]'s read-and-try-three-techniques work is in flight. */
+    var openBusy: Boolean by mutableStateOf(false)
+        private set
+
+    /** Outcome of the most recently completed [openRecording] call. `null` until the first one
+     *  runs. */
+    var openResult: OpenRecordingResult? by mutableStateOf(null)
+        private set
+
+    /** Lifted playback transport (Stage C) -- owns the `AudioTrack` construction/stop machinery
+     *  this controller used to keep as its own `activeAudioTrack`/`stopActiveTrack`/
+     *  `buildAudioTrack` trio. See [FireflyPlayer]'s class KDoc. */
+    private val fireflyPlayer = FireflyPlayer()
+
+    /** Which clip is currently playing, if any -- see [PlaybackTarget]'s KDoc. */
+    var nowPlaying: PlaybackTarget? by mutableStateOf(null)
+        private set
+
+    private val idleEquivalent: Boolean
+        get() = status is AudioStegoStatus.Idle ||
+            status is AudioStegoStatus.Embedded ||
+            status is AudioStegoStatus.ExtractedSuccess ||
+            status is AudioStegoStatus.ExtractedFailure ||
+            status is AudioStegoStatus.Analyzed
+
+    /** Reset to a freshly selected cover clip, discarding any prior embed/extract result. Called
+     *  whenever either selector (technique or cover clip) changes. */
+    fun selectCover(cover: PcmAudio) {
+        workingAudio = cover
+        workingChannelCount = 1
+        hasEmbeddedContent = false
+        status = AudioStegoStatus.Idle
+    }
+
+    /** Capacity of [cover] for [technique], read synchronously — cheap arithmetic only, no FFT
+     *  work happens until [CovertCarrier.encode]/[CovertCarrier.decode] actually run. */
+    fun maxPayloadBytesFor(cover: PcmAudio, technique: AudioStegoTechnique): Int =
+        carrierFactory(cover, technique).maxPayloadBytes
+
+    /**
+     * Hide [payload] in [cover] using [technique] and make the result the new working clip.
+     * No-op while busy. Always encodes into the pristine selected [cover] (never into an
+     * already-embedded working clip), so repeated taps stay predictable.
+     *
+     * S-02 fix: `status = AudioStegoStatus.Embedding` used to be the first statement *inside*
+     * `codecScope.launch { ... }`, which only schedules the coroutine rather than running it
+     * immediately — the exact double-tap race `ImageStegoController.embed` was fixed for
+     * (see that method's KDoc). A second `embed()` arriving before the dispatcher hop
+     * completed could still read `status` as idle-equivalent and pass the gate, launching a
+     * second concurrent encode and (via `jarCatchFlow`'s status-keyed effect) inserting two
+     * fireflies for one tap. Writing `status` here, synchronously, before `codecScope.launch`,
+     * closes that window exactly like `ImageStegoController.embed` does.
+     */
+    fun embed(cover: PcmAudio, technique: AudioStegoTechnique, payload: ByteArray) {
+        if (!idleEquivalent) return
+        status = AudioStegoStatus.Embedding
+        codecScope.launch {
+            val carrier = carrierFactory(cover, technique)
+            val stego = try {
+                carrier.encode(payload)
+            } catch (oversized: IllegalArgumentException) {
+                DebugProbe.reportEncodeDecodeResult(ModuleId.AUDIO_STEGO_CODEC, DebugProbe.Operation.ENCODE, success = false)
+                status = AudioStegoStatus.Idle
+                return@launch
+            }
+            DebugProbe.reportEncodeDecodeResult(ModuleId.AUDIO_STEGO_CODEC, DebugProbe.Operation.ENCODE, success = true)
+            workingAudio = stego
+            workingChannelCount = if (technique == AudioStegoTechnique.PHASE_INVERSION) 2 else 1
+            hasEmbeddedContent = true
+            status = AudioStegoStatus.Embedded(payload.size)
+        }
+    }
+
+    /** Attempt to recover a payload from the current [workingAudio] using [technique]. No-op
+     *  while busy. Same synchronous-gate discipline as [embed] (S-02 fix) — see its KDoc. */
+    fun extract(technique: AudioStegoTechnique) {
+        if (!idleEquivalent) return
+        status = AudioStegoStatus.Extracting
+        val sample = workingAudio
+        codecScope.launch {
+            val carrier = carrierFactory(sample, technique)
+            status = when (val result = carrier.decode(sample)) {
+                is DecodeResult.Success -> {
+                    DebugProbe.reportEncodeDecodeResult(ModuleId.AUDIO_STEGO_CODEC, DebugProbe.Operation.DECODE, success = true)
+                    AudioStegoStatus.ExtractedSuccess(result.payload.decodeToString())
+                }
+                is DecodeResult.Failure -> {
+                    DebugProbe.reportEncodeDecodeResult(ModuleId.AUDIO_STEGO_CODEC, DebugProbe.Operation.DECODE, success = false)
+                    AudioStegoStatus.ExtractedFailure(result.reason, result.detail)
+                }
+            }
+        }
+    }
+
+    /**
+     * Score the current [workingAudio] (the pristine cover before any [embed], the produced
+     * stego clip after one — same clip [extract] operates on) for the likelihood it holds a
+     * hidden payload. No-op while busy. Same synchronous-gate discipline as [embed]/[extract].
+     *
+     * [workingAudio] and [workingChannelCount] are captured into locals *before*
+     * `codecScope.launch` rather than read live inside the coroutine — a
+     * fresh [selectCover] landing between the gate check and the coroutine body actually running
+     * could otherwise pair this clip's samples with a *different* selection's channel count, the
+     * same torn-read hazard [embed]/[extract] avoid by capturing their own inputs as parameters.
+     */
+    fun analyze() {
+        if (!idleEquivalent) return
+        status = AudioStegoStatus.Analyzing
+        val pcm = workingAudio
+        val channelCount = workingChannelCount
+        codecScope.launch {
+            val sample = WavFile.ParsedWav(NightjarAcoustics.SAMPLE_RATE_HZ, channelCount, pcm)
+            val result = detector.analyze(sample)
+            DebugProbe.reportDetectorConfidence(ModuleId.AUDIO_STEGANALYSIS, result.confidence)
+            status = AudioStegoStatus.Analyzed(result)
+        }
+    }
+
+    /** Plays [cover] (always mono) over the speaker. Available in any idle-equivalent state;
+     *  never touches [status]. */
+    fun playCover(cover: PcmAudio) {
+        if (!idleEquivalent) return
+        play(cover, channelCount = 1, target = PlaybackTarget.COVER)
+    }
+
+    /** Plays the current [workingAudio] at its actual [workingChannelCount]. Available in any
+     *  idle-equivalent state; never touches [status]. */
+    fun playWorking() {
+        if (!idleEquivalent) return
+        play(workingAudio, workingChannelCount, target = PlaybackTarget.WORKING)
+    }
+
+    /**
+     * Delegates to [fireflyPlayer], which stops/releases any currently-playing clip before
+     * starting [pcm] — tapping "play working" while "play cover" is still playing cuts it off
+     * cleanly rather than overlapping, per the approved design. Sets/clears [nowPlaying] around
+     * the actual playback window (UX pass) so the row can show "playing X" instead of a static,
+     * feedback-free label. [FireflyPlayer.isPlaying] distinguishes a genuine start from
+     * [FireflyPlayer.play]'s silent no-op cases (empty [pcm], unsupported format) so those cases
+     * skip setting [nowPlaying] and the auto-stop delay below, exactly as the pre-lift code did.
+     */
+    private fun play(pcm: PcmAudio, channelCount: Int, target: PlaybackTarget) {
+        playbackJob?.cancel()
+        playbackJob = playbackScope.launch {
+            fireflyPlayer.play(pcm, channelCount)
+            if (!fireflyPlayer.isPlaying) return@launch
+            nowPlaying = target
+            try {
+                val frameCount = pcm.size / channelCount
+                val durationMs = frameCount.toLong() * 1000L / NightjarAcoustics.SAMPLE_RATE_HZ
+                delay(durationMs + 200)
+            } finally {
+                fireflyPlayer.stop()
+                nowPlaying = null
+            }
+        }
+    }
+
+    /**
+     * Writes the current [workingAudio] (respecting [workingChannelCount]) to
+     * `MediaStore.Audio` under `Music/Nightjar/` with a neutral `AUD_yyyyMMdd_HHmmss.wav`
+     * basename (per the rule that "the technical screens' save/share may write to ...
+     * `Music/Nightjar`"). No-op while busy or before a real stego clip exists
+     * ([hasEmbeddedContent]). [fileActionBusyLabel] carries [FileActionKind.SAVING] for the
+     * duration of the write, matching `AcousticModemScreen.kt`'s own save/share status-word
+     * treatment.
+     */
+    fun saveToDevice() {
+        if (!idleEquivalent || !hasEmbeddedContent) return
+        val pcm = workingAudio
+        val channelCount = workingChannelCount
+        fileScope.launch {
+            fileActionBusyLabel = FileActionKind.SAVING
+            val uri = writeWorkingAudioToMediaStore(pcm, channelCount)
+            fileActionBusyLabel = null
+            if (uri != null) {
+                fileActionResult = FileActionResult.Saved
+            }
+        }
+    }
+
+    /**
+     * Same write as [saveToDevice], then opens Android's share sheet
+     * (`Intent.ACTION_SEND`) on the resulting MediaStore `content://` Uri — matches
+     * `AcousticModemScreen.kt`'s `shareFromDevice` exactly, including leaving
+     * [fileActionResult] untouched on a successful share (the share sheet itself is its own
+     * confirmation; only a write failure sets [FileActionResult.WriteFailed]).
+     */
+    fun shareFromDevice() {
+        if (!idleEquivalent || !hasEmbeddedContent) return
+        val pcm = workingAudio
+        val channelCount = workingChannelCount
+        fileScope.launch {
+            fileActionBusyLabel = FileActionKind.SHARING
+            val uri = writeWorkingAudioToMediaStore(pcm, channelCount)
+            fileActionBusyLabel = null
+            if (uri == null) return@launch
+            withContext(Dispatchers.Main) {
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "audio/wav"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val chooser = Intent.createChooser(
+                    sendIntent,
+                    appContext.getString(R.string.workshop_audio_share_chooser_title),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // appContext is not an Activity
+                appContext.startActivity(chooser)
+            }
+        }
+    }
+
+    /**
+     * Shared wrap-and-write path for [saveToDevice]/[shareFromDevice]: wraps [pcm] (at
+     * [channelCount]) in a standard WAV container via [WavFile] and writes it to a new
+     * `MediaStore.Audio` row. Sets [fileActionResult] to [FileActionResult.WriteFailed] and
+     * returns `null` on any failure — mirrors `AcousticModemScreen.kt`'s
+     * `encodeAndWriteWav`/`writeWavToMediaStore` split, minus the encode step (this screen's
+     * [workingAudio] is already the encoded stego clip, not raw payload text to re-encode).
+     */
+    private suspend fun writeWorkingAudioToMediaStore(pcm: PcmAudio, channelCount: Int): Uri? =
+        withContext(Dispatchers.IO) {
+            val wavBytes = if (channelCount == 2) {
+                WavFile.encodePcm16Stereo(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            } else {
+                WavFile.encodePcm16Mono(pcm, NightjarAcoustics.SAMPLE_RATE_HZ)
+            }
+            val uri = writeWavToMediaStore(appContext, wavBytes)
+            if (uri == null) {
+                fileActionResult = FileActionResult.WriteFailed
+            }
+            uri
+        }
+
+    /**
+     * Reads [uri] (picked via `ActivityResultContracts.OpenDocument`, any
+     * `audio/`-prefixed mime type) and, if it's a WAV, tries every [AudioStegoTechnique] against
+     * it via [tryAllTechniques] — an alternative input source to [extract]'s single-selected-
+     * technique read of [workingAudio], and deliberately independent of it: this never touches
+     * [status]/[workingAudio]/[hasEmbeddedContent], so opening a recording can never disturb an
+     * embed/extract/check flow already in progress on this screen. No-op while busy.
+     *
+     * The measured MFSK codec-survival result is why this never attempts a compressed-
+     * container decode the way `AcousticModemScreen.kt`'s own import does: unlike the modem's
+     * single always-real-tones protocol, MFSK's tone band only survives a narrow slice of real
+     * messaging codecs (AAC-LC >= 128 kbps, MP3 128 kbps — see [AudioStegoCarrier]'s class KDoc),
+     * and a voice note is compressed audio regardless of which of the three techniques (if any)
+     * it might otherwise have carried. Rather than run a `MediaCodec` decode that would usually
+     * just hand a doomed clip to [tryAllTechniques], the file's own magic bytes decide up front:
+     * WAV gets a real three-technique attempt, anything else gets an honest
+     * [OpenRecordingResult.Compressed] and no decode attempt at all.
+     */
+    fun openRecording(uri: Uri) {
+        if (!idleEquivalent) return
+        openBusy = true
+        openResult = null
+        fileScope.launch {
+            val bytes = readBoundedAudioBytes(appContext, uri)
+            if (bytes == null) {
+                openBusy = false
+                openResult = OpenRecordingResult.ReadFailed
+                return@launch
+            }
+            if (!isWavMagic(bytes)) {
+                openBusy = false
+                openResult = OpenRecordingResult.Compressed
+                return@launch
+            }
+            val parsed = WavFile.decodePcm16(bytes)
+            if (parsed == null) {
+                openBusy = false
+                openResult = OpenRecordingResult.ReadFailed
+                return@launch
+            }
+            val result = withContext(Dispatchers.Default) {
+                tryAllTechniques(carrierFactory, parsed.samples)
+            }
+            openBusy = false
+            openResult = result
+        }
+    }
+
+    /** Cancels any in-flight embed/extract/save/share/open work and stops/releases playback.
+     *  Call from `DisposableEffect.onDispose`. */
+    fun dispose() {
+        codecScope.cancel()
+        playbackJob?.cancel()
+        playbackScope.cancel()
+        fileScope.cancel()
+        fireflyPlayer.release()
+    }
+}
+
+// --- "open a recording" / save-to-device helpers — plain (non-composable,
+// non-member) functions, matching how `AcousticModemScreen.kt` keeps its own import/save file
+// I/O outside its controller class. ---
+
+/**
+ * Tries [AudioStegoTechnique.entries] against [samples], in enum declaration order (phase-
+ * inversion, spectrogram-LSB, MFSK), stopping at the first technique whose [CovertCarrier.decode]
+ * succeeds — "trying all three techniques and naming which matched." Pure and
+ * synchronous: no Android dependency, no coroutine of its own, so [AudioStegoController.openRecording]
+ * is free to run it on whichever dispatcher it likes, and it's directly unit-testable
+ * (`AudioStegoScreenTest`) without a Compose/Robolectric harness. A wrong-technique attempt never
+ * throws — every [AudioStegoCarrier] decode path fails cleanly (header magic/CRC mismatch) on
+ * structurally mismatched input, the same "receiving never guesses" discipline already
+ * required everywhere else in this app — so trying all three against arbitrary picked bytes is
+ * safe even when [samples]' real channel layout only matches one of them.
+ */
+internal fun tryAllTechniques(
+    carrierFactory: (PcmAudio, AudioStegoTechnique) -> CovertCarrier<PcmAudio>,
+    samples: PcmAudio,
+): OpenRecordingResult {
+    for (technique in AudioStegoTechnique.entries) {
+        val trialCarrier = carrierFactory(samples, technique)
+        val decoded = trialCarrier.decode(samples)
+        if (decoded is DecodeResult.Success) {
+            return OpenRecordingResult.Matched(technique, decoded.payload.decodeToString())
+        }
+    }
+    return OpenRecordingResult.NoMatch
+}
+
+/**
+ * True if [bytes] begins with a RIFF/WAVE magic — the same container-vs-compressed sniff
+ * `AcousticModemScreen.kt`'s `sniffIsWav` performs (there, streamed off the first 12 bytes before
+ * deciding whether to read the rest; here, checked against bytes already fully read, since this
+ * screen never attempts a compressed-container decode the way the modem's import does — see
+ * [AudioStegoController.openRecording]'s KDoc). Pure byte comparison, unit-tested directly.
+ */
+internal fun isWavMagic(bytes: ByteArray): Boolean =
+    bytes.size >= 12 &&
+        String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+        String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE"
+
+/**
+ * Size cap on a picked recording read fully into memory — same bound and reasoning as
+ * `AcousticModemScreen.kt`'s own `MAX_IMPORT_FILE_BYTES`: generous headroom for a real device
+ * recording while still bounding worst-case memory use for an accidentally-huge pick.
+ */
+private const val MAX_OPEN_RECORDING_BYTES = 64 * 1024 * 1024
+
+/**
+ * Reads all of [uri]'s bytes, bounded to [MAX_OPEN_RECORDING_BYTES]. Returns `null` on any I/O
+ * failure or if the file exceeds the bound — mirrors `AcousticModemScreen.kt`'s
+ * `readBoundedBytes`.
+ */
+private fun readBoundedAudioBytes(context: Context, uri: Uri): ByteArray? = try {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        val out = ByteArrayOutputStream()
+        val chunk = ByteArray(64 * 1024)
+        var total = 0
+        while (true) {
+            val n = stream.read(chunk)
+            if (n < 0) break
+            total += n
+            if (total > MAX_OPEN_RECORDING_BYTES) return null
+            out.write(chunk, 0, n)
+        }
+        out.toByteArray()
+    }
+} catch (ioFailure: IOException) {
+    null
+} catch (denied: SecurityException) {
+    null
+}
+
+/**
+ * Inserts a new row into `MediaStore.Audio` (`Music/Nightjar/AUD_<timestamp>.wav`) and writes
+ * [wavBytes] into it. Scoped storage (API 29+; this app's minSdk is 31) means no
+ * `WRITE_EXTERNAL_STORAGE` permission is needed. Returns the new row's Uri, or `null` on any
+ * insert/write failure — cleans up a successfully-inserted row if the write itself then fails, so
+ * a failed save never leaves a zero-byte/partial file behind. Mirrors
+ * `AcousticModemScreen.kt`'s own `writeWavToMediaStore` exactly, except for the basename: the
+ * task's own instruction calls for a neutral `AUD_yyyyMMdd_HHmmss.wav` here rather than that
+ * function's `nightjar_<millis>.wav` (the file still lands inside the `Music/Nightjar` folder
+ * already established — this is about the basename alone, not hiding which app made it).
+ */
+private fun writeWavToMediaStore(appContext: Context, wavBytes: ByteArray): Uri? {
+    val resolver = appContext.contentResolver
+    // A fresh SimpleDateFormat per call, not a shared instance -- SimpleDateFormat is not
+    // thread-safe, and this runs on a shared IO dispatcher where two saves/shares could otherwise
+    // land on different threads at once (see AudioStegoController's KDoc: nothing here gates a
+    // second save/share tap against a first one still in flight, same permissiveness
+    // AcousticModemScreen.kt's own save/share already has).
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    val displayName = "AUD_$timestamp.wav"
+    val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+        put(MediaStore.MediaColumns.MIME_TYPE, "audio/wav")
+        put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/Nightjar")
+    }
+    val collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val uri = resolver.insert(collection, values) ?: return null
+    return try {
+        val stream = resolver.openOutputStream(uri)
+        if (stream == null) {
+            resolver.delete(uri, null, null)
+            return null
+        }
+        stream.use { it.write(wavBytes) }
+        uri
+    } catch (writeFailed: IOException) {
+        resolver.delete(uri, null, null)
+        null
+    }
+}
+
+// --- Previews: AudioStegoContent is pure, so these need no CovertCarrier fake. ---
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewIdle() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.Idle,
+            technique = AudioStegoTechnique.PHASE_INVERSION,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SPOKEN_WORD,
+            onSelectCover = {},
+            payloadText = "the ravens have landed",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 96,
+            nowPlaying = null,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewEmbedded() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.Embedded(payloadBytes = 18),
+            technique = AudioStegoTechnique.MFSK,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SOFT_SYNTH,
+            onSelectCover = {},
+            payloadText = "the ravens have landed",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 37,
+            nowPlaying = PlaybackTarget.WORKING,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewExtractedSuccess() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.ExtractedSuccess(text = "the ravens have landed"),
+            technique = AudioStegoTechnique.SPECTROGRAM_LSB,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SPOKEN_WORD,
+            onSelectCover = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 512,
+            nowPlaying = null,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewExtractedFailure() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.ExtractedFailure(
+                reason = DecodeFailure.UNRECOVERABLE_FEC,
+                detail = "Reed-Solomon could not correct the received MFSK codeword (more than 8 byte errors)",
+            ),
+            technique = AudioStegoTechnique.MFSK,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SOFT_SYNTH,
+            onSelectCover = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 37,
+            nowPlaying = null,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewAnalyzedFlagged() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.Analyzed(
+                result = DetectionResult(
+                    confidence = 0.98f,
+                    flagged = true,
+                    estimatedPayloadBytes = 18,
+                    detail = "phase-inversion 0.98 (corr -0.9994, l+r residual 412 lsb in 9/9 10ms windows) · " +
+                        "spectrogram-lsb 0.12 (lattice distance 0.184) · mfsk 0.00 (0 keyed frames)",
+                ),
+            ),
+            technique = AudioStegoTechnique.PHASE_INVERSION,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SPOKEN_WORD,
+            onSelectCover = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 51,
+            nowPlaying = null,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF0D1117)
+@Composable
+private fun PreviewAnalyzedClear() {
+    PreviewSurface {
+        AudioStegoContent(
+            status = AudioStegoStatus.Analyzed(
+                result = DetectionResult(
+                    confidence = 0.03f,
+                    flagged = false,
+                    estimatedPayloadBytes = null,
+                    detail = "phase-inversion n/a (mono) · spectrogram-lsb 0.03 (lattice distance 0.199) · " +
+                        "mfsk 0.00 (0 keyed frames)",
+                ),
+            ),
+            technique = AudioStegoTechnique.SPECTROGRAM_LSB,
+            onSelectTechnique = {},
+            techniqueCapacities = previewCapacities,
+            cover = AudioSampleCover.SPOKEN_WORD,
+            onSelectCover = {},
+            payloadText = "",
+            onPayloadTextChange = {},
+            maxPayloadBytes = 512,
+            nowPlaying = null,
+            onPlayCover = {},
+            onPlayWorking = {},
+            onEmbed = {},
+            onExtract = {},
+            onCheck = {},
+            canSaveOrShare = false,
+            onSave = {},
+            onShare = {},
+            fileActionBusyLabel = null,
+            fileActionResult = null,
+            onOpenRecording = {},
+            openBusy = false,
+            openResult = null,
+            onBack = {},
+        )
+    }
+}
+
+/** Shared placeholder capacities for the `@Preview` functions above -- roughly matches real
+ *  figures for a 5s cover (see `AudioStegoSampleCovers.kt`), doesn't need to be exact. */
+private val previewCapacities = mapOf(
+    AudioStegoTechnique.PHASE_INVERSION to 51,
+    AudioStegoTechnique.SPECTROGRAM_LSB to 512,
+    AudioStegoTechnique.MFSK to 37,
+    AudioStegoTechnique.PHASE_CODING to 18,
+)
+
+@Composable
+private fun PreviewSurface(content: @Composable () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize().background(BgBase)) {
+        content()
+    }
+}

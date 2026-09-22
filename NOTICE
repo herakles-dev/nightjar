@@ -1,0 +1,53 @@
+nightjar
+Copyright (c) 2026 herakles-dev
+
+This product includes third-party work. The notices below are provided for
+informational purposes and to comply with the license terms of the included
+components. See CREDITS.md for narrative acknowledgments.
+
+================================================================================
+ggwave (github.com/ggerganov/ggwave)
+================================================================================
+
+nightjar's acoustic FSK/PSK modem design modernizes ggwave's approach to
+data-over-sound, and adapts its Reed–Solomon error-correction scheme.
+
+MIT License
+
+Copyright (c) 2020 Georgi Gerganov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+Silkscreen font (created by Jason Kottke)
+================================================================================
+
+nightjar bundles the Silkscreen pixel font as its UI typeface, under the SIL
+Open Font License, Version 1.1. The full license text is included with the
+app at app/src/main/assets/LICENSE-Silkscreen-OFL.txt, and begins:
+
+  Copyright 2001 The Silkscreen Project Authors
+  (https://github.com/googlefonts/silkscreen)
+
+  This Font Software is licensed under the SIL Open Font License, Version 1.1.
+  This license is copied below, and is also available with a FAQ at:
+  https://openfontlicense.org
+
+Per the SIL OFL, no modification other than distributing the bundled license
+file alongside the font is required, and the font may not be sold by itself.

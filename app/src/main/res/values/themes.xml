@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Dark-only. No Light variant, no values-night/ override. Parent is
+        android:Theme.Material.NoActionBar — pure Android dark baseline, not
+        Material.Light (which injects a white window background before Compose
+        ever runs). The scaffold task (#1) left a Light parent here; fixed later
+        as part of establishing the real dark-only doctrine.
+
+        windowBackground set to bg_base (#0D1117) so the cold-start frame is dark
+        — no white flash between launch and Compose render. Status/nav bars are
+        transparent via WindowCompat (enableEdgeToEdge() in MainActivity); the
+        colors set here are fallback-only for the pre-Compose frame.
+    -->
+    <style name="Theme.Nightjar" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/bg_base</item>
+        <item name="android:statusBarColor">@color/bg_base</item>
+        <item name="android:navigationBarColor">@color/bg_base</item>
+    </style>
+</resources>

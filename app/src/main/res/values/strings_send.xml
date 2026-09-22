@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v6 send copy: covers "Two send flows" ("send this firefly",
+  "hide one in a photo"), send/receive tone
+  ("hidden, not locked" is a real disclosure, not decoration), and the honesty fix for the
+  sturdy technique's carrier viewer (a bit-plane toggle can't show where a sturdy firefly hides).
+  All new copy this task adds lives here ("all v6 copy lives in strings.xml");
+  res/values/strings.xml and every other strings_*.xml file are left untouched by this task.
+
+  Jar voice throughout: lowercase, no exclamation, no emoji.
+  Owner direction (2026-09-22): embedding is "create"/"created", never "catch"/"caught"; none
+  of the copy below describes hiding a message with that verb (pre-existing "catch a firefly"
+  strings elsewhere are out of this task's scope; a follow-up sweeps those).
+-->
+<resources>
+    <string name="send_row_send_this_firefly">send this firefly</string>
+    <string name="send_row_hide_in_photo">hide one in a photo</string>
+
+    <string name="send_advice_exact">send it as a file or document — sent as a photo, apps squeeze it and it won\'t survive.</string>
+    <string name="send_advice_sturdy">made to survive being sent as a photo, usually — very small pictures, like some text messages, can still lose one.</string>
+    <string name="send_advice_audio">send it as a file, never as a voice note.</string>
+    <string name="send_not_locked">hidden, not locked: anyone with nightjar can read it.</string>
+
+    <string name="send_sending_busy_label">sending</string>
+    <string name="send_keep_a_copy">keep a copy</string>
+    <string name="send_kept_a_copy">kept a copy</string>
+    <string name="send_send_failed">couldn\'t send that. try again.</string>
+    <string name="send_keep_failed">couldn\'t keep a copy. try again.</string>
+
+    <string name="send_sturdy_carrier_caption">it hides in the brightness of a grid of small cells, not in the last bit of each color.</string>
+
+    <string name="send_back">back</string>
+    <string name="send_message_label">message</string>
+    <string name="send_message_hint">what to hide</string>
+    <string name="send_technique_sturdy">sturdy</string>
+    <string name="send_technique_exact">exact</string>
+
+    <string name="send_refusal_too_small">this photo is %1$dpx on its long side. sturdy needs at least %2$dpx to survive being sent as a photo — try a bigger picture, or pick exact.</string>
+    <string name="send_too_small_to_hide">too small to hide anything in this photo</string>
+    <string name="send_byte_and_size_line">%1$d / %2$d bytes · %3$s</string>
+
+    <string name="send_hide_advice_sturdy">hidden, not locked.</string>
+    <string name="send_hide_advice_exact">hidden, not locked. sends as a file if you pick exact.</string>
+    <string name="send_hide_it">hide it</string>
+    <string name="send_hiding_busy_label">hiding</string>
+    <string name="send_hide_failed">couldn\'t hide that. try again.</string>
+</resources>

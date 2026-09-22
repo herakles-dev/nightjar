@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- windowBackground fallback only — Compose owns the real palette
+         (dev.herakles.nightjar.ui.theme.Color.kt). Keep this in sync with BgBase. -->
+    <color name="bg_base">#0D1117</color>
+
+    <!-- Adaptive icon background layer. Same value as bg_base — the icon
+         canvas fill is the app's own background, not a separate brand color. -->
+    <color name="ic_launcher_background">#0D1117</color>
+</resources>

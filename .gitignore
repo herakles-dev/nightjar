@@ -1,0 +1,10 @@
+/build
+/app/build
+/.gradle
+/.kotlin
+local.properties
+*.iml
+.idea/
+__pycache__/
+*.pyc
+.opensource-verify-report.json
