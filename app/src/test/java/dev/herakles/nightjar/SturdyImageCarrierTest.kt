@@ -88,16 +88,137 @@ class SturdyImageCarrierTest {
     }
 
     @Test
-    fun `encode throws for a payload that is not exactly PAYLOAD_BYTES`() {
+    fun `encode throws for a payload longer than PAYLOAD_BYTES`() {
         val cover = SturdyTestImages.gradient(200, 200)
         val carrier = SturdyImageCarrier(cover)
 
         try {
-            carrier.encode(ByteArray(SturdyImageCarrier.PAYLOAD_BYTES - 1))
-            org.junit.Assert.fail("expected IllegalArgumentException for a short payload")
+            carrier.encode(ByteArray(SturdyImageCarrier.PAYLOAD_BYTES + 1))
+            org.junit.Assert.fail("expected IllegalArgumentException for an oversized payload")
         } catch (expected: IllegalArgumentException) {
             // expected
         }
+    }
+
+    // --- Task W2-7: variable-length messages via the frame's own length field ---
+
+    @Test
+    fun `round trips a 1-byte payload`() {
+        val cover = SturdyTestImages.gradient(800, 600)
+        val payload = byteArrayOf(0x42)
+        val stego = encodeStego(cover, payload)
+
+        val result = decodeOnly(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(1, result.payload.size)
+    }
+
+    @Test
+    fun `round trips a 10-byte payload, including multi-byte UTF-8`() {
+        val cover = SturdyTestImages.noise(800, 600, seed = 30)
+        // "héllo日" is well under 10 bytes on its own; pad it out to exactly 10 raw bytes so the
+        // multi-byte UTF-8 sequences (the accented 'e' and the CJK character) sit mid-payload,
+        // not just at the end.
+        val message = "héllo日".encodeToByteArray()
+        val payload = message + ByteArray(10 - message.size) { 0x2E }
+        assertEquals(10, payload.size)
+        val stego = encodeStego(cover, payload)
+
+        val result = decodeOnly(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(10, result.payload.size)
+    }
+
+    @Test
+    fun `round trips a 63-byte payload`() {
+        val cover = SturdyTestImages.texture(800, 600)
+        val payload = payloadOf(31).copyOfRange(0, 63)
+        val stego = encodeStego(cover, payload)
+
+        val result = decodeOnly(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(63, result.payload.size)
+    }
+
+    @Test
+    fun `a firefly declaring n = 64 still decodes (the full slot is a valid message length)`() {
+        val cover = SturdyTestImages.gradient(800, 600)
+        val payload = payloadOf(32)
+        assertEquals(SturdyImageCarrier.PAYLOAD_BYTES, payload.size)
+        val stego = encodeStego(cover, payload)
+
+        val result = decodeOnly(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(SturdyImageCarrier.PAYLOAD_BYTES, result.payload.size)
+    }
+
+    @Test
+    fun `encode accepts an empty (0-byte) payload`() {
+        val cover = SturdyTestImages.gradient(800, 600)
+        val stego = encodeStego(cover, ByteArray(0))
+
+        val result = decodeOnly(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertEquals(0, (result as DecodeResult.Success).payload.size)
+    }
+
+    @Test
+    fun `zero-padding under the CRC -- a flipped padding bit gives Damaged, never a wrong message`() {
+        val carrier = SturdyImageCarrier(SturdyTestImages.gradient(10, 10))
+        val message = byteArrayOf(1, 2, 3) // n = 3, so bytes 3..63 of the slot are zero padding
+        val goodFrame = carrier.frame(message)
+
+        // Flip one bit deep in the padding region (slot byte index 40 -- well past n=3, well
+        // before the crc32 tail) and confirm the CRC (which covers the WHOLE slot, not just the
+        // first n bytes) catches it.
+        val paddingByteIndex = 5 + 40 // 5-byte head + offset into the zero-padded slot
+        val corrupted = goodFrame.copyOf()
+        corrupted[paddingByteIndex] = (corrupted[paddingByteIndex].toInt() xor 0x01).toByte()
+
+        val goodParsed = carrier.parseFrame(goodFrame)
+        assertTrue("the unmodified frame must parse cleanly first", goodParsed.payload != null)
+        assertTrue(message.contentEquals(goodParsed.payload))
+
+        val corruptedParsed = carrier.parseFrame(corrupted)
+        assertTrue(
+            "a flipped padding bit must still look like a plausible SF header (magic/version/length unaffected)",
+            corruptedParsed.sawPlausibleHeader,
+        )
+        assertEquals(
+            "a flipped padding bit must fail CRC (never return a payload, right or wrong)",
+            null,
+            corruptedParsed.payload,
+        )
+    }
+
+    @Test
+    fun `n greater than PAYLOAD_BYTES in a forged header is rejected, not read as a plausible header`() {
+        val carrier = SturdyImageCarrier(SturdyTestImages.gradient(10, 10))
+        val goodFrame = carrier.frame(ByteArray(10))
+        val forged = goodFrame.copyOf()
+        // Overwrite the length field (bytes 3-4) to claim n = PAYLOAD_BYTES + 1 -- past the slot
+        // size entirely, so this must be rejected outright rather than treated as a plausible
+        // (if CRC-mismatched) header.
+        val forgedN = SturdyImageCarrier.PAYLOAD_BYTES + 1
+        forged[3] = ((forgedN ushr 8) and 0xFF).toByte()
+        forged[4] = (forgedN and 0xFF).toByte()
+
+        val parsed = carrier.parseFrame(forged)
+
+        assertEquals(null, parsed.payload)
+        assertFalse(
+            "n > PAYLOAD_BYTES must be rejected before any CRC work, not counted as a plausible header",
+            parsed.sawPlausibleHeader,
+        )
     }
 
     // --- Channel survival: simulated JPEG recompression + downscale (gate-28) ---

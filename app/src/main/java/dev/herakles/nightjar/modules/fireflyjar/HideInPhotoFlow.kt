@@ -68,17 +68,13 @@ import kotlinx.coroutines.withContext
  * `direction = "CREATED"` record like every other embed site, and nothing in its own UI copy
  * uses "catch"/"caught" to describe what it does.
  *
- * Sturdy's fixed [SturdyImageCarrier.PAYLOAD_BYTES] (64 bytes, no length field of its own --
- * see that class's KDoc) can't carry an arbitrary-length message directly the way the exact-LSB
- * frame's own length field can. [sturdyPayloadBytes] pads a shorter message out to exactly 64
- * bytes with ASCII spaces (0x20) rather than zero bytes -- a receiving device's
- * [dev.herakles.nightjar.incoming.IncomingPipeline] decodes a `Caught` sturdy payload with a
- * plain `payload.decodeToString().take(40)` (no padding-aware trim of its own, out of this
- * task's scope to change), and trailing spaces read as harmless trailing whitespace there rather
- * than the literal NUL control characters trailing zero-padding would produce. This sender's own
- * [FireflyRecord] is written directly with the real, un-padded message text/byte count, so this
- * padding choice never reaches this device's own swarm/detail display -- only a receiving
- * device's generic decode path ever sees it.
+ * Sturdy's [SturdyImageCarrier.PAYLOAD_BYTES] (64 bytes) is a fixed SLOT, not a fixed message
+ * length (task W2-7): [SturdyImageCarrier.encode] now carries the real message length in the
+ * frame's own length field and zero-pads the unused part of the slot itself, so this flow just
+ * hands it the typed message's raw UTF-8 bytes -- no space-padding here anymore. A receiving
+ * device's [dev.herakles.nightjar.incoming.IncomingPipeline] decodes a `Caught` sturdy payload
+ * with a plain `payload.decodeToString().take(40)`, and now gets back exactly the sent bytes
+ * (trimmed to the real length by the carrier's own decode), not a padded string.
  *
  * [trailStore]/[sendStepActive] exist only so `hide it` can call
  * [TrailStateStore.advance] the moment the share sheet actually opens, per the owner's
@@ -311,24 +307,6 @@ internal fun hidePhotoCapacityBytes(technique: HideTechnique, exactCapacityBytes
 internal fun canHidePhotoMessage(messageBytes: Int, capacityBytes: Int): Boolean =
     messageBytes in 1..capacityBytes
 
-/** ASCII space -- see this file's own KDoc for why space, not a zero byte, pads a
- *  shorter-than-64-byte message out to [SturdyImageCarrier.PAYLOAD_BYTES]. */
-private const val STURDY_PADDING_BYTE: Byte = 0x20
-
-/** Pads [message]'s UTF-8 bytes out to exactly [SturdyImageCarrier.PAYLOAD_BYTES] with trailing
- *  ASCII spaces, or returns them unchanged if already exactly that length. Throws if [message] is
- *  longer than capacity -- callers gate `hide it` on [canHidePhotoMessage] first, so this should
- *  be unreachable in practice, same "should not happen, but crash loud rather than silently
- *  truncate" posture [ImageStegoCarrier.encode]'s own `require` calls take. */
-internal fun sturdyPayloadBytes(message: String): ByteArray {
-    val raw = message.encodeToByteArray()
-    require(raw.size <= SturdyImageCarrier.PAYLOAD_BYTES) {
-        "message (${raw.size} bytes) exceeds sturdy's fixed ${SturdyImageCarrier.PAYLOAD_BYTES}-byte payload"
-    }
-    if (raw.size == SturdyImageCarrier.PAYLOAD_BYTES) return raw
-    return raw + ByteArray(SturdyImageCarrier.PAYLOAD_BYTES - raw.size) { STURDY_PADDING_BYTE }
-}
-
 /** What `hide it` actually produced: the bytes to persist/share, the extension
  *  [FireflyRepository.insertWithMedia] stores media under, the `technique` value the new
  *  [FireflyRecord] carries (matching [SturdyImageFireflyDecoder.STURDY_TECHNIQUE] for sturdy,
@@ -348,7 +326,7 @@ internal fun encodeForSend(selection: HidePhotoSelection, technique: HideTechniq
     when (technique) {
         HideTechnique.STURDY -> {
             val cover = (selection.coverPrep as SturdyCoverPrep.Ready).bitmap
-            val payload = sturdyPayloadBytes(message)
+            val payload = message.encodeToByteArray()
             val stegoSurface = SturdyImageCarrier(BitmapPixelSurface(cover)).encode(payload)
             val jpegBytes = encodeSturdyJpeg(stegoSurface.toBitmap())
             EncodedForSend(

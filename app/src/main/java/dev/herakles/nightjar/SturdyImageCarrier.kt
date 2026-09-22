@@ -42,13 +42,21 @@ import java.util.zip.CRC32
  * ```
  *   magic     2 bytes  0x53 0x46  ('S','F' — distinct from exact-LSB's 0x4E)
  *   version   1 byte   0x01
- *   length    2 bytes  payload byte count, big-endian (== PAYLOAD_BYTES this version)
- *   payload   N bytes  (N == PAYLOAD_BYTES this version — fixed, so decoder geometry needs no
- *                        side info)
- *   crc32     4 bytes  CRC-32 (IEEE) over magic+version+length+payload, big-endian
+ *   length    2 bytes  the REAL message length n, big-endian, 0 <= n <= PAYLOAD_BYTES
+ *   slot      N bytes  (N == PAYLOAD_BYTES this version — the SLOT is fixed size, so decoder
+ *                        geometry needs no side info; the message occupies the first n bytes,
+ *                        the remaining PAYLOAD_BYTES - n bytes are zero-padded)
+ *   crc32     4 bytes  CRC-32 (IEEE) over magic+version+length+the WHOLE slot (padding included),
+ *                        big-endian
  * ```
  * Frame = 5 + [PAYLOAD_BYTES] + 4 = [FRAME_BYTES] bytes, RS-encoded as one systematic codeword
  * `RS(FRAME_BYTES + RS_PARITY, FRAME_BYTES)`, correcting up to `RS_PARITY / 2` byte errors.
+ *
+ * The slot's fixed size keeps the FEC/interleave geometry constant regardless of message length
+ * (task W2-7); only the length field and the content of the first n bytes vary. Padding with
+ * zero bytes (not truncating the frame) means a flipped padding bit still lands under the same
+ * whole-slot CRC-32 as the message bytes, so a damaged pad reads as [DecodeFailure.INTEGRITY_MISMATCH]
+ * (Damaged), never silently as a shorter message.
  *
  * ## Never returns a wrong payload (INV-12)
  * [decode] only ever returns [DecodeResult.Success] once RS decode succeeds *and* the frame's own
@@ -79,10 +87,13 @@ class SturdyImageCarrier(private val cover: PixelSurface) : CovertCarrier<Sturdy
         role = ModuleRole.CARRIER,
     )
 
-    /** Fixed this version (architecture.md: "meets the >=64-byte gate; fixed size keeps decoder
-     *  geometry deterministic") — not capacity-derived from [cover] the way [ImageStegoCarrier]'s
-     *  raw-LSB capacity is, since the grid size ([GX] x [GY]) is itself fixed, independent of the
-     *  cover's actual pixel dimensions. */
+    /** The SLOT is fixed this version (architecture.md: "fixed size keeps decoder geometry
+     *  deterministic") — not capacity-derived from [cover] the way [ImageStegoCarrier]'s raw-LSB
+     *  capacity is, since the grid size ([GX] x [GY]) is itself fixed, independent of the cover's
+     *  actual pixel dimensions. The real message length is variable (task W2-7): [encode] accepts
+     *  any payload from 0 to [PAYLOAD_BYTES] bytes, carried in the frame's own length field, so
+     *  [maxPayloadBytes] here means "largest message this slot can hold," not "the only size
+     *  accepted." */
     override val maxPayloadBytes: Int = PAYLOAD_BYTES
 
     /** Minimal pixel access this codec needs. ARGB int per pixel, `0xAARRGGBB`, alpha ignored —
@@ -118,12 +129,15 @@ class SturdyImageCarrier(private val cover: PixelSurface) : CovertCarrier<Sturdy
     }
 
     /** Embeds [payload] into a mutable copy of [cover] and returns that copy; [cover] itself is
-     *  never mutated (matches [ImageStegoCarrier]'s contract). */
+     *  never mutated (matches [ImageStegoCarrier]'s contract). [payload] may be any length from
+     *  0 to [PAYLOAD_BYTES] (task W2-7, variable-length messages) — a shorter message is
+     *  zero-padded out to the fixed slot size internally by [frame]; the slot geometry never
+     *  changes, only the frame's own length field and how many of the slot's bytes are "real". */
     override fun encode(payload: ByteArray): PixelSurface {
-        require(payload.size == PAYLOAD_BYTES) {
-            "sturdy payload must be exactly $PAYLOAD_BYTES bytes (was ${payload.size}) -- fixed " +
-                "size keeps decoder geometry deterministic (architecture.md 'Sturdy image " +
-                "technique (v6)', shipped parameters)"
+        require(payload.size in 0..PAYLOAD_BYTES) {
+            "sturdy payload must be between 0 and $PAYLOAD_BYTES bytes (was ${payload.size}) -- " +
+                "the fixed-size slot keeps decoder geometry deterministic (architecture.md " +
+                "'Sturdy image technique (v6)', shipped parameters)"
         }
         val work = ArrayPixelSurface.copyOf(cover)
         val bits = codedBits(frame(payload))
@@ -207,10 +221,20 @@ class SturdyImageCarrier(private val cover: PixelSurface) : CovertCarrier<Sturdy
 
     // ---------- frame assembly/parsing ----------
 
-    private fun frame(payload: ByteArray): ByteArray {
+    /** Builds the fixed-size (`5 + [PAYLOAD_BYTES] + 4` = [FRAME_BYTES]-byte) frame for [payload]
+     *  (0..[PAYLOAD_BYTES] bytes): the length field carries the real message length `n`, the slot
+     *  is [payload] followed by `PAYLOAD_BYTES - n` zero bytes, and the CRC-32 covers
+     *  magic+version+length+the whole zero-padded slot -- so a flipped padding bit fails CRC too
+     *  (task W2-7's "zero-padding under the CRC" gate). `internal`, not `private`, so
+     *  `SturdyImageCarrierTest` can build/corrupt frames directly without going through the
+     *  QIM/RS channel -- same "internal for direct unit testing" precedent as
+     *  `ImageSteganalysis.chiSquarePValueForWindow`. */
+    internal fun frame(payload: ByteArray): ByteArray {
         val n = payload.size
+        val slot = ByteArray(PAYLOAD_BYTES)
+        System.arraycopy(payload, 0, slot, 0, n)
         val head = byteArrayOf(MAGIC0, MAGIC1, VERSION, ((n ushr 8) and 0xFF).toByte(), (n and 0xFF).toByte())
-        val core = head + payload
+        val core = head + slot
         val crc = CRC32().apply { update(core) }.value
         val tail = byteArrayOf(
             ((crc ushr 24) and 0xFF).toByte(),
@@ -222,19 +246,27 @@ class SturdyImageCarrier(private val cover: PixelSurface) : CovertCarrier<Sturdy
     }
 
     /** [sawPlausibleHeader] is true once magic+version+declared-length all check out, even if the
-     *  CRC then fails -- the signal [decode] uses to tell Damaged apart from NoFirefly. */
-    private class ParsedFrame(val payload: ByteArray?, val sawPlausibleHeader: Boolean)
+     *  CRC then fails -- the signal [decode] uses to tell Damaged apart from NoFirefly. `internal`
+     *  alongside [parseFrame], for the same direct-unit-test reason as [frame]. */
+    internal class ParsedFrame(val payload: ByteArray?, val sawPlausibleHeader: Boolean)
 
-    private fun parseFrame(body: ByteArray): ParsedFrame {
+    /** Parses a candidate [FRAME_BYTES]-byte frame body. `n` (0..[PAYLOAD_BYTES]) is read from the
+     *  length field; a forged header claiming `n > PAYLOAD_BYTES` is rejected outright (task
+     *  W2-7's "n > 64 in a forged header is rejected") before any CRC work. The CRC-32 is always
+     *  verified over the WHOLE [PAYLOAD_BYTES]-byte slot (matching [frame]), not just the first
+     *  `n` bytes, so a corrupted padding byte fails CRC exactly like a corrupted message byte --
+     *  only once that whole-slot CRC passes does this return the first `n` bytes as the real
+     *  message. */
+    internal fun parseFrame(body: ByteArray): ParsedFrame {
         if (body.size < FRAME_BYTES) return ParsedFrame(null, false)
         if (body[0] != MAGIC0 || body[1] != MAGIC1 || body[2] != VERSION) return ParsedFrame(null, false)
         val n = ((body[3].toInt() and 0xFF) shl 8) or (body[4].toInt() and 0xFF)
-        if (n != PAYLOAD_BYTES) return ParsedFrame(null, false)
-        val core = body.copyOfRange(0, 5 + n)
-        val stored = ((body[5 + n].toInt() and 0xFF).toLong() shl 24) or
-            ((body[6 + n].toInt() and 0xFF).toLong() shl 16) or
-            ((body[7 + n].toInt() and 0xFF).toLong() shl 8) or
-            (body[8 + n].toInt() and 0xFF).toLong()
+        if (n < 0 || n > PAYLOAD_BYTES) return ParsedFrame(null, false)
+        val core = body.copyOfRange(0, 5 + PAYLOAD_BYTES)
+        val stored = ((body[5 + PAYLOAD_BYTES].toInt() and 0xFF).toLong() shl 24) or
+            ((body[6 + PAYLOAD_BYTES].toInt() and 0xFF).toLong() shl 16) or
+            ((body[7 + PAYLOAD_BYTES].toInt() and 0xFF).toLong() shl 8) or
+            (body[8 + PAYLOAD_BYTES].toInt() and 0xFF).toLong()
         val computed = CRC32().apply { update(core) }.value
         if (computed != stored) return ParsedFrame(null, true)
         return ParsedFrame(body.copyOfRange(5, 5 + n), true)
@@ -365,8 +397,10 @@ class SturdyImageCarrier(private val cover: PixelSurface) : CovertCarrier<Sturdy
          *  copies is what lets [DELTA] drop to 10 and still survive q50 (architecture.md). */
         const val REP = 8
 
-        /** Payload size in bytes, fixed this version -- meets the >=64-byte gate; a fixed size
-         *  keeps decoder geometry deterministic (no side channel needed for length). */
+        /** Slot size in bytes -- fixed this version, so decoder geometry stays deterministic (no
+         *  side channel needed). The real message length is variable, 0..[PAYLOAD_BYTES] (task
+         *  W2-7), carried in the frame's own length field; [PAYLOAD_BYTES] is the largest message
+         *  the slot can hold, not the only size [encode] accepts. */
         const val PAYLOAD_BYTES = 64
 
         /** `magic(2) + version(1) + length(2) + payload(PAYLOAD_BYTES) + crc32(4)`. */

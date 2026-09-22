@@ -865,16 +865,27 @@ The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → 
 Own magic `0x53 0x46` (`"SF"`) — deliberately **not** exact-LSB's `0x4E` — so the two techniques
 never collide and auto-detect can tell them apart (INV-9, INV-12).
 
-| Field    | Bytes | Value / meaning                                             |
-|----------|-------|------------------------------------------------------------|
-| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)        |
-| version  | 1     | `0x01`                                                      |
-| length   | 2     | payload byte count, big-endian (== 64 this version)        |
-| payload  | N     | N = 64 bytes (fixed → decoder geometry needs no side info)  |
-| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+payload, big-endian |
+**Task W2-7 (variable-length messages):** the 64-byte field below is a fixed-size **slot**, not a
+fixed message length. The real message length `n` (0..64) lives in the length field; the message
+occupies the slot's first `n` bytes and the remaining `64-n` bytes are zero-padded. The CRC-32
+covers the **whole slot**, padding included — not just the first `n` bytes — so a corrupted
+padding byte fails CRC exactly like a corrupted message byte (never a silently-shortened message).
+The slot's fixed size is what keeps FEC/interleave/decoder geometry deterministic; only the length
+field and how many of the slot's bytes are "real" vary.
+
+| Field    | Bytes | Value / meaning                                                          |
+|----------|-------|---------------------------------------------------------------------------|
+| magic    | 2     | `0x53 0x46` (`"SF"`; distinct from exact-LSB `0x4E`)                     |
+| version  | 1     | `0x01`                                                                   |
+| length   | 2     | the real message length `n`, big-endian, `0 <= n <= 64`                  |
+| slot     | 64    | message (first `n` bytes) + zero padding (`64-n` bytes) — slot is fixed size, decoder geometry needs no side info |
+| crc32    | 4     | CRC-32 (IEEE) over magic+version+length+the whole slot (padding included), big-endian |
 
 Frame = 5 + 64 + 4 = **73 bytes**, RS-encoded as one codeword `RS(73+48, 73) = RS(121, 73)`
-(corrects up to 24 byte-errors).
+(corrects up to 24 byte-errors) — unchanged by task W2-7, since the slot size (and therefore
+`FRAME_BYTES`) never changes with message length. A decode declaring `n = 64` is a valid,
+full-slot message and decodes normally; a forged header claiming `n > 64` is rejected before any
+CRC/RS work, never treated as a plausible-but-damaged frame.
 
 ### Shipped parameters (round-2 retune, measured)
 | Param | Value | Reasoning |
@@ -884,7 +895,7 @@ Frame = 5 + 64 + 4 = **73 bytes**, RS-encoded as one codeword `RS(73+48, 73) = R
 | Max per-pixel luma delta | **5** (= Δ/2) | Worst-case flat shift to reach a lattice point (was 12). |
 | RS parity | **48** → RS(121,73), t=24 | Half-rate FEC; a safety net on top of the repetition. |
 | Repetition `R` | **8** | Soft-combining 8 dispersed copies is what lets Δ drop to 10 and still survive q50. |
-| Payload | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed size keeps decoder geometry deterministic. |
+| Payload slot | **64 bytes** (fixed) | Meets the ≥64-byte gate; fixed *slot* size keeps decoder geometry deterministic. Task W2-7: the real message length is variable, 0..64 bytes, carried in the frame's own length field — the slot itself never changes size. |
 
 Bit budget: coded 121 B = 968 bits × R=8 = 7744 cells of 9216.
 
@@ -1048,3 +1059,58 @@ re-checked under every DC hypothesis, is what keeps a clean image reading as *no
   either one once a photo is actually sent. `ImageStegoScreen.kt`'s sturdy "check for hidden data"
   caption is written from these real-photo numbers, not the bundled-cover ones: it says the
   flagged/clear reading is unreliable for sturdy, not that sturdy reliably gets caught.
+
+### The check's false-flag rate on CLEAN photos, properly sized (task W2-6, gate-30 follow-up)
+Task W2-4's n=3 sample first raised the question ("the same flagged/clear verdict lands on an
+unembedded copy of that photo... 2/3 flagged after JPEG q90"), but three photos is too small to
+size honestly, and conflates "does the check flag sturdy output" with "does the check flag an
+*ordinary* photo with nothing hidden in it at all" — the second question is what actually matters
+for a false-flag caveat, since it's asked with no embed technique in play whatsoever.
+
+**Measured properly: n=26 real, public-domain photographs** (Lorem Picsum, `id` 1-100, distinct
+images, native 800x600 — their own served resolution, no resize applied), each run through
+[ImageSteganalysis] as (a) the lossless PNG decode and (b) that same PNG re-encoded as JPEG
+q75/90/95 (`encodeSturdyJpeg`) — **never embedded into at any stage**:
+
+| Container | Flagged | Rate |
+|-----------|---------|------|
+| PNG (lossless) | 5/26 | 19.2% |
+| JPEG q75 | 5/26 | 19.2% |
+| JPEG q90 | 6/26 | 23.1% |
+| JPEG q95 | 6/26 | 23.1% |
+
+**A sizing artifact caught and corrected before it shipped.** An earlier pass of this same
+measurement, run to fit a small committed-resource budget, downscaled every photo to 220px long
+side and found a wildly higher, near-universal false-flag rate (22-23 of 26, ~85-88%, *every*
+container including PNG). A follow-up sweep across intermediate sizes (320/400/480/640/800px long
+side, same 8 source photos) showed why: this detector's false-flag rate is strongly,
+monotonically **size-sensitive** — 100% → 87.5% → 75% → 50% → 12.5% flagged as long side grows
+320 → 800px — independent of JPEG entirely (confirmed with both a Lanczos resize and a
+nearest-neighbor/point-sample resize; both showed the same size-driven curve, ruling out the
+specific resize filter as the cause). A small image's coarser per-pixel sampling smooths adjacent
+channel values together in a way the chi-square Pairs-of-Values test reads as LSB-style
+equalization, regardless of container. Measuring at 220px would have reported a real number for
+the wrong question — an artifact of the test's own downscale, not of what this check actually does
+to a real photo at a size an operator would actually pick. The fix: use *fewer, full native-size*
+photos rather than *more, artificially shrunk* ones (`app/src/test/resources/clean_photos/`, a
+curated 6-photo committed subset, ~3MB — `ImageSteganalysisRealPhotoFalseFlagTest.kt`'s own KDoc
+has the full accounting).
+
+**The honest finding is more nuanced than "JPEG causes this."** PNG's own baseline false-flag rate
+(19.2%) is already material by this task's own >10% bar — this check mistakes a real photo's
+ordinary low-frequency detail (skies, walls, skin, out-of-focus backgrounds) for hidden data
+reasonably often, with **no compression involved at all**. JPEG re-encoding adds a real but modest
+increment on top of that baseline: exactly one more photo (of 26) crosses `flagThreshold` at
+q90/q95 versus PNG/q75 (confidence 0.776/0.744 clear at PNG/q75, 0.877/0.856 flagged at q90/q95).
+So the honest caveat (below) says the check often misreads ordinary photo detail *in general*, and
+JPEG makes that *somewhat* more likely — not that JPEG alone is the problem.
+
+**In-app response (task W2-6).** `ImageStegoScreen.kt` now sniffs the picked cover's real container
+by magic bytes (`FileSniffer`, the same sniffer the receive path uses — never a declared
+MIME/extension) at pick time, and once the checked image traces back to a JPEG/WebP/HEIC source,
+"check for hidden data" shows one honest caveat line under the verdict (`strings_workshop_image.xml`
+`workshop_image_check_jpeg_caveat`) stating the measured fact above. The verdict itself (confidence,
+flagged/clear, detail, estimate) is always shown unchanged — this never hides or downgrades a flag,
+only explains it. PNG-sourced covers get no caveat, per this task's scope, even though this
+measurement shows PNG's own baseline is also worth an operator's skepticism; that's a legitimate
+follow-up, not something this task silently folded in.
