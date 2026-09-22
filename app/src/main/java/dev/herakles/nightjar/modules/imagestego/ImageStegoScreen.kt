@@ -747,21 +747,26 @@ fun jarCatchFlow(
         onLookForFireflies = {
             debounceCatchDispatch {
                 if (trailActive) {
-                    val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.ART)
-                    val practiceBitmap = if (practiceFile.exists()) {
-                        BitmapFactory.decodeFile(practiceFile.path)
-                    } else {
-                        null
-                    }
-                    if (practiceBitmap != null) {
-                        pendingLookBitmap = practiceBitmap
-                        controller.extract(practiceBitmap)
-                    } else {
-                        // Practice file not generated yet (a race with PracticeFireflies
-                        // .ensureGenerated's background job) -- degrade to the normal decode
-                        // rather than doing nothing; the trail step simply doesn't complete yet.
-                        pendingLookBitmap = null
-                        controller.extract(controller.workingBitmap ?: coverBitmap)
+                    // Review finding #5 (v6/review-fix): the practice file's own decode
+                    // (BitmapFactory.decodeFile) is real file I/O -- run it off the main thread,
+                    // same discipline AcousticModemScreen.kt's SINGING trail step already
+                    // follows via its Dispatchers.IO-backed controller scope. Only the decode
+                    // moves; catch/advance/error behavior below is unchanged.
+                    coroutineScope.launch {
+                        val practiceBitmap = withContext(Dispatchers.IO) {
+                            val practiceFile = PracticeFireflies.practiceFile(context, PracticeFireflies.Jar.ART)
+                            if (practiceFile.exists()) BitmapFactory.decodeFile(practiceFile.path) else null
+                        }
+                        if (practiceBitmap != null) {
+                            pendingLookBitmap = practiceBitmap
+                            controller.extract(practiceBitmap)
+                        } else {
+                            // Practice file not generated yet (a race with PracticeFireflies
+                            // .ensureGenerated's background job) -- degrade to the normal decode
+                            // rather than doing nothing; the trail step simply doesn't complete yet.
+                            pendingLookBitmap = null
+                            controller.extract(controller.workingBitmap ?: coverBitmap)
+                        }
                     }
                 } else {
                     pendingLookBitmap = null
