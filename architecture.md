@@ -452,12 +452,22 @@ range this doesn't survive, which is why `AudioStegoScreen.kt`'s v6 "open a reco
 doomed codec.
 
 Gate-8 (fidelity — cover vs. stego indistinguishable by ear) and gate-9 (safety-scope +
-anti-AI-tell close-out) remain open; both need a human listening pass, not something an agent can
-self-certify.
+anti-AI-tell close-out) are closed (spec.md "Gates — v2 addition"). Gate-8's owner listening pass
+found the honest result differs by technique, not the uniform "indistinguishable" the gate
+originally predicted: spectrogram-LSB and MFSK are effectively transparent at default strength
+(MFSK only after a fix for an audible tone-edge click artifact), while phase-inversion reads
+clearly wider/hollow by design, not a bug (the same mono-mix cancellation that makes it
+detectable, gate-22) — the screen's own copy was corrected to say so rather than promise "sounds
+unchanged" for a technique where that wasn't true. Gate-9's safety-scope compliance check passed
+(synthetic payloads only, no exploit content) and the anti-AI-tell checklist was re-run against
+the new screen (`design/identity.md`'s 2026-09-21 re-run entry).
 
 ### 7.1 v5 addition — `AudioStegDetector : CovertDetector<WavFile.ParsedWav>`
 
-**Status: specified, not built** (spec.md gates 22–23). The binding deviates from the
+**Status: built** (spec.md gates 22–23). `AudioStegDetector.kt` (639 lines) implements this
+binding as specified below, and is wired in from both `MainActivity.kt` and
+`AudioStegoScreen.kt` (each constructs `AudioStegDetector()` and passes it to
+`AudioStegoScreen`/its detector-facing content). The binding deviates from the
 `CovertDetector<PcmAudio>` shape the other audio detector uses, for one reason: `PcmAudio` is
 mono by contract (§1), but phase-inversion output is interleaved stereo, and for that technique
 the channel layout *is* the signal. A detector over a bare `ShortArray` would have to guess it.
@@ -506,7 +516,10 @@ class AudioStegDetector : CovertDetector<WavFile.ParsedWav> {
 
 ### 7.2 v5 addition — cover-vs-stego difference view (spectrogram-LSB)
 
-**Status: specified, not built** (spec.md gate 24). Data flow, with no schema change (INV-8):
+**Status: built** (spec.md gate 24). Implemented as `StegoDifferenceView` in
+`CarrierInsightViews.kt` (533 lines, shared with § 7.3's `StereoPolarityView`), wired from
+`JarDetailScreen.kt` (~lines 1271–1283) via a `LaunchedEffect` that calls `matchCover` then
+`stegoDifference`. Data flow, with no schema change (INV-8):
 
 1. `JarDetailScreen` already reads the firefly's WAV (`repository.readMedia` →
    `WavFile.decodePcm16`). When `technique == "SPECTROGRAM_LSB"` and `numChannels == 1`, it
@@ -533,7 +546,9 @@ step, so it adds brick risk for nothing), and storing cover WAVs (needs the migr
 
 ### 7.3 v5 addition — L/R polarity view (phase-inversion)
 
-**Status: specified, not built** (spec.md gate 25). No data-path change is needed: the
+**Status: built** (spec.md gate 25). Implemented as `StereoPolarityView` in
+`CarrierInsightViews.kt`, wired from `JarDetailScreen.kt`'s same `LaunchedEffect` (~lines
+1271–1283) via a call to `stereoPolarity`. No data-path change was needed: the
 persisted phase-inversion WAV is already stereo end to end.
 `AudioStegoCarrier.encodePhaseInversion` returns interleaved stereo →
 `AudioStegoController.embed` sets `workingChannelCount = 2` → `jarCatchFlow`'s
@@ -749,20 +764,25 @@ fields (`JarRole` is a new 2-case enum, `{ CREATION, WATCHING }`, declared in
 enum class Module(
     val label: String,
     val description: String,
-    val jarName: String,   // NEW — e.g. "the singing jar"
-    val jarRole: JarRole,  // NEW — CREATION (has a "catch a firefly" flow) | WATCHING
-                            //       (detector-shaped, re-skins its own history instead)
+    val jarName: String,
+    val jarRole: JarRole,
+    val jarChannel: String,
 ) {
-    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone",
-        "the singing jar", JarRole.CREATION),
-    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image",
-        "the framed jar", JarRole.CREATION),
-    DETECTOR("detector", "continuously listens for the modem's signal",
-        "the watching jar", JarRole.WATCHING),
-    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio",
-        "the humming jar", JarRole.CREATION),
+    ACOUSTIC_MODEM("acoustic modem", "send text as sound, phone to phone", "the singing jar", JarRole.CREATION, "sound"),
+    IMAGE_STEGANOGRAPHY("image steganography", "hide or extract text inside an image", "the art jar", JarRole.CREATION, "a picture"),
+    AUDIO_STEGANOGRAPHY("audio steganography", "hide or extract text inside audio", "the humming jar", JarRole.CREATION, "a recording"),
+    // v6 (owner direction, 2026-09-21): the detector is "the meadow", not a jar (it never keeps
+    // a firefly, it only notices them), and sits last so the three creating jars come first.
+    // Declaration order is display order for both the jar shelf and the workshop list; nothing
+    // persists an ordinal (records store `name`), so reordering is safe for stored fireflies.
+    DETECTOR("detector", "continuously listens for the modem's signal", "the meadow", JarRole.WATCHING, "the air"),
 }
 ```
+
+(`jarChannel` is a v6 addition — task #16, `picker/ModulePicker.kt` lines 59–74 — the one-word
+carrier a firefly travelled over, for the firefly-detail popup's metadata row; it exists for the
+same reason `jarName` does: § 6's exhaustive-branch budget doesn't cover the detail screen, so a
+display string it needs has to arrive as enum data rather than a `when`.)
 
 This is deliberate over a second, parallel `JarModuleDescriptor` list: a required
 constructor parameter means the compiler refuses to let a new `Module` entry compile
@@ -794,11 +814,12 @@ one function in one file, so a missed case is a build error, not a silent gap:**
   shape (zero selectors for the modem, one for image, two for audio today; a future
   module can have any shape without `JarDetailScreen` changing).
 
-**Reconciled with the code (gate-21, re-checked for v5): the "exactly two" rule above does
-not hold as written.** `grep -rn "when (module)" app/src/main/java` finds **five** exhaustive
-per-`Module` `when`s. All five are compiler-enforced, so a new `Module` entry is still a build
-error at every one of them, never a silent gap. But there are five sites to touch, not two,
-and one of them sits in `JarShelfScreen`, which the design above said would never need touching.
+**Reconciled with the code (gate-21, re-checked for v5, re-checked again for v6): the "exactly
+two" rule above does not hold as written.** `grep -rn "when (module)" app/src/main/java` finds
+**seven** exhaustive per-`Module` `when`s. All seven are compiler-enforced, so a new `Module`
+entry is still a build error at every one of them, never a silent gap. But there are seven sites
+to touch, not two, and one of them sits in `JarShelfScreen`, which the design above said would
+never need touching.
 
 | Site | Layer | Status |
 |------|-------|--------|
@@ -807,6 +828,8 @@ and one of them sits in `JarShelfScreen`, which the design above said would neve
 | `JarShelfScreen.kt` `tileTint` | jar | **added past the budget** (per-jar tile colors) |
 | `MainActivity.kt` picker routing (`Module` → `Screen`) | technical | predates jar mode; outside the rule's original scope |
 | `picker/ModulePicker.kt` `ModuleGlyph` | technical | predates jar mode; outside the rule's original scope |
+| `trail/TrailTargets.kt` `trailPracticeGlossRes` | trail | v6 addition — practice-firefly gloss text per module |
+| `incoming/IncomingPipeline.kt` `carrierKindFor` | incoming | v6 addition — `FireflyRecord.carrierKind` for a received firefly |
 
 There are also **non-exhaustive** `Module` checks that the compiler will not flag when a module
 is added:
@@ -817,14 +840,18 @@ is added:
 The `DETECTOR` checks would be safer keyed on `jarRole == JarRole.WATCHING`, which
 `JarDetailScreen` already does elsewhere.
 
-What *does* hold: v4 added no per-`Module` branch (carrier kind is a record field), and the v5
-views and detector add none either (they key on `FireflyRecord.technique` and channel count).
-So the count is five before and after v5.
+What *does* hold: v4 added no per-`Module` branch (carrier kind is a record field on the write
+path that already existed), and the v5 views and detector add none either (they key on
+`FireflyRecord.technique` and channel count). So the count was five through v5. v6 adds two more:
+the receive path's own `carrierKindFor` (`incoming/IncomingPipeline.kt`) needs the same
+`Module` → carrier-kind mapping the existing catch sites hardcode, and the riddle trail's
+`trailPracticeGlossRes` (`trail/TrailTargets.kt`) needs a per-module gloss string — bringing the
+count to seven.
 
 **Concrete recipe for adding a new module's jar, once its `CovertCarrier` exists** (corrected
 to match the code):
-1. Add one `Module` entry with its `jarName`/`jarRole`.
-2. Add one branch in each of the five exhaustive `when`s above. The compiler lists them.
+1. Add one `Module` entry with its `jarName`/`jarRole`/`jarChannel`.
+2. Add one branch in each of the seven exhaustive `when`s above. The compiler lists them.
 3. Review the non-exhaustive `DETECTOR`/`ACOUSTIC_MODEM` checks.
 
 The `FireflyLog` schema, the mode-switch mechanism, and the `DecodeFailure` → copy mapping
@@ -1114,3 +1141,95 @@ flagged/clear, detail, estimate) is always shown unchanged — this never hides 
 only explains it. PNG-sourced covers get no caveat, per this task's scope, even though this
 measurement shows PNG's own baseline is also worth an operator's skepticism; that's a legitimate
 follow-up, not something this task silently folded in.
+
+---
+
+## Receive pipeline and riddle trail (v6 additions)
+
+Two more new packages land with v6 (spec.md "Gates — v6 addition"): `incoming/` turns a
+shared/opened file back into a firefly, and `trail/` is the first-use guided tour that walks a
+new owner through every creation jar once. Neither touches an existing
+`CovertCarrier`/`CovertDetector` implementation — both are new *consumers*, same posture as the
+Firefly Jar front-end (§ above).
+
+### `incoming/` — receive pipeline (spec.md v6 receive-plumbing, gate-31/32, INV-12)
+
+`MainActivity` hands `IncomingPipeline.route(context, uri, action)` a `Uri` straight off an
+`ACTION_SEND`/`ACTION_VIEW` intent and gets back exactly one `IncomingOutcome` — INV-12: "every
+incoming file resolves to exactly one of caught, squeezed, damaged, no firefly, or unsupported,
+and a message is shown only after its checksum verifies."
+
+**Data flow:** `IncomingPipeline` reads bytes (`IncomingAndroidAdapters.readBoundedBytes`) →
+`FileSniffer.sniff` identifies the real container from its own magic bytes, never a
+caller-supplied MIME type or filename extension (`SniffedType`: PNG/JPEG/WEBP/HEIF/WAV/M4A/MP3/
+OGG/OPUS/AMR/UNKNOWN) → dispatches into `IncomingRouter`, which tries every technique nightjar
+knows and stops at the first match — the built-in exact-LSB image codec first, then each
+`ImageFireflyDecoder` in `ImageFireflyDecoderRegistry.decoders` (the v6 sturdy technique's own
+registration point, via `SturdyImageFireflyDecoder`), then all four acoustic-modem
+protocol/symbol-rate combinations, then the WAV/compressed-audio codecs. `IncomingRouter` itself
+is pure JVM (no file/network I/O, no `Context`), so most of the routing logic tests under plain
+JUnit/Robolectric rather than needing a device. A `DecodeFailure` whose frame header verified
+(`INTEGRITY_MISMATCH`/`UNRECOVERABLE_FEC`) maps to `IncomingOutcome.Damaged`; a header that never
+verified at all keeps falling through to the next technique instead.
+
+On `IncomingOutcome.Caught`, `IncomingPipeline` persists the firefly through the same
+`FireflyRepository.insertWithMedia` write-then-insert path every existing catch site
+(`ImageStegoScreen.kt`, `AudioStegoScreen.kt`, `AcousticModemScreen.kt`) already uses, with
+`direction = "RECEIVED"` and `carrierKind` from its own `carrierKindFor(Module)` mapping (§ 6's
+exhaustive-`when` table, above). Reports every outcome — caught or not — to `DebugProbe` as the
+v6 addition to the `COVERT_DEBUG` probe contract ("the dump gains the last incoming file: action,
+MIME type, detected technique, outcome").
+
+**Key files:**
+- `IncomingPipeline.kt` — Android-facing entry point; reads/sniffs/dispatches, then persists and
+  reports to `DebugProbe`.
+- `IncomingRouter.kt` — pure-JVM auto-detect-and-route core; tries every technique in order.
+- `FileSniffer.kt` — magic-byte container detection (`SniffedType`/`SniffedDomain`).
+- `IncomingOutcome.kt` — the sealed `IncomingOutcome` (INV-12's five cases) plus its
+  `DebugProbe` field mappings.
+- `IncomingOutcomeCopy.kt` — a pure, total outcome → jar-voice string-resource mapping (six
+  cases: INV-12's five plus `Squeezed`'s own lossy-image/compressed-audio split), shared by
+  `IncomingScreen` and its own test so the screen and the test can't drift apart.
+- `ImageFireflyDecoder.kt` — the registration interface + `ImageFireflyDecoderRegistry` future
+  image techniques plug into.
+- `SturdyImageFireflyDecoder.kt` — the sturdy technique's decoder, registered there.
+- `IncomingAndroidAdapters.kt` — bounded byte/bitmap reads, compressed-audio demuxing.
+- `IncomingScreen.kt` — renders the outcome (task W2-1).
+
+### `trail/` — riddle trail (design/riddle-trail.md, spec.md gate-36–40, INV-9/INV-11)
+
+A first-use guided tour: six steps (`TrailStep.ORDER` = art → humming → singing → meadow → send
+→ workshop) that glow one jar-shelf (or firefly-detail, or wordmark) target at a time and walk a
+new owner through every creation jar, the meadow, and the technical picker, using real carriers
+produced by the production encoders — never canned assets.
+
+**Data flow:** `TrailStateStore` (SharedPreferences-backed — no new Room table; INV-9 keeps
+trail/practice status entirely outside `FireflyRecord`) owns a `TrailState`
+(`currentStep`/`completedSteps`/`skipped`/`practiceRecordIds`, plus the v6
+`welcomeSeen`/`finaleDismissed`/`lastCompletedStep` UI flags) as a `StateFlow`, persisted
+synchronously on every `advance`/`skip`/`restart` call and reloaded identically after process
+death. `TrailTargets.kt`'s pure functions (`trailShelfTargetModule`, `trailPracticeGlossRes`,
+`trailQuestRes`, …) map the active step to whichever shelf tile, practice-firefly gloss, and
+one-line quest hint should be showing, so every consumer (`JarShelfScreen.kt`,
+`JarDetailScreen.kt`, the three jar catch flows, `DetectorScreen.kt`) reads one shared mapping
+instead of re-deriving it. `Modifier.trailHighlight` (`TrailHighlight.kt`) draws the single
+breathing glow on whichever target that resolves to. `PracticeFireflyGenerator` (pure JVM: riddle
+text + already-decoded cover samples in, carrier data out — INV-11, "never the reverse," enforced
+by `TrailSourceScanTest`) generates the three practice fireflies through the same production
+`ImageStegoCarrier`/`AudioStegoCarrier`/`AcousticCarrier` encoders real catches use;
+`PracticeFireflies.kt` is the thin Android adapter that resolves `R.drawable`/`R.string`
+resources and writes the results to `filesDir/practice/` on install or restart.
+
+**Key files:**
+- `TrailState.kt` / `TrailStep.kt` — the persisted state shape and the six-step enum (a stable,
+  ordinal-independent `id` string per step, same discipline `Module.name` already follows).
+- `TrailStateStore.kt` — SharedPreferences persistence + the `advance`/`skip`/`restart` mutations.
+- `TrailTargets.kt` — pure step → UI-target mappings (shelf tile, practice gloss, quest hint),
+  including `trailPracticeGlossRes`'s exhaustive `when(module)` (§ 6's table, above).
+- `TrailHighlight.kt` — the `Modifier.trailHighlight` breathing-glow drawing.
+- `TrailConstellation.kt` — the shelf's six-dot progress readout + completion pulse.
+- `TrailQuestReward.kt` — `TrailQuestLine` (per-step hint) and `TrailRewardLine` (per-step
+  completion celebration) composables.
+- `TrailWelcomeCard.kt` — the first-run welcome card shown before `welcomeSeen`.
+- `PracticeFireflyGenerator.kt` — pure-JVM practice-firefly content generation (INV-11).
+- `PracticeFireflies.kt` — Android adapter: resource resolution + `filesDir` writes.
