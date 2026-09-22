@@ -64,7 +64,10 @@ import dev.herakles.nightjar.incoming.IncomingOutcome
 import dev.herakles.nightjar.incoming.IncomingPipeline
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRepository
 import dev.herakles.nightjar.modules.fireflyjar.FireflyRecord
+import dev.herakles.nightjar.modules.fireflyjar.HideInPhotoFlow
+import dev.herakles.nightjar.modules.fireflyjar.HidePhotoSelection
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.prepareSturdyCover
 import dev.herakles.nightjar.trail.PracticeFireflies
 import dev.herakles.nightjar.trail.TrailStateStore
 import dev.herakles.nightjar.trail.TrailStep
@@ -445,6 +448,28 @@ fun jarCatchFlow(
         }
     }
 
+    // v6 (task W2-2, gate-33): "hide one in a photo" -- a second, independent Photo Picker
+    // launch (this module's own carrier is always an image, so this reuses the exact same
+    // ImageOnly contract [catchFromFileLauncher] does, just routed to a new encode flow instead
+    // of the receive pipeline). Decodes off Dispatchers.IO (real file I/O + CPU work, matching
+    // decodePickedCoverImage's own KDoc), then prepares the sturdy send-side cover once, at pick
+    // time, off Dispatchers.Default -- HideInPhotoFlow reads that prep directly rather than
+    // recomputing it per technique switch. A null Uri (operator backed out) or a failed decode
+    // is a silent no-op, same as every other picker launcher in this app.
+    var hidePhotoSelection by remember { mutableStateOf<HidePhotoSelection?>(null) }
+    val hidePhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        coroutineScope.launch {
+            val decoded = withContext(Dispatchers.IO) { decodePickedCoverImage(context, uri) }
+            if (decoded != null) {
+                val prep = withContext(Dispatchers.Default) { prepareSturdyCover(decoded) }
+                hidePhotoSelection = HidePhotoSelection(original = decoded, coverPrep = prep)
+            }
+        }
+    }
+
     var coverChoice by remember { mutableStateOf(SampleCover.GRADIENT) }
     var payloadText by remember { mutableStateOf("") }
     var catchExpanded by remember { mutableStateOf(false) }
@@ -460,6 +485,10 @@ fun jarCatchFlow(
     // stale from a previous tap.
     val trailState by trailStore.state.collectAsState()
     val trailActive = trailState.currentStep == TrailStep.ART
+    // v6 (task W2-2, owner direction 2026-09-22, design/riddle-trail.md § Welcome + game layer,
+    // commit 6b9cedf): the SEND step's glow now lives on the "hide one in a photo" row itself,
+    // not on any firefly's own send row -- see HideInPhotoFlow.kt's KDoc.
+    val sendStepActive = trailState.currentStep == TrailStep.SEND
     var pendingLookBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     // Task #19 fix, layer 2: live testing showed encode()/decode() for this codec's tiny
@@ -566,6 +595,23 @@ fun jarCatchFlow(
         previousStatus = status
     }
 
+    // v6 (task W2-2): while a photo is picked for "hide one in a photo", that flow takes over
+    // this slot entirely (its own "back" collapses back to the row list below) -- same "no
+    // separate screen per action" shape every other jar-mode expansion in this app already uses,
+    // just for a bigger inline flow than catch/look's own field expansion.
+    val currentHidePhotoSelection = hidePhotoSelection
+    if (currentHidePhotoSelection != null) {
+        HideInPhotoFlow(
+            selection = currentHidePhotoSelection,
+            repository = repository,
+            trailStore = trailStore,
+            sendStepActive = sendStepActive,
+            onCancel = { hidePhotoSelection = null },
+            onSent = { hidePhotoSelection = null },
+        )
+        return
+    }
+
     JarImageStegoContent(
         status = controller.status,
         catchExpanded = catchExpanded,
@@ -613,6 +659,12 @@ fun jarCatchFlow(
                 PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
             )
         },
+        onHideInPhoto = {
+            hidePhotoLauncher.launch(
+                PickVisualMediaRequest(mediaType = ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
+        hideInPhotoHighlighted = sendStepActive,
     )
 }
 
@@ -645,6 +697,12 @@ private fun JarImageStegoContent(
     // unchanged, same "pure/previewable" reasoning this file's other optional params follow.
     lookForFirefliesHighlighted: Boolean = false,
     onCatchFromFile: () -> Unit,
+    onHideInPhoto: () -> Unit = {},
+    // v6 (task W2-2, owner direction 2026-09-22): true while the trail's SEND step is active --
+    // glows this row rather than any firefly's own "send this firefly" row (design/riddle-trail.md
+    // § Welcome + game layer). Default keeps every existing @Preview call site compiling
+    // unchanged, same reasoning [lookForFirefliesHighlighted] already follows.
+    hideInPhotoHighlighted: Boolean = false,
 ) {
     val idleEquivalent = status is StegoStatus.Idle ||
         status is StegoStatus.Embedded ||
@@ -749,6 +807,19 @@ private fun JarImageStegoContent(
                 fill = JarActionLookFill,
                 border = JarActionLookBorder,
                 onClick = onCatchFromFile,
+            )
+            // v6 (task W2-2, gate-33): "hide one in a photo" -- gold "creating" tint (this row
+            // embeds a NEW message into the operator's own picked photo, same verb family as
+            // "catch a firefly"), last in the action group per design/screen-flow.md's v6
+            // wireframe. `highlighted` is the trail's SEND-step glow (owner direction
+            // 2026-09-22) -- see this composable's own KDoc note on [hideInPhotoHighlighted].
+            JarActionRow(
+                label = stringResource(R.string.send_row_hide_in_photo),
+                enabled = idleEquivalent,
+                fill = JarActionCatchFill,
+                border = JarActionCatchBorder,
+                onClick = onHideInPhoto,
+                highlighted = hideInPhotoHighlighted,
             )
         }
 
@@ -1487,8 +1558,12 @@ private const val MAX_PICKED_COVER_DIMENSION = 4096
  * `inJustDecodeBounds = true` (bounds land in `options.outWidth`/`outHeight` instead, never in
  * the return value), so the bounds pass tracks "did the stream even open" via the `use` block's
  * own return value rather than the decode call's.
+ *
+ * `internal` (task W2-2): reused as-is by `HideInPhotoFlow.kt`'s own Photo Picker launcher --
+ * "hide one in a photo" needs the exact same bounded, `HARDWARE`-config-free decode this screen's
+ * cover picker already established, not a second copy of it.
  */
-private fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
+internal fun decodePickedCoverImage(context: Context, uri: Uri): Bitmap? = try {
     val resolver = context.contentResolver
 
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
