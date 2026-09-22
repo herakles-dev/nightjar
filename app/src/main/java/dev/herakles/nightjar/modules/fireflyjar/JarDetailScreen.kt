@@ -83,6 +83,7 @@ import dev.herakles.nightjar.picker.Module
 import dev.herakles.nightjar.share.FireflyShare
 import dev.herakles.nightjar.share.keepOutgoingCopy
 import dev.herakles.nightjar.share.outgoingKindFor
+import dev.herakles.nightjar.share.outgoingMimeAndExtensionFor
 import dev.herakles.nightjar.share.sendAdviceStringRes
 import dev.herakles.nightjar.spectrogram
 import dev.herakles.nightjar.trail.TrailStateStore
@@ -939,10 +940,17 @@ private fun FireflyDetailContent(
                                         try {
                                             val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
                                             if (bytes != null) {
+                                                // Review finding #3 (v6/review-fix): derive the
+                                                // real outgoing MIME/extension from the firefly's
+                                                // own stored carrier rather than assuming
+                                                // [outgoingKind]'s WAV default -- a modem firefly
+                                                // caught from a compressed voice note keeps its
+                                                // real container.
+                                                val (mimeType, extension) = outgoingMimeAndExtensionFor(outgoingKind, mediaPath)
                                                 val uri = withContext(Dispatchers.IO) {
-                                                    FireflyShare.prepareOutgoing(context, bytes, outgoingKind)
+                                                    FireflyShare.prepareOutgoing(context, bytes, outgoingKind, extension = extension)
                                                 }
-                                                context.startActivity(FireflyShare.shareIntent(uri, outgoingKind.mimeType))
+                                                context.startActivity(FireflyShare.shareIntent(uri, mimeType))
                                                 onSendOpened()
                                                 showKeepCopy = true
                                             }
@@ -986,7 +994,13 @@ private fun FireflyDetailContent(
                                         try {
                                             val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
                                             if (bytes != null) {
-                                                withContext(Dispatchers.IO) { keepOutgoingCopy(context, bytes, outgoingKind) }
+                                                // Review finding #3 (v6/review-fix): same real
+                                                // MIME/extension derivation as "send this
+                                                // firefly" above.
+                                                val (mimeType, extension) = outgoingMimeAndExtensionFor(outgoingKind, mediaPath)
+                                                withContext(Dispatchers.IO) {
+                                                    keepOutgoingCopy(context, bytes, outgoingKind, mimeType = mimeType, extension = extension)
+                                                }
                                             }
                                             keptCopy = true
                                         } catch (failure: IOException) {

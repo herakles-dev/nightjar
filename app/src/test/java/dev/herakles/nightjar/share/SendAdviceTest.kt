@@ -95,4 +95,57 @@ class SendAdviceTest {
         assertTrue(message.contains("480"))
         assertTrue(message.contains(STURDY_MIN_COVER_LONG_SIDE_PX.toString()))
     }
+
+    // ==========================================================================================
+    // outgoingMimeAndExtensionFor -- review finding #3 (v6/review-fix): an existing caught
+    // firefly's real on-disk extension must win over OutgoingKind.AUDIO's hardcoded WAV default.
+    // ==========================================================================================
+
+    @Test
+    fun `a modem firefly caught from a compressed m4a voice note shares as audio-m4a, not audio-wav`() {
+        val (mimeType, extension) = outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "a1b2c3.m4a")
+        assertEquals("audio/mp4", mimeType)
+        assertEquals("m4a", extension)
+    }
+
+    @Test
+    fun `every recognized compressed audio extension resolves to its own real MIME type`() {
+        assertEquals("audio/mpeg" to "mp3", outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.mp3"))
+        assertEquals("audio/ogg" to "ogg", outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.ogg"))
+        assertEquals("audio/opus" to "opus", outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.opus"))
+        assertEquals("audio/amr" to "amr", outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.amr"))
+    }
+
+    @Test
+    fun `a genuinely-wav audio firefly still resolves to audio-wav`() {
+        val (mimeType, extension) = outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.wav")
+        assertEquals("audio/wav", mimeType)
+        assertEquals("wav", extension)
+    }
+
+    @Test
+    fun `an unrecognized or missing extension falls back to OutgoingKind AUDIO's own wav default`() {
+        assertEquals(OutgoingKind.AUDIO.mimeType to OutgoingKind.AUDIO.fileExtension, outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, null))
+        assertEquals(OutgoingKind.AUDIO.mimeType to OutgoingKind.AUDIO.fileExtension, outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash"))
+        assertEquals(OutgoingKind.AUDIO.mimeType to OutgoingKind.AUDIO.fileExtension, outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.xyz"))
+    }
+
+    @Test
+    fun `extension matching is case-insensitive`() {
+        val (mimeType, extension) = outgoingMimeAndExtensionFor(OutgoingKind.AUDIO, "hash.M4A")
+        assertEquals("audio/mp4", mimeType)
+        assertEquals("m4a", extension)
+    }
+
+    @Test
+    fun `image kinds are never affected -- their own mimeType and extension pass through unchanged regardless of mediaPath`() {
+        assertEquals(
+            OutgoingKind.IMAGE_EXACT.mimeType to OutgoingKind.IMAGE_EXACT.fileExtension,
+            outgoingMimeAndExtensionFor(OutgoingKind.IMAGE_EXACT, "hash.m4a"),
+        )
+        assertEquals(
+            OutgoingKind.IMAGE_STURDY.mimeType to OutgoingKind.IMAGE_STURDY.fileExtension,
+            outgoingMimeAndExtensionFor(OutgoingKind.IMAGE_STURDY, null),
+        )
+    }
 }

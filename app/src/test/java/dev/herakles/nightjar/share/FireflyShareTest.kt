@@ -85,6 +85,28 @@ class FireflyShareTest {
         assertFalse(first == second)
     }
 
+    // Review finding #3 (v6/review-fix): an overridden extension (an existing caught firefly's
+    // own real on-disk suffix -- dev.herakles.nightjar.share.outgoingMimeAndExtensionFor) must
+    // win over [OutgoingKind.AUDIO]'s own hardcoded "wav", while the default (no override) keeps
+    // every existing caller's naming exactly as it was.
+    @Test
+    fun `an overridden extension replaces the kind's own default extension`() {
+        val now = Instant.parse("2026-03-14T09:41:07Z")
+        assertEquals(
+            "AUD_20260314_094107.m4a",
+            outgoingFileName(OutgoingKind.AUDIO, now, ZoneOffset.UTC, extension = "m4a"),
+        )
+    }
+
+    @Test
+    fun `omitting the extension override still names as the kind's own default extension`() {
+        val now = Instant.parse("2026-03-14T09:41:07Z")
+        assertEquals(
+            outgoingFileName(OutgoingKind.AUDIO, now, ZoneOffset.UTC),
+            outgoingFileName(OutgoingKind.AUDIO, now, ZoneOffset.UTC, extension = OutgoingKind.AUDIO.fileExtension),
+        )
+    }
+
     // ==========================================================================================
     // FireflyShare.sweepOutgoing -- deletion policy
     // ==========================================================================================

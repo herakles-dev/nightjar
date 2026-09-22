@@ -62,15 +62,23 @@ object FireflyShare {
      * Throws [IOException] if the write fails, mirroring `ImageStegoScreen.kt`'s
      * `saveBitmapAsPngToMediaStore` precedent of surfacing a real reason rather than a silent
      * no-op that leaves a caller's `runCatching` with nothing to report.
+     *
+     * [extension] defaults to [kind]'s own [OutgoingKind.fileExtension] -- every existing caller
+     * (a fresh encode: workshop save/share, audio-stego jar embed, hide-in-photo) keeps getting
+     * exactly that. Review finding #3 (v6/review-fix): the "share an existing caught firefly"
+     * call site (`JarDetailScreen.kt`) passes the firefly's own real on-disk extension instead
+     * (`dev.herakles.nightjar.share.outgoingMimeAndExtensionFor`), so a modem firefly caught from
+     * a compressed voice note keeps its real container instead of being renamed `.wav`.
      */
     fun prepareOutgoing(
         context: Context,
         bytes: ByteArray,
         kind: OutgoingKind,
         now: Instant = Instant.now(),
+        extension: String = kind.fileExtension,
     ): Uri {
         val dir = outgoingDir(context).apply { mkdirs() }
-        val file = File(dir, outgoingFileName(kind, now))
+        val file = File(dir, outgoingFileName(kind, now, extension = extension))
         try {
             file.writeBytes(bytes)
         } catch (failure: IOException) {
@@ -179,8 +187,17 @@ private val OUTGOING_TIMESTAMP_FORMAT: DateTimeFormatter = DateTimeFormatter.ofP
  * so it's directly and deterministically testable: the same three inputs always produce the same
  * name. [zone] defaults to the device's zone for real callers; tests pass a fixed [ZoneId] (e.g.
  * `ZoneOffset.UTC`) so the expected string doesn't depend on the machine running the test.
+ *
+ * [extension] defaults to [kind]'s own [OutgoingKind.fileExtension] -- see [FireflyShare
+ * .prepareOutgoing]'s matching KDoc for why a caller ever overrides it (review finding #3,
+ * v6/review-fix).
  */
-internal fun outgoingFileName(kind: OutgoingKind, now: Instant, zone: ZoneId = ZoneId.systemDefault()): String {
+internal fun outgoingFileName(
+    kind: OutgoingKind,
+    now: Instant,
+    zone: ZoneId = ZoneId.systemDefault(),
+    extension: String = kind.fileExtension,
+): String {
     val stamp = OUTGOING_TIMESTAMP_FORMAT.withZone(zone).format(now)
-    return "${kind.filePrefix}_$stamp.${kind.fileExtension}"
+    return "${kind.filePrefix}_$stamp.$extension"
 }
