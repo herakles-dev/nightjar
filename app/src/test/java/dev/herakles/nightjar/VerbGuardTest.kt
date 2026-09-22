@@ -33,7 +33,10 @@ class VerbGuardTest {
     // "you created one — 4 byte" / "you caught one — $bytes bytes" (a `${...}` template
     // expression's own nested string literal is never folded into the outer literal by
     // extractStringLiterals below, so this only ever sees the literal text around the hole).
-    private val creationSuccessShape = Regex("you (caught|created) one\\b[^a-zA-Z]{0,4}")
+    // The shape requires the dash that introduces the byte count: a bare "you caught one" is
+    // receiving copy (IncomingScreen's title, the acoustic modem's receive result card) and
+    // must not trip this guard.
+    private val creationSuccessShape = Regex("you (caught|created) one\\s*[—–-]")
 
     @Test
     fun `no user-facing string says catch a firefly`() {

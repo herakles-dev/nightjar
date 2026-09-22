@@ -937,7 +937,7 @@ private fun JarStatusWord(word: String, color: Color = JarTextSecondary) {
     Text(text = word, style = JarType.SectionLabel, color = color)
 }
 
-/** DESIGN_SPEC.md §5 1e's "you spotted one" result card — reuses [JarActionLookFill]/
+/** DESIGN_SPEC.md §5 1e's result card, "you caught one" since v6 (receiving is catching; was "you spotted one") — reuses [JarActionLookFill]/
  *  [JarActionLookBorder] rather than a new token, same cyan the listening card itself uses. The
  *  byte count and correction count both always render (the mockup's own example, "22 bytes · 0
  *  corrected", shows the zero case rather than hiding it). */
@@ -954,7 +954,7 @@ private fun JarCatchResultCard(status: ModemStatus.DecodedSuccess) {
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(text = "you spotted one", style = JarType.SectionLabel, color = FireflyReceived)
+        Text(text = "you caught one", style = JarType.SectionLabel, color = FireflyReceived)
         Text(text = status.text, style = JarType.Body, color = JarTextPrimary)
         Text(
             text = "$bytes bytes · ${status.correctedByteErrors} byte$plural corrected",

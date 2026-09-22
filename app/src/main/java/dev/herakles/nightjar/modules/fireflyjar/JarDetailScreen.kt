@@ -359,7 +359,7 @@ private fun BackRow(label: String, onClick: () -> Unit) {
  *  branching on a specific [Module], only on the 2-case [JarRole] axis (same axis
  *  [FireflyDao]'s own logging discipline already draws — see architecture.md § 3). */
 private fun jarDetailCaption(role: JarRole): String = when (role) {
-    JarRole.CREATION -> "every firefly you've created or spotted here"
+    JarRole.CREATION -> "every firefly you've created or caught here"
     JarRole.WATCHING -> "hold it up and see if anything glows nearby"
 }
 
@@ -800,7 +800,7 @@ private fun FireflyDetailContent(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                text = if (caught) "a firefly you created" else "a firefly you spotted",
+                text = if (caught) "a firefly you created" else "a firefly you caught",
                 style = JarType.ActionTitle,
                 color = accent,
                 textAlign = TextAlign.Center,
@@ -892,7 +892,7 @@ private fun FireflyDetailContent(
             )
             MetaCard(
                 label = "direction",
-                value = if (caught) "created" else "spotted",
+                value = if (caught) "created" else "caught",
                 valueColor = accent,
                 modifier = Modifier.weight(1f),
             )
@@ -1065,7 +1065,7 @@ private fun fireflyByteLabel(bytes: Int): String = if (bytes == 1) "1 byte" else
  * `CarrierInsightCaptionsTest`'s sibling JVM tests can drive it directly.
  */
 internal fun fireflySwarmContentDescription(record: FireflyRecord): String {
-    val direction = if (record.direction == "CREATED") "firefly you created" else "firefly you spotted"
+    val direction = if (record.direction == "CREATED") "firefly you created" else "firefly you caught"
     return "$direction, ${formatFireflyTime(record.timestampMillis)}, ${fireflyByteLabel(record.payloadSizeBytes)}"
 }
 

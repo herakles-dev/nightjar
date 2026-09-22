@@ -42,11 +42,11 @@ class FireflySwarmContentDescriptionTest {
     }
 
     @Test
-    fun `received firefly reads as spotted`() {
+    fun `received firefly reads as caught`() {
         val description = fireflySwarmContentDescription(record(direction = "RECEIVED", payloadSizeBytes = 22))
 
         assertEquals(
-            "firefly you spotted, ${formatFireflyTimeForTest(1_000L)}, 22 bytes",
+            "firefly you caught, ${formatFireflyTimeForTest(1_000L)}, 22 bytes",
             description,
         )
     }
