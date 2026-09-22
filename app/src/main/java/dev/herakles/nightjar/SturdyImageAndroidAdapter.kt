@@ -23,8 +23,34 @@ import java.io.ByteArrayOutputStream
 class BitmapPixelSurface(private val bitmap: Bitmap) : SturdyImageCarrier.PixelSurface {
     override val width: Int get() = bitmap.width
     override val height: Int get() = bitmap.height
-    override fun getPixel(x: Int, y: Int): Int = bitmap.getPixel(x, y)
-    override fun setPixel(x: Int, y: Int, argb: Int) = bitmap.setPixel(x, y, argb)
+
+    /**
+     * Caches the most recently read row so [SturdyImageCarrier.cellMeans]'s row-major full-image
+     * scan -- its access pattern for every call site, encode and decode alike -- costs one native
+     * [Bitmap.getPixels] call per ROW instead of one [Bitmap.getPixel] JNI call per PIXEL (gate-41
+     * safety re-audit, finding F-5): up to [Bitmap.width] x [Bitmap.height] calls otherwise, tens
+     * of millions at this app's own 24 MP incoming-file cap, for a bitmap [SturdyImageFireflyDecoder]
+     * hands this class straight from unauthenticated external input on the receive path.
+     *
+     * Correct under any access order, not just row-major: a cache miss just re-fetches the right
+     * row before answering, it never returns stale or wrong data -- this only changes how many
+     * native calls a row-major caller costs, never what any caller reads.
+     */
+    private var cachedRow = -1
+    private val rowBuffer = IntArray(bitmap.width)
+
+    override fun getPixel(x: Int, y: Int): Int {
+        if (y != cachedRow) {
+            bitmap.getPixels(rowBuffer, 0, width, 0, y, width, 1)
+            cachedRow = y
+        }
+        return rowBuffer[x]
+    }
+
+    override fun setPixel(x: Int, y: Int, argb: Int) {
+        bitmap.setPixel(x, y, argb)
+        if (y == cachedRow) rowBuffer[x] = argb
+    }
 }
 
 /**

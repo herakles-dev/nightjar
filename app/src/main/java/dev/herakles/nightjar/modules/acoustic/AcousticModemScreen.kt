@@ -10,6 +10,7 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaCodec
+import android.media.MediaDataSource
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.audiofx.AudioEffect
@@ -1980,6 +1981,16 @@ private const val MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024
  */
 private const val IMPORT_DECODE_TIMEOUT_MS = 30_000L
 
+/**
+ * Hard cap on decoded PCM bytes accumulated by [decodeSelectedTrack]'s drain loop (gate-41
+ * safety re-audit, finding F-1: a decompression-bomb guard). [IMPORT_DECODE_TIMEOUT_MS] is a
+ * wall-clock bound only, not a size bound -- a small compressed file that decodes to mostly
+ * silence can still emit hundreds of MB within that 30s budget on a fast hardware decoder. 8MB
+ * is ~87s of 48kHz mono PCM16, far beyond [MAX_LISTEN_SECONDS] (20s) or this app's own longest
+ * export, so no legitimate decode this app produces can ever hit it.
+ */
+private const val MAX_DECODED_PCM_BYTES = 8 * 1024 * 1024
+
 /** MediaCodec dequeue timeout per poll — the standard value used in Android's own samples. */
 private const val CODEC_TIMEOUT_US = 10_000L
 
@@ -2048,25 +2059,38 @@ private fun readBoundedBytes(context: Context, uri: Uri, maxBytes: Int): ByteArr
  * (container demux) + `MediaCodec` (the platform's own decoder for whatever codec the track
  * uses) — Android's standard decode-to-PCM path, the one this app has no business reimplementing.
  *
- * Reads the first audio track's declared sample rate/channel count from the *container* metadata
- * (available immediately after [MediaExtractor.selectTrack], before any decoding) and, if that
- * already doesn't match [NightjarAcoustics.SAMPLE_RATE_HZ] mono, returns immediately with an
- * empty sample buffer — [AcousticModemController.importAndDecode]'s format check still gets the
- * real numbers to report, without this function burning battery decoding audio `decode()` could
- * never accept anyway.
- *
- * Returns `null` on any failure to open/demux/decode the file, or if it has no audio track.
- *
- * `internal`, not `private` (v6 receive-plumbing, task W1-2): this is the exact MediaExtractor/
- * MediaCodec decode path `dev.herakles.nightjar.incoming.IncomingAndroidAdapters
- * .decodeCompressedAudioForModem` reuses for a shared/opened compressed-audio file's acoustic-
- * modem detection, rather than reimplementing container demux + codec decode a second time.
- * Visibility-only change -- no behavior here is different.
+ * `internal`, not `private` (v6 receive-plumbing, task W1-2): `readAudioFile` (this file's own
+ * file-picker import) is the only remaining `Uri`-based caller.
+ * `dev.herakles.nightjar.incoming.IncomingAndroidAdapters.decodeCompressedAudioForModem` calls
+ * the [ByteArray] overload below instead (gate-41 safety re-audit, finding F-8) so the receive
+ * pipeline decodes from the exact bytes it already read and sniffed, rather than opening the
+ * `Uri` a second time — a hostile `ContentProvider` could otherwise serve different bytes on
+ * each open, persisting a carrier that doesn't actually contain the payload it decoded.
  */
-internal suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? {
+internal suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): ImportedAudio? =
+    decodeExtractorSafely { setDataSource(context, uri, null) }
+
+/**
+ * Same decode as the [Uri] overload above, but from already-read bytes via a [MediaDataSource]
+ * instead of re-opening the source `Uri` (gate-41 safety re-audit, finding F-8). The receive
+ * pipeline's only entry point for compressed audio.
+ */
+internal suspend fun decodeCompressedAudioToPcm(bytes: ByteArray): ImportedAudio? =
+    decodeExtractorSafely { setDataSource(ByteArrayMediaDataSource(bytes)) }
+
+/**
+ * Shared body for both [decodeCompressedAudioToPcm] overloads: configure a fresh
+ * [MediaExtractor] via [configureSource], find its first audio track, short-circuit on a
+ * container-metadata format mismatch, and otherwise drain it through [decodeSelectedTrack] — all
+ * under one failure boundary. Returns `null` on any failure to open/demux/decode the file, or if
+ * it has no audio track.
+ */
+private suspend fun decodeExtractorSafely(
+    configureSource: MediaExtractor.() -> Unit,
+): ImportedAudio? {
     val extractor = MediaExtractor()
     return try {
-        extractor.setDataSource(context, uri, null)
+        extractor.configureSource()
         var trackIndex = -1
         var format: MediaFormat? = null
         for (i in 0 until extractor.trackCount) {
@@ -2109,8 +2133,31 @@ internal suspend fun decodeCompressedAudioToPcm(context: Context, uri: Uri): Imp
         // malformed/unsupported real-world file picked by the operator — this boundary must
         // never crash the app over a bad import, so it fails closed to null instead.
         null
+    } catch (oom: OutOfMemoryError) {
+        // gate-41 safety re-audit, finding F-1: MAX_DECODED_PCM_BYTES below should make this
+        // unreachable in practice, but a large ARGB/PCM allocation can still exhaust a
+        // memory-constrained device's heap even under a byte cap -- fail closed like every other
+        // decode boundary in this app (decodeBoundedBitmap's own precedent), not crash.
+        null
     } finally {
         extractor.release()
+    }
+}
+
+/** A [MediaDataSource] over an in-memory byte array, so [MediaExtractor] can demux already-read
+ *  bytes without a second read of the originating `Uri` (gate-41 safety re-audit, finding F-8). */
+private class ByteArrayMediaDataSource(private val data: ByteArray) : MediaDataSource() {
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        if (position < 0 || position >= data.size) return -1
+        val length = minOf(size.toLong(), data.size - position).toInt()
+        System.arraycopy(data, position.toInt(), buffer, offset, length)
+        return length
+    }
+
+    override fun getSize(): Long = data.size.toLong()
+
+    override fun close() {
+        // No resource to release -- the array is owned by the caller.
     }
 }
 
@@ -2169,6 +2216,11 @@ private suspend fun decodeSelectedTrack(
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
             if (outputIndex >= 0) {
                 if (bufferInfo.size > 0) {
+                    // gate-41 safety re-audit, finding F-1: a decompression-bomb guard.
+                    // IMPORT_DECODE_TIMEOUT_MS bounds wall-clock time only -- without this check,
+                    // a small compressed file that decodes to mostly silence could still grow
+                    // this buffer unboundedly within that budget on a fast hardware decoder.
+                    if (pcmOut.size() + bufferInfo.size > MAX_DECODED_PCM_BYTES) return null
                     val outputBuffer = codec.getOutputBuffer(outputIndex)
                     if (outputBuffer != null) {
                         outputBuffer.position(bufferInfo.offset)

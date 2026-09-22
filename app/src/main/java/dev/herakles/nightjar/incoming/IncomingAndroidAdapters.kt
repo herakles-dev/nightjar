@@ -1,7 +1,6 @@
 package dev.herakles.nightjar.incoming
 
 import android.content.ContentResolver
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -18,6 +17,18 @@ import java.io.IOException
  * only caller.
  */
 object IncomingAndroidAdapters {
+
+    /**
+     * Why a bounded read/decode step below returned nothing usable -- kept distinct from a plain
+     * nullable result (gate-41 safety re-audit, finding F-3) so [IncomingPipeline] can report an
+     * honest [IncomingOutcome.TooLarge] instead of folding "this file is simply too big" into the
+     * same generic [IncomingOutcome.Unsupported] a genuinely-unrecognized format gets.
+     */
+    sealed interface Bounded<out T> {
+        data class Ok<T>(val value: T) : Bounded<T>
+        data object TooLarge : Bounded<Nothing>
+        data object Failed : Bounded<Nothing>
+    }
 
     /** spec.md v6 receive-plumbing build notes: "reject > 50 MB." */
     const val MAX_INCOMING_FILE_BYTES = 50 * 1024 * 1024
@@ -36,42 +47,50 @@ object IncomingAndroidAdapters {
         width.toLong() * height.toLong() > MAX_IMAGE_PIXELS
 
     /**
-     * Reads all of [uri]'s bytes, bounded to [maxBytes]. Never throws -- any I/O failure, a
-     * missing/unreadable Uri, or exceeding the bound, all read as `null` (the caller maps that to
-     * [IncomingOutcome.Unsupported]).
+     * Reads all of [uri]'s bytes, bounded to [maxBytes]. Never throws -- any I/O failure or a
+     * missing/unreadable Uri reads as [Bounded.Failed]; exceeding the bound reads as the
+     * distinct [Bounded.TooLarge] (gate-41 safety re-audit, finding F-3) rather than the same
+     * generic failure, so the caller can report an honest reason instead of discarding it.
      */
     fun readBoundedBytes(
         contentResolver: ContentResolver,
         uri: Uri,
         maxBytes: Int = MAX_INCOMING_FILE_BYTES,
-    ): ByteArray? = try {
-        contentResolver.openInputStream(uri)?.use { stream ->
+    ): Bounded<ByteArray> = try {
+        val stream = contentResolver.openInputStream(uri) ?: return Bounded.Failed
+        stream.use {
             val out = ByteArrayOutputStream()
             val chunk = ByteArray(64 * 1024)
             var total = 0
             while (true) {
-                val n = stream.read(chunk)
+                val n = it.read(chunk)
                 if (n < 0) break
                 total += n
-                if (total > maxBytes) return null
+                if (total > maxBytes) return Bounded.TooLarge
                 out.write(chunk, 0, n)
             }
-            out.toByteArray()
+            Bounded.Ok(out.toByteArray())
         }
     } catch (ioFailure: IOException) {
-        null
+        Bounded.Failed
     } catch (denied: SecurityException) {
-        null
+        Bounded.Failed
+    } catch (oom: OutOfMemoryError) {
+        // gate-41 safety re-audit, finding F-2 (defense in depth): the 50 MB bound already makes
+        // this unreachable in practice, but ByteArrayOutputStream's internal doubling means peak
+        // usage briefly exceeds the final size -- fail closed rather than let an Error escape.
+        Bounded.Failed
     }
 
     /**
      * Bounded image decode (build notes: "bound image decode with inJustDecodeBounds and refuse
      * exact-LSB attempts above ~24 MP"): reads dimensions only first via
      * [BitmapFactory.Options.inJustDecodeBounds], refuses anything over [MAX_IMAGE_PIXELS]
-     * without ever allocating pixel memory for it, then decodes for real. `null` for anything
-     * that isn't a decodable image, is oversized, or runs out of memory anyway despite the bound
-     * (a large `Bitmap.Config.ARGB_8888` allocation can still fail on a memory-constrained
-     * device even under the pixel cap).
+     * without ever allocating pixel memory for it (as the distinct [Bounded.TooLarge], gate-41
+     * safety re-audit finding F-3), then decodes for real. [Bounded.Failed] for anything that
+     * isn't a decodable image, or that runs out of memory anyway despite the bound (a large
+     * `Bitmap.Config.ARGB_8888` allocation can still fail on a memory-constrained device even
+     * under the pixel cap).
      *
      * The whole body is one try/catch (build notes: "never crash on malformed input") -- a
      * sufficiently malformed byte array can make even the bounds-only first decode throw rather
@@ -79,43 +98,48 @@ object IncomingAndroidAdapters {
      * Robolectric test harness; real Android's own OEM decoders are also documented to vary in
      * how defensively they fail), so this doesn't assume only the second, real decode can fail.
      */
-    fun decodeBoundedBitmap(bytes: ByteArray): Bitmap? = try {
+    fun decodeBoundedBitmap(bytes: ByteArray): Bounded<Bitmap> = try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         val width = bounds.outWidth
         val height = bounds.outHeight
         if (width <= 0 || height <= 0) {
-            null
+            Bounded.Failed
         } else if (exceedsPixelLimit(width, height)) {
-            null
+            Bounded.TooLarge
         } else {
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options())
+            val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options())
+            if (decoded == null) Bounded.Failed else Bounded.Ok(decoded)
         }
     } catch (oom: OutOfMemoryError) {
-        null
+        Bounded.Failed
     } catch (malformed: Exception) {
-        null
+        Bounded.Failed
     }
 
     /**
      * Compressed audio -> PCM for the acoustic modem only (build notes: "reuse the modem's
      * MediaExtractor decode for the acoustic modem only"). Delegates to
-     * [dev.herakles.nightjar.modules.acoustic.decodeCompressedAudioToPcm] -- the exact
-     * MediaExtractor/MediaCodec path `AcousticModemScreen.kt`'s own file-import action uses,
-     * reused rather than reimplemented (that function and its `ImportedAudio` result type were
-     * bumped from `private` to `internal` for this call site; no behavior there changed).
+     * [dev.herakles.nightjar.modules.acoustic.decodeCompressedAudioToPcm]'s [ByteArray] overload
+     * -- the exact MediaExtractor/MediaCodec path `AcousticModemScreen.kt`'s own file-import
+     * action uses, reused rather than reimplemented (that function and its `ImportedAudio`
+     * result type were bumped from `private` to `internal` for this call site).
      *
-     * Returns `null` if the file couldn't be read/demuxed at all (unreadable Uri, no audio track,
-     * corrupt container). Returns a non-null but EMPTY array if the container's own declared
-     * sample rate/channel count didn't match [NightjarAcoustics.SAMPLE_RATE_HZ] mono (that
-     * function's own contract, unchanged) -- either way,
-     * [IncomingRouter.routeCompressedAudio] treats "nothing usable" as
+     * Takes [bytes] -- [IncomingPipeline]'s own already-read, already-sniffed copy -- rather than
+     * re-opening the source `Uri` a second time (gate-41 safety re-audit, finding F-8): a hostile
+     * `ContentProvider` could otherwise serve different bytes on each open, persisting a carrier
+     * that doesn't actually contain the payload this function decoded.
+     *
+     * Returns `null` if the bytes couldn't be demuxed at all (no audio track, corrupt container).
+     * Returns a non-null but EMPTY array if the container's own declared sample rate/channel
+     * count didn't match [NightjarAcoustics.SAMPLE_RATE_HZ] mono (that function's own contract,
+     * unchanged) -- either way, [IncomingRouter.routeCompressedAudio] treats "nothing usable" as
      * [SqueezedContainer.COMPRESSED_AUDIO], never a crash. A non-empty result is padded to a
      * whole number of [NightjarAcoustics.FRAME_SAMPLES] via [padToFrameBoundary], the same
      * pre-decode step `AcousticModemController.importAndDecode` applies.
      */
-    suspend fun decodeCompressedAudioForModem(context: Context, uri: Uri): PcmAudio? {
-        val imported = decodeCompressedAudioToPcm(context, uri) ?: return null
+    suspend fun decodeCompressedAudioForModem(bytes: ByteArray): PcmAudio? {
+        val imported = decodeCompressedAudioToPcm(bytes) ?: return null
         if (imported.sampleRateHz != NightjarAcoustics.SAMPLE_RATE_HZ || imported.numChannels != 1) {
             return ShortArray(0)
         }

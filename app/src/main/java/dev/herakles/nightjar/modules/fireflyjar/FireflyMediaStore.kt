@@ -45,11 +45,33 @@ class FireflyMediaStore(private val context: Context) {
      * Because one file can now back several rows, deletion MUST stay reference-counted —
      * see [FireflyRepository]'s `deleteMediaFileIfUnreferenced`. Reverting that would turn
      * deleting one firefly into the silent destruction of another's carrier.
+     *
+     * Refuses to write -- throwing [InsufficientStorageException] -- if fewer than
+     * [MIN_FREE_SPACE_BYTES] would remain on the partition afterward (gate-41 safety re-audit,
+     * finding F-4). This is a device-free-space FLOOR, not a total-received-bytes CEILING: it
+     * never refuses a write while the device genuinely has room, so it never becomes a retention
+     * policy of its own -- spec.md's "retention is user-managed" (`STORAGE_WARNING_THRESHOLD_BYTES`
+     * in `JarShelfScreen.kt` is deliberately advisory-only, "never gates catching") stays intact
+     * for ordinary usage. What this guards against is different: a peer flooding the receive
+     * pipeline with many distinct carriers (content-addressing only dedupes byte-identical ones)
+     * driving the device to ENOSPC mid-write, which without this check would surface as a bare
+     * `IOException` after a partial write rather than a clean refusal before one.
      */
     fun write(bytes: ByteArray, extension: String): String {
         val filename = "${sha256Hex(bytes)}.$extension"
         val file = File(directory, filename)
         if (file.exists() && file.length() == bytes.size.toLong()) return filename
+        // Checked against `directory`, not `file`: `File.usableSpace` is 0 for a path that
+        // doesn't yet exist and "does not name a partition" on some JVM/filesystem combinations
+        // (confirmed empirically under this project's Robolectric test harness) -- `directory`
+        // is always real by this point ([directory]'s own getter `mkdirs()`s it on every access).
+        val usable = directory.usableSpace
+        if (usable < bytes.size.toLong() + MIN_FREE_SPACE_BYTES) {
+            throw InsufficientStorageException(
+                "writing ${bytes.size} bytes would leave under ${MIN_FREE_SPACE_BYTES}B free " +
+                    "($usable available)",
+            )
+        }
         file.writeBytes(bytes)
         return filename
     }
@@ -144,5 +166,17 @@ class FireflyMediaStore(private val context: Context) {
          * shorter than the gap between app launches, which is when real orphans are found.
          */
         internal const val MIN_ORPHAN_AGE_MILLIS = 5 * 60 * 1000L
+
+        /** [write]'s free-space floor (gate-41 safety re-audit, finding F-4) -- see that
+         *  function's KDoc for why this is a floor, not a ceiling. */
+        internal const val MIN_FREE_SPACE_BYTES = 20L * 1024 * 1024
     }
 }
+
+/** Thrown by [FireflyMediaStore.write] when writing would leave the partition below
+ *  [FireflyMediaStore.MIN_FREE_SPACE_BYTES] free (gate-41 safety re-audit, finding F-4). A
+ *  subclass of [java.io.IOException] so every existing `catch (e: IOException)`/`catch (e:
+ *  Exception)` boundary around a catch-site's own persist call already handles it -- most
+ *  directly, [dev.herakles.nightjar.incoming.IncomingPipeline]'s own [Throwable] boundary
+ *  (finding F-2). */
+class InsufficientStorageException(message: String) : java.io.IOException(message)

@@ -10,8 +10,12 @@ import dev.herakles.nightjar.R
  * `IncomingOutcomeCopyTest` (`app/src/test/.../incoming/IncomingOutcomeCopyTest.kt`) resolve the
  * exact same mapping rather than two independently-hand-written copies of it.
  *
- * Six distinct cases, not five: INV-12's five outcomes plus [IncomingOutcome.Squeezed]'s own
- * two-container split (screen-flow.md: "distinct copy for lossy image vs compressed audio").
+ * Eight distinct cases, not five: INV-12's five outcomes, plus [IncomingOutcome.Squeezed]'s own
+ * two-container split (screen-flow.md: "distinct copy for lossy image vs compressed audio"), plus
+ * [IncomingOutcome.TooLarge] -- split out of [IncomingOutcome.Unsupported] (gate-41 safety
+ * re-audit, finding F-3) so a file that's simply too big for the size caps isn't told it's an
+ * unrecognized format -- plus [IncomingOutcome.OutOfSpace] (finding F-4), a verified-but-unstorable
+ * firefly, distinct from both.
  *
  * [titleRes] is a short, static headline (no format args, every outcome). [bodyRes] is the
  * outcome's explanatory sentence -- for every outcome except [IncomingOutcome.Caught] it takes
@@ -56,5 +60,15 @@ fun incomingOutcomeCopyFor(outcome: IncomingOutcome): IncomingOutcomeCopy = when
     is IncomingOutcome.Unsupported -> IncomingOutcomeCopy(
         titleRes = R.string.receive_unsupported_title,
         bodyRes = R.string.receive_unsupported_body,
+    )
+
+    is IncomingOutcome.TooLarge -> IncomingOutcomeCopy(
+        titleRes = R.string.receive_too_large_title,
+        bodyRes = R.string.receive_too_large_body,
+    )
+
+    is IncomingOutcome.OutOfSpace -> IncomingOutcomeCopy(
+        titleRes = R.string.receive_out_of_space_title,
+        bodyRes = R.string.receive_out_of_space_body,
     )
 }

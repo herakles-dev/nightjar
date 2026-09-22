@@ -60,10 +60,10 @@ but the branch has **not** been merged to main yet:
 completed as part of the merge (see next section), the rest remain open on `main`, not just
 on a feature branch.
 
-## Gate 41 — partially run (2 of 5 items closed; still not fully done)
+## Gate 41 — 4 of 5 items closed; one small doc item still open
 
 Gate 41 ("safety and close") is the closing audit for the whole v6 sprint. Status as of the
-2026-09-22 doc-reconciliation pass that preceded the merge:
+2026-09-22 safety re-audit + remediation pass:
 
 - ~~Doc reconciliation~~ — **done**. `architecture.md` had 6 confirmed drift points (stale
   "not built" status on shipped gates 8-9/22-25, a stale `Module` enum snippet, an undercounted
@@ -74,28 +74,68 @@ Gate 41 ("safety and close") is the closing audit for the whole v6 sprint. Statu
   and `design/firefly-jar-identity.md` were not re-audited this pass — still worth a look.
 - ~~Full unit suite run to green~~ — **done**. `./gradlew compileDebugKotlin` clean,
   `./gradlew test` green, all 63 unit test files, 0 failures, run immediately before the merge.
-- Safety-scope checklist re-run (INV-1 benign payloads, INV-10 no new network/storage
-  permission), plus a fresh review of the new incoming-intent surface specifically for
-  malformed and oversized files. **Still open.**
-- v1–v5 on-device spot check on Hek, to catch any regression the sharing/trail work
-  introduced in the older modules. **Still open.**
-- covert-data module-1 cross-reference for the sturdy technique (module-2/§06 were already
-  cross-referenced in the v5 close-out; module-1 is v6's addition). **Still open.**
+- ~~Safety-scope checklist re-run + incoming-intent surface review~~ — **done**. Full audit of
+  `incoming/` (the app's only externally-facing surface) found 2 HIGH, 3 MEDIUM, 4 LOW findings
+  plus a test-coverage gap — all fixed and verified (`./gradlew test` green, 62 test files after
+  adding `IncomingPipelineTest`):
+  - **F-1 (HIGH)**: unbounded PCM accumulation in the compressed-audio decode was a
+    decompression-bomb → uncaught `OutOfMemoryError` crash reachable from a shared file. Fixed
+    with an 8MB hard cap (`AcousticModemScreen.kt`) plus a matching `OutOfMemoryError` catch.
+  - **F-2 (HIGH)**: `IncomingPipeline.route` had no `Throwable`-level boundary — provider
+    exceptions, OOM, or ENOSPC on persist could all crash the app instead of resolving to one of
+    INV-12's outcomes. Fixed: the whole body now runs under one `catch (Throwable)`.
+  - **F-3 (MEDIUM)**: "file too large" was shown to the user as "nightjar doesn't know this kind
+    of file" — the real reason was computed and discarded. Fixed: new `IncomingOutcome.TooLarge`,
+    distinct copy, `IncomingAndroidAdapters` now reports *why* a bounded read/decode failed.
+  - **F-4 (MEDIUM)**: no free-space floor on persisted carriers — `FireflyMediaStore.write` now
+    refuses (new `IncomingOutcome.OutOfSpace`) rather than risk ENOSPC mid-write. Deliberately a
+    device-free-space floor, not a retention ceiling — `STORAGE_WARNING_THRESHOLD_BYTES`'s
+    "retention is user-managed" stays intact for ordinary usage.
+  - **F-5 (MEDIUM)**: unbounded per-pixel JNI `getPixel` scans (tens of millions of calls on a
+    crafted 24MP image) in both image codecs. Fixed: `ImageStegoCarrier.extractBytes` now does
+    one bulk `getPixels()` read per call instead of one JNI call per bit;
+    `BitmapPixelSurface` (sturdy technique) now row-caches via `getPixels()`.
+  - **F-6 (LOW)**: the receive path used the *non*-cancellable `AcousticCarrier.decode()`
+    overload, unlike the modem screen's own (more trusted) file-picker import. Fixed: `routeWav`/
+    `routeCompressedAudio` now thread cooperative cancellation through.
+  - **F-7 (LOW)**: `routeWav` never padded samples to the frame boundary, so a re-saved/trimmed
+    acoustic-modem WAV would silently report `NoFirefly`. Fixed: now pads for the modem loop only.
+  - **F-8 (LOW)**: the compressed-audio branch opened the source `Uri` twice (TOCTOU) — a
+    hostile provider could serve different bytes each time. Fixed: `decodeCompressedAudioToPcm`
+    now has a `ByteArray` overload decoding from the pipeline's own already-read bytes.
+  - **F-9 (LOW)**: the intent filter accepted `file://` with no scheme restriction. Fixed:
+    `IncomingPipeline` now rejects anything but `content://` before any read.
+  - **F-10**: `IncomingPipeline` itself had zero tests. New `IncomingPipelineTest.kt` covers the
+    scheme check, `TooLarge`, the `Throwable` boundary, and a real Caught+persist round trip.
+- ~~v1–v5 on-device spot check on Hek~~ — **done**. Live-checked on Hek: jar shelf, jar detail,
+  firefly detail (capacity line, waveform/spectrogram toggle, playback), and all 4 workshop
+  modules (acoustic modem, image steg, audio steg's 3 codecs, detector) — no crashes, no
+  regressions found post-v6-merge.
+- covert-data module-1 cross-reference for the sturdy technique. **Audited, not yet fixed.**
+  `module_1_image_steganography/README.md` (external repo, `~/covert-data`) exists but is stale
+  — it only documents exact-LSB and predates sturdy. Mismatch found: module-1 describes
+  JPEG-survival as a DCT-coefficient (Javid) technique; sturdy actually implements spatial
+  luminance-QIM + Reed-Solomon FEC — same goal, different mechanism, no safety-claim violation,
+  pure doc-completeness gap. `architecture.md`'s own Sturdy section also has no reciprocal
+  citation back into covert-data, unlike every other technique section. Fix (when approved):
+  add sturdy to module-1's README (module-2's own pattern from the v5 close-out) plus a citation
+  back from `architecture.md`.
 
-The three still-open items are real gaps, not paperwork — the next session should run them
-against `main`, not treat the merge as having closed them.
+Only the module-1 doc item remains — small, external-repo scope, not a safety gap.
 
 ## Test coverage state
 
-63 JVM unit test files under `app/src/test` (no `androidTest` yet). v6 added dedicated
+64 JVM unit test files under `app/src/test` (no `androidTest` yet) — 63 as of the v6 merge, plus
+`IncomingPipelineTest` from the 2026-09-22 gate-41 safety remediation. v6 added dedicated
 coverage alongside the existing per-module tests: `SturdyImageCarrierTest`,
 `SturdyImageCarrierBundledCoverTest`, `SturdyImageSteganalysisRealPhotoTest` for the new
 carrier; `IncomingRouterSturdyTest` and `FileSnifferTest` for the receive pipeline;
 `TrailTargetsTest`, `TrailConstellationTest`, `TrailStateStoreTest`, `TrailVoiceTest`,
 `PracticeFireflyGeneratorTest`, `TrailSourceScanTest` and `MeadowTrailTest` for the riddle
-trail; `SendVoiceTest` and `SendAdviceTest` for the send pipeline. These pass per-gate as each
-landed, but a full-suite closing run — the kind gate-41 calls for — has not been done since
-the post-gate-40 review/fix commits landed.
+trail; `SendVoiceTest` and `SendAdviceTest` for the send pipeline; `IncomingPipelineTest` for
+the receive pipeline's own entry point (gate-41 safety remediation). Full-suite closing run —
+the kind gate-41 calls for — done 2026-09-22: `./gradlew test` green, 0 failures across all 64
+files.
 
 ## Deferred follow-ups
 
