@@ -74,13 +74,19 @@ import dev.herakles.nightjar.SpectrogramData
 import dev.herakles.nightjar.StereoPolarity
 import dev.herakles.nightjar.WavFile
 import dev.herakles.nightjar.incoming.IncomingOutcome
+import dev.herakles.nightjar.incoming.SturdyImageFireflyDecoder
 import dev.herakles.nightjar.matchCover
 import dev.herakles.nightjar.modules.audiostego.AudioSampleCover
 import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import dev.herakles.nightjar.picker.JarRole
 import dev.herakles.nightjar.picker.Module
+import dev.herakles.nightjar.share.FireflyShare
+import dev.herakles.nightjar.share.keepOutgoingCopy
+import dev.herakles.nightjar.share.outgoingKindFor
+import dev.herakles.nightjar.share.sendAdviceStringRes
 import dev.herakles.nightjar.spectrogram
 import dev.herakles.nightjar.trail.TrailStateStore
+import dev.herakles.nightjar.trail.TrailStep
 import dev.herakles.nightjar.trail.trailPracticeGlossRes
 import dev.herakles.nightjar.stegoDifference
 import dev.herakles.nightjar.stereoPolarity
@@ -154,6 +160,14 @@ fun JarDetailScreen(
     var selectedFireflyId by rememberSaveable(module) { mutableStateOf<Long?>(null) }
     val selectedFirefly = fireflies.find { it.id == selectedFireflyId }
     val coroutineScope = rememberCoroutineScope()
+    // v6 (task W2-2, owner direction 2026-09-22, design/riddle-trail.md § Welcome + game layer,
+    // commit 6b9cedf): "send this firefly" carries no glow of its own (that lives on the art
+    // jar's "hide one in a photo" row -- HideInPhotoFlow.kt), but ANY successful send still
+    // advances the SEND step if it's the active one, "so nobody gets stuck." Guarded on the
+    // live trail state here (not inside FireflyDetailContent, which stays TrailStateStore-free
+    // like every other pure/previewable composable in this file) so a send outside the trail
+    // never jumps trail progress forward.
+    val trailState by trailStore.state.collectAsState()
 
     JarDetailContent(
         module = module,
@@ -189,6 +203,8 @@ fun JarDetailScreen(
         // hook, same shape as [loadMedia] -- FireflyDetailContent still holds no TrailStateStore
         // reference of its own.
         isPracticeFirefly = { id -> trailStore.isPractice(id) },
+        // v6 (task W2-2): see this function's own comment above [trailState].
+        onSendOpened = { if (trailState.currentStep == TrailStep.SEND) trailStore.advance(TrailStep.SEND) },
     )
 }
 
@@ -221,6 +237,10 @@ fun JarDetailContent(
     // `{ false }` keeps every existing @Preview call site compiling unchanged, same reasoning
     // this composable's other optional hooks already follow.
     isPracticeFirefly: (Long) -> Boolean = { false },
+    // v6 (task W2-2): called once "send this firefly" 's share sheet actually opens -- see
+    // [FireflyDetailContent]'s own KDoc. Default `{}` keeps every existing @Preview call site
+    // compiling unchanged, same reasoning this composable's other optional hooks already follow.
+    onSendOpened: () -> Unit = {},
 ) {
     // G-01/F-02: shared confirm-delete state for both entry points -- a swarm tile's long-press
     // and the detail popup's explicit delete action. Only one of the two views below is ever
@@ -239,6 +259,7 @@ fun JarDetailContent(
                 loadMedia = loadMedia,
                 onRequestDelete = { pendingDeleteId = selectedFirefly.id },
                 isPracticeFirefly = isPracticeFirefly(selectedFirefly.id),
+                onSendOpened = onSendOpened,
             )
         } else {
             Column(
@@ -727,9 +748,31 @@ private fun FireflyDetailContent(
     // true for a firefly caught from the trail's own practice carrier. Default `false` keeps
     // every existing @Preview call site compiling unchanged.
     isPracticeFirefly: Boolean = false,
+    // v6 (task W2-2, owner direction 2026-09-22): called once "send this firefly" 's share sheet
+    // actually opens -- the trail's SEND-step safety net ("so nobody gets stuck"), regardless of
+    // which firefly or whether the trail is even running (the caller in `JarDetailScreen.kt`
+    // gates the actual `TrailStateStore.advance` call on the live trail state). Default `{}`
+    // keeps every existing @Preview call site compiling unchanged, same reasoning
+    // [isPracticeFirefly] already follows.
+    onSendOpened: () -> Unit = {},
 ) {
     val caught = firefly.direction == "CREATED"
     val accent = if (caught) FireflyCreated else FireflyReceived
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    // v6 (task W2-2, gate-33): "send this firefly" -- only offered for a firefly with stored
+    // media (`FireflyRecord.carrierKind` non-null); [outgoingKindFor] returns null for anything
+    // else (a pre-media-capture-era record), which this block treats as "no send row" rather
+    // than a disabled one.
+    val outgoingKind = remember(firefly.carrierKind, firefly.technique) {
+        outgoingKindFor(firefly.carrierKind, firefly.technique)
+    }
+    var sendBusy by remember(firefly.id) { mutableStateOf(false) }
+    // "not shown again once dismissed or used for that firefly" (design/screen-flow.md v6 "Two
+    // send flows" step 3) -- [showKeepCopy] flips true only after the first successful send this
+    // composition, [keptCopy] once the operator actually taps it; both reset per [firefly.id].
+    var showKeepCopy by remember(firefly.id) { mutableStateOf(false) }
+    var keptCopy by remember(firefly.id) { mutableStateOf(false) }
 
     // No JarNightSky here — JarDetailContent already has this composable inside one, and a
     // second backdrop would just run a duplicate starfield under the first.
@@ -853,6 +896,83 @@ private fun FireflyDetailContent(
                 valueColor = accent,
                 modifier = Modifier.weight(1f),
             )
+        }
+
+        // v6 (task W2-2, gate-33): "send this firefly" -- any firefly with stored media, jar-mode
+        // send via FireflyShare (private cache file, amended INV-5). See this file's own KDoc for
+        // [outgoingKind]/[showKeepCopy]/[keptCopy].
+        val mediaPath = firefly.mediaPath
+        if (outgoingKind != null && mediaPath != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, top = 20.dp, end = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(text = stringResource(sendAdviceStringRes(outgoingKind)), style = JarType.Footer, color = JarTextTertiary)
+                Text(text = stringResource(R.string.send_not_locked), style = JarType.Footer, color = JarTextTertiary)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(JarCardFill)
+                        .border(width = 1.dp, color = JarCardBorder, shape = RoundedCornerShape(8.dp))
+                        .then(
+                            if (!sendBusy) {
+                                Modifier.clickable {
+                                    coroutineScope.launch {
+                                        sendBusy = true
+                                        try {
+                                            val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
+                                            if (bytes != null) {
+                                                val uri = withContext(Dispatchers.IO) {
+                                                    FireflyShare.prepareOutgoing(context, bytes, outgoingKind)
+                                                }
+                                                context.startActivity(FireflyShare.shareIntent(uri, outgoingKind.mimeType))
+                                                onSendOpened()
+                                                showKeepCopy = true
+                                            }
+                                        } finally {
+                                            sendBusy = false
+                                        }
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = stringResource(if (sendBusy) R.string.send_sending_busy_label else R.string.send_row_send_this_firefly),
+                        style = JarType.ButtonLabel,
+                        color = if (sendBusy) JarTextTertiary else accent,
+                    )
+                }
+                if (showKeepCopy) {
+                    Text(
+                        text = stringResource(if (keptCopy) R.string.send_kept_a_copy else R.string.send_keep_a_copy),
+                        style = JarType.Footer,
+                        color = JarTextSecondary,
+                        modifier = Modifier.then(
+                            if (!keptCopy) {
+                                Modifier.clickable {
+                                    coroutineScope.launch {
+                                        val bytes = withContext(Dispatchers.IO) { loadMedia(mediaPath) }
+                                        if (bytes != null) {
+                                            withContext(Dispatchers.IO) { keepOutgoingCopy(context, bytes, outgoingKind) }
+                                        }
+                                        keptCopy = true
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            },
+                        ),
+                    )
+                }
+            }
         }
 
         // G-01/F-02 (gate-20): the popup's own visible delete affordance -- long-press on the
@@ -1202,7 +1322,7 @@ private fun FireflyCarrierBlock(
                             onDismiss = { showFullscreen = false },
                         )
                     }
-                    if (currentBitPlane != null) {
+                    if (currentBitPlane != null && imageBitPlaneAllowed(firefly.technique)) {
                         FireflyBitPlaneToggle(
                             showBitPlane = showBitPlane,
                             accent = accent,
@@ -1219,6 +1339,20 @@ private fun FireflyCarrierBlock(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
+                    } else if (firefly.technique == SturdyImageFireflyDecoder.STURDY_TECHNIQUE) {
+                        // v6 (task W2-2) honesty fix: a bit-plane can't show where a SFLY sturdy
+                        // firefly hides (it isn't LSB-encoded at all -- see imageBitPlaneAllowed's
+                        // KDoc) -- a short caption replaces the toggle instead of offering a view
+                        // that would show only noise unrelated to how this technique actually
+                        // works. Pre-v6 exact fireflies are unchanged (imageBitPlaneAllowed is
+                        // true for them, same toggle as always).
+                        Text(
+                            text = stringResource(R.string.send_sturdy_carrier_caption),
+                            style = JarType.Footer,
+                            color = JarWatchingDim,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
                 currentWav != null && currentPeaks != null -> FireflyAudioCarrier(
@@ -1323,6 +1457,22 @@ private fun rememberPressDim(): Pair<MutableInteractionSource, Float> {
  */
 internal fun imageBitPlaneCaption(): String =
     "even an untouched photo's bit-plane already looks like static, not a picture. fuzz here doesn't mean a message is hiding here."
+
+/**
+ * v6 (task W2-2) honesty fix: [FireflyBitPlaneToggle] only makes sense for the raw-pixel LSB
+ * ("exact") technique -- an LSB bit-plane genuinely shows where that codec hides a payload. The
+ * sturdy technique ([SturdyImageFireflyDecoder.STURDY_TECHNIQUE]) hides in a cell's mean
+ * luminance via dither-QIM on a logical grid (`SturdyImageCarrier`'s own KDoc), never in any
+ * pixel's least-significant bit, so a bit-plane of a sturdy stego image would show the exact same
+ * meaningless static [imageBitPlaneCaption] already warns about for an *untouched* photo --
+ * offering it as if it meant something here would contradict that caption's own honesty. `null`
+ * (a pre-migration/media-less record's absent [dev.herakles.nightjar.modules.fireflyjar
+ * .FireflyRecord.technique]) and every other non-null value (the pre-v6 exact-LSB technique,
+ * which writes `technique = null` -- see `ImageStegoScreen.kt`'s embed/extract catch sites --
+ * so in practice this is `true` for every IMAGE firefly except a sturdy one) keep the toggle.
+ */
+internal fun imageBitPlaneAllowed(technique: String?): Boolean =
+    technique != SturdyImageFireflyDecoder.STURDY_TECHNIQUE
 
 /**
  * P5 (on-device review, honesty): the carrier image's spoken label -- pulled out to a pure
