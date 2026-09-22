@@ -180,8 +180,11 @@ anywhere in the covert-data research base.
   or in-app invite); scanning the gallery or any inbox for fireflies; a detector
   for the sturdy technique (follow-up; the copy says truthfully whether the
   existing image check flags it); lossy-robust audio beyond measuring MFSK;
-  moving pre-v6 hard-coded copy into `strings.xml`; the spectrogram-LSB silent-frame
-  versioned-format fix (follow-up #9)
+  moving pre-v6 hard-coded copy into `strings.xml`. The spectrogram-LSB
+  silent-frame versioned-format fix (follow-up #9) shipped: `AudioStegoCarrier`
+  v2 format skips near-silent frames on encode (payload+trailer only; the
+  header stays dense for version-bootstrapping reasons), no longer forcing a
+  click-train artifact into cover silence; v1 fireflies still decode unchanged
 - **Crosses:** device speaker/mic (AudioRecord/AudioTrack); local
   filesystem/MediaStore for sample images; the existing `hek` ADB bridge for
   install + debug-state verification (not a runtime dependency); no

@@ -56,9 +56,15 @@ class CarrierInsightCaptionsTest {
             spokenWord,
             AudioStegoCarrier(spokenWord, AudioStegoTechnique.SPECTROGRAM_LSB).encode(fillerPayload(5)),
         )
-        val spokenWord40 = stegoDifference(
+        // 200 B, not 40 B: AudioStegoCarrier's v6 near-silent-frame-skip (follow-up A) means a
+        // 40 B payload no longer reaches any created cell on SPOKEN_WORD (its gap frames are now
+        // genuinely skipped, not embedded into -- StegoDifferenceTest's own
+        // "SPOKEN_WORD has no created cells at 5 or 40 bytes post-v2" measurement). 200 B still
+        // produces created cells from ordinary spectral variation in loud content, matching
+        // StegoDifferenceTest's "classifies cells into all three DiffCell kinds" test.
+        val spokenWord200 = stegoDifference(
             spokenWord,
-            AudioStegoCarrier(spokenWord, AudioStegoTechnique.SPECTROGRAM_LSB).encode(fillerPayload(40)),
+            AudioStegoCarrier(spokenWord, AudioStegoTechnique.SPECTROGRAM_LSB).encode(fillerPayload(200)),
         )
         val softSynth5 = stegoDifference(
             softSynth,
@@ -66,9 +72,9 @@ class CarrierInsightCaptionsTest {
         )
 
         // Preconditions this test actually depends on -- mirrors StegoDifferenceTest's own
-        // "SPOKEN_WORD 5 bytes has no created cells, 40 bytes does" measurement.
+        // measurements.
         assertEquals(0, spokenWord5.createdCells)
-        assertTrue(spokenWord40.createdCells > 0)
+        assertTrue(spokenWord200.createdCells > 0)
         assertTrue(softSynth5.createdCells > 0)
 
         assertFalse(
@@ -77,7 +83,7 @@ class CarrierInsightCaptionsTest {
         )
         assertTrue(
             "created cells present: caption must mention the pale cells",
-            stegoDifferenceCaption(spokenWord40).contains("pale cells"),
+            stegoDifferenceCaption(spokenWord200).contains("pale cells"),
         )
         assertTrue(
             "SOFT_SYNTH's fade-in also creates cells: caption must mention them",
@@ -93,7 +99,7 @@ class CarrierInsightCaptionsTest {
         )
         assertTrue(
             "created cells present: caption must mention the audible headphone crackle",
-            stegoDifferenceCaption(spokenWord40).contains("faint crackle"),
+            stegoDifferenceCaption(spokenWord200).contains("faint crackle"),
         )
         assertTrue(
             "SOFT_SYNTH's fade-in also creates cells: caption must mention the audible headphone crackle",

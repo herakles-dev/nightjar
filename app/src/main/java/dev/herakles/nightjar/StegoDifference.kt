@@ -17,8 +17,10 @@ import kotlin.math.sqrt
  * .AudioSampleCover]) are pure, deterministic functions of nothing (a fixed seed / closed-form
  * sines), so [matchCover] re-synthesizes each candidate on demand and verifies the fit against the
  * stego clip itself, rather than trusting a stored id. [dev.herakles.nightjar.AudioStegoTechnique
- * .SPECTROGRAM_LSB] only ever touches a prefix of frames and leaves the rest bit-exact, so a
- * correctly-matched cover's residual energy sits four-plus orders of magnitude below a wrong
+ * .SPECTROGRAM_LSB] only ever touches a bounded, small fraction of frames within `[0,
+ * lastChangedFrame]` and leaves everything else -- including, since the v6 near-silent-frame-skip
+ * fix, any genuinely-silent frame *within* that range too -- bit-exact, so a correctly-matched
+ * cover's residual energy sits four-plus orders of magnitude below a wrong
  * cover's (measured: right cover 6.5e-5 / 1.8e-7, wrong cover 1.2 / 5.98 — design-v5.md §3.1,
  * `scratchpad/proto/run1.txt`), which is what makes a single fixed threshold ([matchCover]'s
  * [MATCH_MAX_RESIDUAL_RATIO]) separate the two cases cleanly without per-clip tuning.
@@ -65,8 +67,8 @@ data class CoverMatch(val label: String, val cover: PcmAudio, val residualRatio:
  *
  * The match statistic — `E[(stego-cover)^2] / E[cover^2]` against [MATCH_MAX_RESIDUAL_RATIO] — is
  * valid here specifically because [dev.herakles.nightjar.AudioStegoTechnique.SPECTROGRAM_LSB]
- * only ever nudges a small prefix of frames and leaves everything else bit-exact (design-v5.md
- * §3.1); it is **not** generally valid for every technique this app has (MFSK's additive tones
+ * only ever nudges a small, bounded fraction of frames and leaves everything else bit-exact
+ * (design-v5.md §3.1); it is **not** generally valid for every technique this app has (MFSK's additive tones
  * outweigh the cover: measured 4.19 for the right cover, 2.05 for the wrong one — same section),
  * which is exactly why callers gate this to `technique == "SPECTROGRAM_LSB"` rather than this
  * function trying to detect technique on its own.
@@ -227,10 +229,14 @@ private const val MIN_LOG_MAGNITUDE = 1e-9
  * A frame is *changed* iff `max|stego-cover| > 1 LSB` anywhere in it — the ">1" (not ">=1")
  * tolerates the same kind of ±1-LSB round-trip jitter [matchCover] tolerates, without ever
  * flagging a frame the codec provably never touched. Only changed frames are FFT'd at all: an
- * untouched frame's row (if it falls between [StegoDifferenceMap.firstChangedFrame] and
- * [StegoDifferenceMap.lastChangedFrame] — the codec's own embedding is contiguous from frame 0, so
- * this should not happen in practice, but this function does not assume that) is left at its
- * default all-[DiffCell.UNCHANGED] classification with no FFT spent on it.
+ * untouched frame's row that falls between [StegoDifferenceMap.firstChangedFrame] and
+ * [StegoDifferenceMap.lastChangedFrame] is left at its default all-[DiffCell.UNCHANGED]
+ * classification with no FFT spent on it. Originally written defensively for embedding that
+ * "should not happen in practice" to be non-contiguous; as of `AudioStegoCarrier`'s v6
+ * near-silent-frame-skip fix (follow-up A), it genuinely is — [SPECTROGRAM_LSB]'s payload+trailer
+ * region can now skip real, near-silent frames *within* the embedded range, and this is exactly
+ * the code path that makes those skipped frames render as UNCHANGED rather than a phantom NUDGED/
+ * CREATED cell.
  */
 fun stegoDifference(cover: PcmAudio, stego: PcmAudio, binCount: Int = 128): StegoDifferenceMap {
     require(cover.size == stego.size) {

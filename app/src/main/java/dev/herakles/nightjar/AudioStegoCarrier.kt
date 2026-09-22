@@ -122,6 +122,56 @@ import kotlin.math.sqrt
  * check like any other non-stego carrier, never to crash. [PHASE_INVERSION] and
  * [AudioStegoTechnique.MFSK] both ignore this constructor parameter entirely.
  *
+ * ### Near-silent-frame skip (v2 format, deferred v6 follow-up)
+ *
+ * The scheme above embeds into every frame in sequence regardless of that frame's own loudness.
+ * On a cover with genuine quiet passages (`AudioSampleCover.SPOKEN_WORD`'s burst/gap "syllable"
+ * timing, whose gaps measure near-zero guard-band energy — see below), [LOG_MAGNITUDE_FLOOR]
+ * forcing a handful of near-silent bins up to an audible floor produces a small click train
+ * concentrated exactly in the quiet passages, worse contrast there than the same nudge buried in
+ * louder content. Frame version 2 ([SPECTROGRAM_LSB_VERSION_2]) fixes this by skipping frames
+ * that are themselves near-silent, leaving them byte-identical to the cover.
+ *
+ * **Eligibility signal, and why it's provably encode/decode-consistent:** a frame's *guard-band*
+ * energy — the summed magnitude of bins `0 until ELIGIBLE_BIN_START` (see [guardBandEnergy]) —
+ * against [SILENCE_GUARD_ENERGY_THRESHOLD]. Those bins are bins [embedBitInBin] never touches,
+ * for *any* frame, eligible or not — so a frame's guard-band energy computed from [cover] at
+ * encode time and computed from the resulting stego carrier at decode time are not merely close,
+ * they are bit-for-bit the same input, always. There is no threshold-boundary edge case where
+ * encode and decode could disagree about a frame's eligibility, unlike a whole-frame-energy or
+ * time-domain-RMS signal would risk for an *eligible* (embedded-into) frame sitting near the
+ * cutoff. [SILENCE_GUARD_ENERGY_THRESHOLD]'s own KDoc has the measured numbers behind 100,000.
+ *
+ * **Header/version bootstrapping:** a decoder cannot know a carrier's version before reading its
+ * header, so the header's own frames (`0 until headerFrameCount`, see that function) are *always*
+ * embedded densely, exactly like v1, regardless of loudness or version — the eligibility skip
+ * only applies to the payload+trailer that follows, once the version byte has actually been read.
+ * At 7 header bytes (56 bits) this is at most a handful of frames, bounded cost even if the cover
+ * happens to open on silence.
+ *
+ * **Real, measured effect (offline JVM measurement, `AudioSampleCover.SOFT_SYNTH`/`SPOKEN_WORD`,
+ * both at their default `stegoStrength`):** on `SPOKEN_WORD`'s genuine burst/gap silence, frames
+ * that land in the payload+trailer region and inside a gap are now left completely untouched
+ * (measured residual literally 0 vs. the old dense algorithm's ~-74 dBFS there) — the click-train
+ * case this fix targets, fixed. **This does NOT fix `AudioStegoScreen.kt`'s documented "faint
+ * crackle in the soft-synth cover's near-silent fade-in"** honesty caption: `SOFT_SYNTH`'s
+ * fade-in falls inside the header's own always-dense leading frames (at this technique's default
+ * `stegoStrength`, `headerFrameCount` alone spans the whole attack ramp), which the bootstrapping
+ * constraint above deliberately never silence-gates. That caption stays accurate and unchanged.
+ *
+ * **Capacity is now content-dependent, not a pure arithmetic formula**, for this technique only —
+ * [totalCapacityBytes] scans [cover] once (see [spectrogramLsbCapacityBytesV2]) rather than
+ * computing `(numFrames * binsPerFrame) / 8`. [totalCapacityBytes]/[maxPayloadBytes]/[canEmbed]
+ * are `by lazy` (harmless for [PHASE_INVERSION]/[MFSK], whose formulas stay O(1)) so a construct-
+ * then-[decode] caller — the receive pipeline's auto-detect loop — never pays this scan's cost;
+ * only a caller that actually reads [maxPayloadBytes] (the technique-picker UI's live capacity
+ * counter) or calls [encode] does.
+ *
+ * **Backward compatibility (INV-9):** v1 carriers — every spectrogram-LSB firefly caught before
+ * this fix — decode exactly as before, byte-for-byte the original dense algorithm; [encode]
+ * always writes v2 going forward. [decodeSpectrogramLsb] accepts either version byte and branches
+ * its payload+trailer extraction algorithm on which one the header actually declares.
+ *
  * ## MFSK technique
  *
  * Trades capacity for resilience against in-clip noise/corruption, via multi-frequency on/off
@@ -248,6 +298,11 @@ import kotlin.math.sqrt
  * it applies real Reed-Solomon FEC (see the "MFSK technique" section above) and reports the
  * actual `RsDecodeResult.correctedErrors` count.
  *
+ * **Version byte, [SPECTROGRAM_LSB] only:** [PHASE_INVERSION] and [MFSK] always write and require
+ * exactly [VERSION] (0x01) — their formats are untouched by the near-silent-frame-skip addition
+ * above. [SPECTROGRAM_LSB] writes [SPECTROGRAM_LSB_VERSION_2] (0x02) and accepts either version on
+ * decode; see that section for why.
+ *
  * ## Capacity
  *
  * `maxPayloadBytes` is derived from [cover]'s *mono* sample count and [technique]'s embedding
@@ -303,13 +358,24 @@ class AudioStegoCarrier(
     private val binsPerFrame: Int = (stegoStrength * BINS_PER_STRENGTH_LEVEL)
         .coerceAtMost(FRAME_SIZE / 2 - ELIGIBLE_BIN_START - 1)
 
-    private val totalCapacityBytes: Int = when (technique) {
-        AudioStegoTechnique.PHASE_INVERSION -> phaseInversionCapacityBytes(cover.size)
-        AudioStegoTechnique.SPECTROGRAM_LSB -> spectrogramLsbCapacityBytes(cover.size / FRAME_SIZE)
-        AudioStegoTechnique.MFSK -> mfskCapacityBytes(cover.size)
+    /**
+     * `by lazy`, not eager (near-silent-frame-skip addition): [SPECTROGRAM_LSB]'s branch now
+     * scans [cover] ([spectrogramLsbCapacityBytesV2]) rather than a pure O(1) formula. Deferring
+     * the scan to first access means a construct-then-[decode] caller — [IncomingRouter]'s
+     * auto-detect loop, the only caller that never reads this property — pays nothing extra;
+     * only a caller that reads [maxPayloadBytes] (the technique picker's capacity counter) or
+     * calls [encode] triggers it. Harmless no-op change for [PHASE_INVERSION]/[MFSK], whose
+     * formulas stay cheap O(1) arithmetic either way.
+     */
+    private val totalCapacityBytes: Int by lazy {
+        when (technique) {
+            AudioStegoTechnique.PHASE_INVERSION -> phaseInversionCapacityBytes(cover.size)
+            AudioStegoTechnique.SPECTROGRAM_LSB -> spectrogramLsbCapacityBytesV2(cover)
+            AudioStegoTechnique.MFSK -> mfskCapacityBytes(cover.size)
+        }
     }
 
-    override val maxPayloadBytes: Int = (totalCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
+    override val maxPayloadBytes: Int by lazy { (totalCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0) }
 
     /**
      * True if [cover] has enough raw capacity, at this instance's [technique] (and
@@ -323,7 +389,7 @@ class AudioStegoCarrier(
      * with a message that says so directly; callers (the screens) use it to show "this cover is
      * too small to hide anything" instead of a bare `0 / 0 bytes` counter.
      */
-    val canEmbed: Boolean = totalCapacityBytes >= FRAME_OVERHEAD_BYTES
+    val canEmbed: Boolean by lazy { totalCapacityBytes >= FRAME_OVERHEAD_BYTES }
 
     override fun encode(payload: ByteArray): PcmAudio = when (technique) {
         AudioStegoTechnique.PHASE_INVERSION -> encodePhaseInversion(payload)
@@ -465,48 +531,78 @@ class AudioStegoCarrier(
     private fun encodeSpectrogramLsb(payload: ByteArray): PcmAudio {
         require(canEmbed) {
             "cover (${cover.size} samples, $totalCapacityBytes-byte spectrogram-LSB capacity at " +
-                "stegoStrength=$stegoStrength) cannot hold even an empty payload frame " +
-                "($FRAME_OVERHEAD_BYTES bytes) -- this cover is too small to hide anything"
+                "stegoStrength=$stegoStrength, after skipping near-silent frames) cannot hold " +
+                "even an empty payload frame ($FRAME_OVERHEAD_BYTES bytes) -- this cover is too " +
+                "small (or too quiet) to hide anything"
         }
         require(payload.size <= maxPayloadBytes) {
             "payload of ${payload.size} bytes exceeds this ${cover.size}-sample cover's " +
-                "spectrogram-LSB capacity of $maxPayloadBytes bytes at stegoStrength=$stegoStrength"
+                "spectrogram-LSB capacity of $maxPayloadBytes bytes at stegoStrength=$stegoStrength " +
+                "(after skipping near-silent frames)"
         }
-        val frame = buildFrame(payload)
+        val frame = buildFrame(payload, version = SPECTROGRAM_LSB_VERSION_2)
         val totalBits = frame.size * 8
+        val headerBits = HEADER_BYTES * 8
         val numFrames = cover.size / FRAME_SIZE
-        check(totalBits <= numFrames.toLong() * binsPerFrame) {
-            "frame bits ($totalBits) exceed available bins (${numFrames.toLong() * binsPerFrame}) " +
-                "-- should be unreachable once canEmbed and the payload-size check above both hold"
-        }
+        val headerFrames = spectrogramLsbHeaderFrameCount(binsPerFrame)
 
-        // Start from an exact copy of `cover`: every frame past the last embedded bit, and every
-        // `cover.size % FRAME_SIZE` remainder sample outside any frame, is left untouched rather
-        // than round-tripped through fft/ifft -- both are already bit-exact this way, which is
-        // strictly safer than relying on the ~1e-9 relative rounding guarantee documented in the
-        // class KDoc (and cheaper, since it skips FFTs that would carry no payload bits anyway).
+        // Start from an exact copy of `cover`: every skipped frame (near-silent, or past the
+        // last embedded bit), and every `cover.size % FRAME_SIZE` remainder sample outside any
+        // frame, is left untouched rather than round-tripped through fft/ifft -- both are
+        // already bit-exact this way, cheaper too (skips FFTs that would carry no bits anyway).
         val out = cover.copyOf()
         var bitIndex = 0
         var frameIndex = 0
+
+        // Phase 1 -- header, dense and unconditional of loudness (class KDoc "near-silent-frame
+        // skip (v2)": a decoder can't know the version before reading the header, so the
+        // header's own frames are never silence-gated at either end). The `frameIndex < numFrames`
+        // bound is defensive -- unreachable via the public API, since canEmbed (backed by
+        // spectrogramLsbCapacityBytesV2's own `numFrames < headerFrames -> 0` guard) already
+        // refuses to reach this loop for a cover too short to hold a header.
+        while (frameIndex < headerFrames && frameIndex < numFrames && bitIndex < headerBits) {
+            val start = frameIndex * FRAME_SIZE
+            val re = DoubleArray(FRAME_SIZE) { i -> cover[start + i].toDouble() }
+            val im = DoubleArray(FRAME_SIZE)
+            fft(re, im)
+            var binSlot = 0
+            while (binSlot < binsPerFrame && bitIndex < headerBits) {
+                embedBitInBin(re, im, ELIGIBLE_BIN_START + binSlot, bitAt(frame, bitIndex))
+                binSlot++
+                bitIndex++
+            }
+            ifft(re, im)
+            for (i in 0 until FRAME_SIZE) out[start + i] = roundToShort(re[i])
+            frameIndex++
+        }
+        check(bitIndex == headerBits) {
+            "cover ran out of frames while embedding the header ($bitIndex/$headerBits header " +
+                "bits) -- should be unreachable once canEmbed holds"
+        }
+
+        // Phase 2 -- payload + trailer, silence-skip-aware: frames whose guard-band energy is
+        // under SILENCE_GUARD_ENERGY_THRESHOLD are left completely untouched.
         while (frameIndex < numFrames && bitIndex < totalBits) {
             val start = frameIndex * FRAME_SIZE
             val re = DoubleArray(FRAME_SIZE) { i -> cover[start + i].toDouble() }
             val im = DoubleArray(FRAME_SIZE)
             fft(re, im)
-
-            var binSlot = 0
-            while (binSlot < binsPerFrame && bitIndex < totalBits) {
-                val bin = ELIGIBLE_BIN_START + binSlot
-                embedBitInBin(re, im, bin, bitAt(frame, bitIndex))
-                binSlot++
-                bitIndex++
-            }
-
-            ifft(re, im)
-            for (i in 0 until FRAME_SIZE) {
-                out[start + i] = roundToShort(re[i])
+            if (guardBandEnergy(re, im) >= SILENCE_GUARD_ENERGY_THRESHOLD) {
+                var binSlot = 0
+                while (binSlot < binsPerFrame && bitIndex < totalBits) {
+                    embedBitInBin(re, im, ELIGIBLE_BIN_START + binSlot, bitAt(frame, bitIndex))
+                    binSlot++
+                    bitIndex++
+                }
+                ifft(re, im)
+                for (i in 0 until FRAME_SIZE) out[start + i] = roundToShort(re[i])
             }
             frameIndex++
+        }
+        check(bitIndex == totalBits) {
+            "cover ran out of eligible (non-silent) frames while embedding the payload+trailer " +
+                "($bitIndex/$totalBits bits) -- should be unreachable once canEmbed and the " +
+                "payload-size check above both hold"
         }
         return out
     }
@@ -521,8 +617,8 @@ class AudioStegoCarrier(
      */
     private fun decodeSpectrogramLsb(carrier: PcmAudio): DecodeResult {
         val numFrames = carrier.size / FRAME_SIZE
-        val carrierCapacityBytes = spectrogramLsbCapacityBytes(numFrames)
-        if (carrierCapacityBytes < HEADER_BYTES) {
+        val headerFrames = spectrogramLsbHeaderFrameCount(binsPerFrame)
+        if (numFrames < headerFrames) {
             return DecodeResult.Failure(
                 DecodeFailure.NO_PAYLOAD_FOUND,
                 "carrier ($numFrames usable $FRAME_SIZE-sample frames) is too short to hold a " +
@@ -530,14 +626,17 @@ class AudioStegoCarrier(
             )
         }
 
+        // Header: always dense, regardless of eventual version -- class KDoc "near-silent-frame
+        // skip (v2)"'s bootstrapping note. Unchanged from the pre-v2 algorithm.
         val header = extractSpectrogramBytes(carrier, 0, HEADER_BYTES)
         if ((header[0].toInt() and 0xFF) != MAGIC) {
             return DecodeResult.Failure(DecodeFailure.NO_PAYLOAD_FOUND, "no stego magic byte found")
         }
-        if ((header[1].toInt() and 0xFF) != VERSION) {
+        val headerVersion = header[1].toInt() and 0xFF
+        if (headerVersion != VERSION && headerVersion != SPECTROGRAM_LSB_VERSION_2) {
             return DecodeResult.Failure(
                 DecodeFailure.HEADER_INVALID,
-                "unsupported frame version ${header[1].toInt() and 0xFF}",
+                "unsupported frame version $headerVersion",
             )
         }
         val declaredHeaderCrc = header[6].toInt() and 0xFF
@@ -553,16 +652,36 @@ class AudioStegoCarrier(
         if (length < 0) {
             return DecodeResult.Failure(DecodeFailure.HEADER_INVALID, "negative declared length $length")
         }
-        val maxPayloadForCarrier = (carrierCapacityBytes - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
-        if (length > maxPayloadForCarrier) {
+        // A coarse, cheap (O(1), no FFT) upper bound shared by both versions -- v2's real,
+        // content-dependent capacity can only be <= this dense-formula ceiling, so rejecting
+        // anything above it here is always safe, and bounds the ByteArray/IntArray allocations
+        // below against a forged/corrupted declared length before any real work happens.
+        val maxPossibleForCarrier = (spectrogramLsbCapacityBytes(numFrames) - FRAME_OVERHEAD_BYTES).coerceAtLeast(0)
+        if (length > maxPossibleForCarrier) {
             return DecodeResult.Failure(
                 DecodeFailure.PAYLOAD_TOO_LARGE,
-                "declared length $length exceeds this carrier's $maxPayloadForCarrier-byte capacity",
+                "declared length $length exceeds this carrier's $maxPossibleForCarrier-byte capacity",
             )
         }
 
-        val payload = extractSpectrogramBytes(carrier, HEADER_BYTES * 8, length)
-        val trailer = extractSpectrogramBytes(carrier, (HEADER_BYTES + length) * 8, TRAILER_BYTES)
+        val payload: ByteArray
+        val trailer: ByteArray
+        if (headerVersion == VERSION) {
+            // v1: dense, byte-for-byte the original algorithm (INV-9) -- unchanged.
+            payload = extractSpectrogramBytes(carrier, HEADER_BYTES * 8, length)
+            trailer = extractSpectrogramBytes(carrier, (HEADER_BYTES + length) * 8, TRAILER_BYTES)
+        } else {
+            // v2: silence-skip-aware, starting at the fresh frame boundary the (always-dense)
+            // header left off at -- mirrors encodeSpectrogramLsb's phase 2 exactly.
+            val body = extractSpectrogramBytesV2(carrier, headerFrames, length + TRAILER_BYTES)
+                ?: return DecodeResult.Failure(
+                    DecodeFailure.PAYLOAD_TOO_LARGE,
+                    "declared length $length exceeds this carrier's eligible (non-silent) capacity",
+                )
+            payload = body.copyOfRange(0, length)
+            trailer = body.copyOfRange(length, length + TRAILER_BYTES)
+        }
+
         val declaredCrc32 = ((trailer[0].toLong() and 0xFF) shl 24) or
             ((trailer[1].toLong() and 0xFF) shl 16) or
             ((trailer[2].toLong() and 0xFF) shl 8) or
@@ -582,6 +701,88 @@ class AudioStegoCarrier(
      * time, for a carrier's own frame count (which may differ from [cover]'s).
      */
     private fun spectrogramLsbCapacityBytes(numFrames: Int): Int = (numFrames * binsPerFrame) / 8
+
+    /**
+     * Real, content-dependent capacity for the v2 (near-silent-frame-skip) format: the header
+     * itself always costs exactly `HEADER_BYTES*8` bits (dense, unconditional), but
+     * payload+trailer capacity only counts [spectrogramLsbHeaderFrameCount]-and-later frames whose
+     * [guardBandEnergy] clears [SILENCE_GUARD_ENERGY_THRESHOLD] -- mirrors [encodeSpectrogramLsb]'s
+     * own two-phase walk exactly, so this is genuinely "how many bytes would
+     * [encodeSpectrogramLsb] actually fit," not an approximation of it.
+     *
+     * Deliberately `HEADER_BYTES*8`, NOT `headerFrameCount * binsPerFrame`, as the header's own
+     * cost: whenever `HEADER_BYTES*8` isn't an exact multiple of [binsPerFrame], the header's own
+     * last frame has bin slots [encodeSpectrogramLsb]'s phase 1 never writes to (it stops the
+     * instant `bitIndex == headerBits`, mid-frame) -- those leftover slots are wasted, not
+     * available to payload+trailer either (phase 2 always starts at a fresh frame boundary).
+     * Counting `headerFrameCount * binsPerFrame` here would overcount by exactly that waste,
+     * letting [maxPayloadBytes] claim more than [encodeSpectrogramLsb] can actually fit -- caught
+     * by this class's own round-trip tests as `encode()`'s `check(bitIndex == totalBits)`
+     * assertion failing on an accepted-but-too-large payload.
+     *
+     * One FFT per candidate frame; [totalCapacityBytes] caches this (`by lazy`), so it only runs
+     * once per instance.
+     */
+    private fun spectrogramLsbCapacityBytesV2(cover: PcmAudio): Int {
+        val numFrames = cover.size / FRAME_SIZE
+        val headerFrames = spectrogramLsbHeaderFrameCount(binsPerFrame)
+        if (numFrames < headerFrames) return 0 // too short to even hold a header
+        var totalBits = HEADER_BYTES * 8
+        var frameIndex = headerFrames
+        while (frameIndex < numFrames) {
+            val start = frameIndex * FRAME_SIZE
+            val re = DoubleArray(FRAME_SIZE) { i -> cover[start + i].toDouble() }
+            val im = DoubleArray(FRAME_SIZE)
+            fft(re, im)
+            if (guardBandEnergy(re, im) >= SILENCE_GUARD_ENERGY_THRESHOLD) {
+                totalBits += binsPerFrame
+            }
+            frameIndex++
+        }
+        return totalBits / 8
+    }
+
+    /**
+     * Payload+trailer extraction for a v2 carrier, starting at frame [startFrame] (the fresh
+     * frame boundary the always-dense header extraction left off at). Mirrors
+     * [encodeSpectrogramLsb]'s phase 2 exactly: walks frames forward from [startFrame], reading
+     * [binsPerFrame] bits from each frame whose [guardBandEnergy] clears
+     * [SILENCE_GUARD_ENERGY_THRESHOLD], skipping the rest untouched. Returns `null` -- never
+     * throws -- if [carrier] runs out of frames before [numBytes] bytes are read; the caller maps
+     * that to [DecodeFailure.PAYLOAD_TOO_LARGE], same as every other capacity-exceeded case in
+     * this codebase.
+     */
+    private fun extractSpectrogramBytesV2(carrier: PcmAudio, startFrame: Int, numBytes: Int): ByteArray? {
+        val numFrames = carrier.size / FRAME_SIZE
+        val totalBits = numBytes * 8
+        val bits = IntArray(totalBits)
+        var bitIndex = 0
+        var frameIndex = startFrame
+        while (frameIndex < numFrames && bitIndex < totalBits) {
+            val start = frameIndex * FRAME_SIZE
+            val re = DoubleArray(FRAME_SIZE) { i -> carrier[start + i].toDouble() }
+            val im = DoubleArray(FRAME_SIZE)
+            fft(re, im)
+            if (guardBandEnergy(re, im) >= SILENCE_GUARD_ENERGY_THRESHOLD) {
+                var binSlot = 0
+                while (binSlot < binsPerFrame && bitIndex < totalBits) {
+                    bits[bitIndex] = readBitFromBin(re, im, ELIGIBLE_BIN_START + binSlot)
+                    binSlot++
+                    bitIndex++
+                }
+            }
+            frameIndex++
+        }
+        if (bitIndex < totalBits) return null
+
+        val out = ByteArray(numBytes)
+        for (i in 0 until numBytes) {
+            var value = 0
+            for (b in 0 until 8) value = (value shl 1) or bits[i * 8 + b]
+            out[i] = value.toByte()
+        }
+        return out
+    }
 
     /**
      * Recovers one payload bit from [carrier] at bit position [bitIndex], using this instance's
@@ -828,10 +1029,13 @@ class AudioStegoCarrier(
 
     // --- Frame assembly (same shape as ImageStegoCarrier.buildFrame) ---
 
-    private fun buildFrame(payload: ByteArray): ByteArray {
+    /** [version] defaults to [VERSION] (0x01) -- every technique except [SPECTROGRAM_LSB] passes
+     *  no argument here and keeps writing that, unchanged. [SPECTROGRAM_LSB] passes
+     *  [SPECTROGRAM_LSB_VERSION_2] (near-silent-frame skip, class KDoc). */
+    private fun buildFrame(payload: ByteArray, version: Int = VERSION): ByteArray {
         val header = ByteArray(HEADER_BYTES)
         header[0] = MAGIC.toByte()
-        header[1] = VERSION.toByte()
+        header[1] = version.toByte()
         header[2] = (payload.size ushr 24).toByte()
         header[3] = (payload.size ushr 16).toByte()
         header[4] = (payload.size ushr 8).toByte()
@@ -945,6 +1149,27 @@ class AudioStegoCarrier(
         /** Header size in bytes (magic, version, length[4], header_crc). */
         private const val HEADER_BYTES = 7
 
+        /**
+         * [SPECTROGRAM_LSB]'s v2 frame version -- near-silent-frame skip (class KDoc). Distinct
+         * from [VERSION] (which [PHASE_INVERSION]/[MFSK] still write, and which older
+         * spectrogram-LSB fireflies were caught under) so [decodeSpectrogramLsb] can tell which
+         * payload+trailer extraction algorithm a given carrier needs.
+         */
+        private const val SPECTROGRAM_LSB_VERSION_2 = 0x02
+
+        /**
+         * How many of a [SPECTROGRAM_LSB] frame's [HEADER_BYTES]-holding leading frames the
+         * header itself occupies, at [binsPerFrame] bits/frame -- `ceil(HEADER_BYTES*8 /
+         * binsPerFrame)`. Both [encodeSpectrogramLsb] and [decodeSpectrogramLsb] treat this as the
+         * fixed frame boundary where the always-dense header ends and (for v2) the silence-skip
+         * payload+trailer walk begins -- any bin slots left over in the header's own last frame
+         * are deliberately unused rather than reused for payload bits, so this boundary is a pure
+         * function of [binsPerFrame] alone, computable identically by encode and decode without
+         * needing to track exactly how many bits landed in that final header frame.
+         */
+        private fun spectrogramLsbHeaderFrameCount(binsPerFrame: Int): Int =
+            (HEADER_BYTES * 8 + binsPerFrame - 1) / binsPerFrame
+
         /** Trailer size in bytes (payload_crc32). */
         private const val TRAILER_BYTES = 4
 
@@ -1040,6 +1265,35 @@ class AudioStegoCarrier(
          * when `M` is already small.
          */
         private const val LOG_MAGNITUDE_FLOOR = 1000.0
+
+        /**
+         * Minimum [guardBandEnergy] (summed magnitude of bins `0 until ELIGIBLE_BIN_START`) for a
+         * [SPECTROGRAM_LSB] frame to be eligible for v2 embedding -- near-silent-frame skip, class
+         * KDoc. Measured against both bundled covers' real per-frame guard-band energy
+         * (`AudioSampleCover.SPOKEN_WORD`/`SOFT_SYNTH`, 234 frames each, offline JVM measurement):
+         * SPOKEN_WORD's genuine burst/gap silence gaps measured 0-7,126 (median of the whole
+         * clip's frames: ~3.1M); the lowest energy measured on *any* frame containing real content
+         * on either cover (SOFT_SYNTH's second frame, still inside its 0.4s attack ramp) was
+         * 171,818. 100,000 sits with over an order of magnitude of margin below that real-content
+         * floor and well over 10x above the measured silence ceiling -- comfortable headroom on
+         * both sides of a cleanly bimodal distribution, not a threshold picked to just barely work.
+         */
+        private const val SILENCE_GUARD_ENERGY_THRESHOLD = 100_000.0
+
+        /**
+         * Summed magnitude of bins `0 until ELIGIBLE_BIN_START` of one frame's spectrum ([re]/
+         * [im], already FFT'd) -- [embedBitInBin] never touches these bins, for any frame, so this
+         * is the same value whether computed from [cover] at encode time or from the resulting
+         * stego carrier at decode time (class KDoc's "why it's provably encode/decode-consistent"
+         * paragraph). Used against [SILENCE_GUARD_ENERGY_THRESHOLD] to decide v2 frame eligibility.
+         */
+        private fun guardBandEnergy(re: DoubleArray, im: DoubleArray): Double {
+            var sum = 0.0
+            for (bin in 0 until ELIGIBLE_BIN_START) {
+                sum += sqrt(re[bin] * re[bin] + im[bin] * im[bin])
+            }
+            return sum
+        }
 
         // --- MFSK constants ---
 

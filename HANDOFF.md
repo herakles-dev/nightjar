@@ -142,10 +142,32 @@ files.
 - **True phase-coding codec for audio stego** — the current phase-inversion technique is a
   simpler stereo-invert trick, not full phase coding; a proper phase-coding implementation
   is real, separate scope.
-- **SLSB near-silent-frame skip (versioned embedding format)** — spectrogram-LSB's QIM
-  currently embeds into near-silent cover frames too, producing the small measured click
-  train the honesty caption discloses; skipping those frames would need a new, versioned
-  embedding format (existing caught fireflies depend on the current one).
+
+~~**SLSB near-silent-frame skip (versioned embedding format)**~~ — **shipped 2026-09-22.**
+`AudioStegoCarrier`'s spectrogram-LSB technique now has a v2 frame format
+(`SPECTROGRAM_LSB_VERSION_2`): the header stays dense (unconditional of loudness — a decoder
+can't know the version before reading it), but payload+trailer embedding now skips frames
+whose guard-band energy (bins never touched by QIM, so provably identical whether measured
+from cover or stego) falls under a measured 100,000 threshold. Real, measured effect: a
+mid-clip silence gap on `AudioSampleCover.SPOKEN_WORD` that used to read -74 dBFS residual
+now reads -270 dBFS (literally untouched). `flagged`/`confidence` in `AudioStegDetector`
+stay perfect (1.0) across the whole matrix; only its secondary byte-size *estimate* degrades
+for near-max-capacity payloads on gap-heavy covers (documented, tolerance widened 4→180B,
+`AudioStegDetectorTest`'s own KDoc explains why). v1 carriers (every spectrogram-LSB firefly
+caught before this fix) still decode byte-for-byte unchanged (INV-9).
+
+**Does NOT fix** `AudioStegoScreen.kt`'s documented "faint crackle in the soft-synth cover's
+near-silent fade-in" — `SOFT_SYNTH`'s fade-in falls inside the header's own always-dense
+leading frames, which the bootstrapping constraint deliberately never silence-gates. That
+caption stays accurate and was left unchanged; measured directly (offline JVM, not assumed)
+before deciding not to touch it.
+
+Also found and fixed along the way (real bugs, not just test recalibration): a capacity-
+formula error where header-frame bin-slot waste was double-counted as available payload
+capacity (`encode()` could accept a payload it then couldn't actually fit — the underlying
+cause, not just a downstream test issue); `StegoDifference.kt`'s stale "SPECTROGRAM_LSB only
+ever touches a prefix of frames" docs (the function itself already handled non-contiguous
+changes defensively — no production fix needed there, just outdated comments).
 
 (The v1–v5 close-out's third deferred item — Canvas carrier-view a11y labels — shipped in v6
 gate-38 and is no longer open.)

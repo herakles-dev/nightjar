@@ -233,7 +233,11 @@ class StegoDifferenceTest {
                 } else {
                     listOf(0, 5, 40, 200)
                 }
-                for (len in lengths) {
+                // v6 near-silent-frame-skip (follow-up A): capacity is now content-dependent, so
+                // a fixed {0,5,40,200} sweep can exceed a gap-heavy cover's real capacity at some
+                // strength -- skip rather than let encode() throw (SpectrogramTest's own sweeps
+                // use a similar `minOf(N, maxPayloadBytes)` clamp for the same reason).
+                for (len in lengths.filter { it <= carrier.maxPayloadBytes }) {
                     val stego = carrier.encode(fillerPayload(len))
                     val map = stegoDifference(pcm, stego)
 
@@ -245,10 +249,29 @@ class StegoDifferenceTest {
                         0,
                         map.firstChangedFrame,
                     )
-                    assertEquals(
-                        "$cover strength=$strength len=$len: wrong changed frame count",
-                        expectedChangedFrames,
-                        map.lastChangedFrame - map.firstChangedFrame + 1,
+                    // AudioStegoCarrier's v6 near-silent-frame-skip (follow-up A): the embedded
+                    // range can now contain genuinely-skipped (untouched) frames in the middle,
+                    // not just a dense prefix -- stegoDifference's own class KDoc already
+                    // documents handling that defensively ("the codec's own embedding is
+                    // contiguous from frame 0... but this function does not assume that"). So the
+                    // SPAN width (first to last changed frame) can now exceed the dense formula's
+                    // frame count -- it must never be LESS than the number of frames actually
+                    // touched, which is what stays tightly coupled to the formula (a ceiling-
+                    // rounding slack of 1, since a partial boundary frame can occasionally get
+                    // counted as touched with fewer than a full binsPerFrame's bits in it,
+                    // measured across this exact sweep, not asserted from theory).
+                    val spanWidth = map.lastChangedFrame - map.firstChangedFrame + 1
+                    val actuallyChangedFrames = map.kinds.count { row -> row.any { it != DiffCell.UNCHANGED } }
+                    assertTrue(
+                        "$cover strength=$strength len=$len: span width $spanWidth must be >= " +
+                            "the number of frames actually touched ($actuallyChangedFrames)",
+                        spanWidth >= actuallyChangedFrames,
+                    )
+                    assertTrue(
+                        "$cover strength=$strength len=$len: actually-touched frame count " +
+                            "$actuallyChangedFrames should be within 1 of the dense formula's " +
+                            "$expectedChangedFrames",
+                        abs(actuallyChangedFrames - expectedChangedFrames) <= 1,
                     )
 
                     // Every sample from the first frame past lastChangedFrame onward must be
@@ -278,7 +301,16 @@ class StegoDifferenceTest {
                     // (frame count, the untouched tail, the NUDGED bound) are exact/theoretical and
                     // hold unconditionally, so only this specific assertion is scoped to what was
                     // actually calibrated.
-                    if (len > 0 && strength != 3) {
+                    //
+                    // v6 near-silent-frame-skip (follow-up A) widens this same phenomenon: a
+                    // skipped frame contributes zero samples to the per-bin mean (rather than
+                    // always contributing one, as every frame did under the old dense algorithm),
+                    // so a gap-containing cover has strictly fewer changed-frame samples to
+                    // average over at a given payload size -- measured to newly hit the same
+                    // one-bin-short pattern at len=5 (SPOKEN_WORD strength=4, SOFT_SYNTH
+                    // strength=2 and strength=4), not just len=0/strength=3 as before. Excluding
+                    // len=5 too, same reasoning as the pre-v6 exclusions above.
+                    if (len > 5 && strength != 3) {
                         assertEquals(
                             "$cover strength=$strength len=$len: changedBinRange must be the exact " +
                                 "embedded band",
@@ -349,40 +381,49 @@ class StegoDifferenceTest {
     }
 
     /**
-     * design-v5.md §3.3: SPOKEN_WORD has genuinely all-zero "gap" frames between synthesized
-     * syllable bursts. Where the cover is silent, QIM's `LOG_MAGNITUDE_FLOOR` has nothing to nudge
-     * and instead creates new spectral content — measured 48 created cells at 40 B payload, 329 at
-     * 200 B (`scratchpad/proto/run3.txt`, default strength). This test finds an actual all-zero
-     * cover frame within the embedded range and proves its row reports CREATED cells, rather than
-     * trusting the aggregate [StegoDifferenceMap.createdCells] count alone.
+     * design-v5.md §3.3 originally found: SPOKEN_WORD has genuinely all-zero "gap" frames between
+     * synthesized syllable bursts, and (pre-v6) QIM's `LOG_MAGNITUDE_FLOOR` had nothing to nudge
+     * there and instead created new spectral content — 48 created cells at 40 B payload, measured
+     * against the OLD dense embedding algorithm. **Superseded by `AudioStegoCarrier`'s v6
+     * near-silent-frame-skip fix (follow-up A)**: those gap frames are now genuinely skipped, not
+     * embedded into at all, so they show as UNCHANGED, not CREATED — this is the fix's whole
+     * point (the gap frames were the source of the click-train the honesty caption elsewhere
+     * disclosed). This test now proves the corrected behavior directly: every all-zero cover
+     * frame within the embedded range for a payload that reaches SPOKEN_WORD's gaps (40 B) is
+     * left completely UNCHANGED, not CREATED, matching the codec's own byte-identical guarantee
+     * for skipped frames.
      */
     @Test
-    fun `silent-frame cells on SPOKEN_WORD are reported as created, matching the measured 3-3 finding`() {
+    fun `silent-frame cells on SPOKEN_WORD are now left UNCHANGED, not CREATED, by the v2 near-silent-frame skip`() {
         val cover = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
         val stego = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB).encode(fillerPayload(40))
         val map = stegoDifference(cover, stego)
-        assertTrue("expected 40 B to reach SPOKEN_WORD's gap frames", map.createdCells > 0)
 
-        var foundSilentEmbeddedFrameWithCreatedCell = false
+        var foundAllZeroFrameWithinRange = false
         for (f in map.firstChangedFrame..map.lastChangedFrame) {
             val start = f * map.frameSize
             val frameIsAllZero = (start until start + map.frameSize).all { cover[it].toInt() == 0 }
             if (!frameIsAllZero) continue
+            foundAllZeroFrameWithinRange = true
             val row = map.kinds[f - map.firstChangedFrame]
-            if (row.any { it == DiffCell.CREATED }) {
-                foundSilentEmbeddedFrameWithCreatedCell = true
-                break
-            }
+            assertTrue(
+                "frame $f is an all-zero cover gap within the embedded range; every one of its " +
+                    "cells must be UNCHANGED (skipped, not embedded into) under v2, but found a " +
+                    "non-UNCHANGED cell",
+                row.all { it == DiffCell.UNCHANGED },
+            )
         }
         assertTrue(
-            "expected at least one all-zero cover frame in the embedded range to contain a " +
-                "CREATED cell",
-            foundSilentEmbeddedFrameWithCreatedCell,
+            "expected at least one all-zero cover frame within [firstChangedFrame," +
+                "lastChangedFrame] for this test to actually exercise the skip -- if this starts " +
+                "failing, SPOKEN_WORD's synthesis or the payload size changed and this test needs " +
+                "a different payload size to still reach a real gap",
+            foundAllZeroFrameWithinRange,
         )
     }
 
     @Test
-    fun `SPOKEN_WORD 5 bytes has no created cells, 40 bytes does, and SOFT_SYNTH 5 bytes does`() {
+    fun `SPOKEN_WORD has no created cells at 5 or 40 bytes post-v2, SOFT_SYNTH 5 bytes still does`() {
         val spokenWord = synthesizeSampleCover(AudioSampleCover.SPOKEN_WORD)
         val softSynth = synthesizeSampleCover(AudioSampleCover.SOFT_SYNTH)
 
@@ -391,9 +432,19 @@ class StegoDifferenceTest {
         val softSynth5 = AudioStegoCarrier(softSynth, AudioStegoTechnique.SPECTROGRAM_LSB).encode(fillerPayload(5))
 
         assertEquals(0, stegoDifference(spokenWord, spokenWord5).createdCells)
-        assertTrue(stegoDifference(spokenWord, spokenWord40).createdCells > 0)
+        // Pre-v6 this was createdCells > 0 (SPOKEN_WORD's gap frames got embedded into and
+        // created new spectral content there). Post-v2 near-silent-frame-skip, those same gap
+        // frames are genuinely skipped, and 40 B doesn't happen to reach any other near-zero
+        // eligible bin elsewhere in SPOKEN_WORD's loud bursts or dense header -- measured 0, not
+        // asserted from the old behavior. (`the difference map classifies cells into all three
+        // DiffCell kinds on a real embed` above uses 200 B specifically because created cells
+        // still occur at that larger size, from ordinary spectral variation in loud content, not
+        // from silence -- unrelated to this test's own SPOKEN_WORD-gap-specific finding.)
+        assertEquals(0, stegoDifference(spokenWord, spokenWord40).createdCells)
         // SOFT_SYNTH's own fade-in (frame 0 peaks at 40 LSB, well under LOG_MAGNITUDE_FLOOR's
-        // effective threshold) creates cells even at the smallest tested payload.
+        // effective threshold) still creates cells at the smallest tested payload -- unaffected by
+        // v2, since the fade-in falls inside the header's own always-dense leading frames
+        // (AudioStegoCarrier.kt class KDoc's "near-silent-frame skip (v2)" section).
         assertTrue(stegoDifference(softSynth, softSynth5).createdCells > 0)
     }
 

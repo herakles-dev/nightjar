@@ -5,6 +5,7 @@ import dev.herakles.nightjar.modules.audiostego.synthesizeSampleCover
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.ln
 import kotlin.math.log10
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -182,24 +183,152 @@ class AudioStegoCarrierTest {
     // reaching into the carrier's private implementation.
 
     @Test
-    fun spectrogramLsbMaxPayloadBytesMatchesTheCapacityFormula() {
+    fun spectrogramLsbMaxPayloadBytesMatchesTheCapacityFormulaOnALoudCover() {
+        // v2 (near-silent-frame skip): capacity is content-dependent, not a pure formula -- but
+        // for a cover where every frame is loud (real noise, not silence), no frame is ever
+        // skipped, so this reduces to: the header costs exactly HEADER_BYTES*8 bits (not
+        // headerFrameCount*binsPerFrame -- any leftover bin-slots in the header's own last frame
+        // are wasted, never available to payload+trailer either, see spectrogramLsbCapacityBytesV2's
+        // own KDoc), plus every frame from headerFrameCount onward at binsPerFrame bits each. Uses
+        // a loud cover specifically to exercise the "no frame skipped" case -- see
+        // spectrogramLsbMaxPayloadBytesIsReducedOnACoverWithSilentPassages below for the case
+        // where frames genuinely do get skipped.
         val numFrames = 100
-        val cover = ShortArray(SPECTROGRAM_FRAME_SIZE * numFrames)
+        val cover = spectrogramNoiseCover(numFrames, seed = 314)
         val stegoStrength = 3
         val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength)
 
         val binsPerFrame = stegoStrength * SPECTROGRAM_BINS_PER_STRENGTH_LEVEL
-        val totalCapacityBytes = (numFrames * binsPerFrame) / 8
-        val expectedMaxPayload = (totalCapacityBytes - HEADER_TRAILER_OVERHEAD_BYTES).coerceAtLeast(0)
+        val headerFrames = (HEADER_BYTES * 8 + binsPerFrame - 1) / binsPerFrame
+        val totalCapacityBits = HEADER_BYTES * 8 + (numFrames - headerFrames) * binsPerFrame
+        val expectedMaxPayload = (totalCapacityBits / 8 - HEADER_TRAILER_OVERHEAD_BYTES).coerceAtLeast(0)
 
         assertEquals(expectedMaxPayload, carrier.maxPayloadBytes)
+    }
+
+    // --- Near-silent-frame skip (v2 format, deferred v6 follow-up) ---
+
+    @Test
+    fun spectrogramLsbMaxPayloadBytesIsReducedOnACoverWithSilentPassages() {
+        // Half loud frames, half genuinely silent (all-zero) frames -- v2 must report noticeably
+        // less capacity than the old dense formula would have claimed for the same frame count,
+        // since the silent half is skipped rather than embedded into.
+        val numFrames = 200
+        val loud = spectrogramNoiseCover(numFrames, seed = 99)
+        val cover = ShortArray(loud.size)
+        for (frameIndex in 0 until numFrames) {
+            if (frameIndex % 2 == 0) {
+                val start = frameIndex * SPECTROGRAM_FRAME_SIZE
+                loud.copyInto(cover, start, start, start + SPECTROGRAM_FRAME_SIZE)
+            }
+            // odd frames stay zero-initialized -- genuinely silent
+        }
+        val stegoStrength = 2
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength)
+
+        val binsPerFrame = stegoStrength * SPECTROGRAM_BINS_PER_STRENGTH_LEVEL
+        val denseFormulaCapacityBytes = (numFrames * binsPerFrame) / 8
+
+        assertTrue(
+            "expected v2 capacity (${carrier.maxPayloadBytes}B) to be noticeably less than the " +
+                "old dense formula ($denseFormulaCapacityBytes B) once half the frames are silent",
+            carrier.maxPayloadBytes < denseFormulaCapacityBytes - HEADER_TRAILER_OVERHEAD_BYTES,
+        )
+    }
+
+    @Test
+    fun spectrogramLsbRoundTripsExactPayloadBytesOnACoverWithSilentPassages() {
+        // The actual fix's real-world shape: a cover with genuine quiet gaps (like
+        // AudioSampleCover.SPOKEN_WORD's burst/gap timing), round-tripping a real payload through
+        // the silence-skip-aware encode/decode walk end to end.
+        val numFrames = 300
+        val loud = spectrogramNoiseCover(numFrames, seed = 7001)
+        val cover = ShortArray(loud.size)
+        for (frameIndex in 0 until numFrames) {
+            // A silent gap every 5th frame (roughly SPOKEN_WORD's burst/gap shape), skipping the
+            // header's own leading frames so this test isn't sensitive to header/body boundary
+            // edge cases -- those are covered by the dedicated header-frame tests instead.
+            if (frameIndex < 10 || frameIndex % 5 != 0) {
+                val start = frameIndex * SPECTROGRAM_FRAME_SIZE
+                loud.copyInto(cover, start, start, start + SPECTROGRAM_FRAME_SIZE)
+            }
+        }
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength = 2)
+        val payload = "nightjar SLSB v2 near-silent-frame-skip round trip".toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            "test payload (${payload.size}B) exceeds this cover's v2 capacity (${carrier.maxPayloadBytes}B)",
+            payload.size <= carrier.maxPayloadBytes,
+        )
+
+        val stego = carrier.encode(payload)
+        assertEquals(cover.size, stego.size)
+
+        // Every silent gap frame must stay byte-identical -- never touched by encode.
+        for (frameIndex in 10 until numFrames step 5) {
+            val start = frameIndex * SPECTROGRAM_FRAME_SIZE
+            for (i in start until start + SPECTROGRAM_FRAME_SIZE) {
+                assertEquals("silent frame $frameIndex must be untouched at sample $i", 0.toShort(), stego[i])
+            }
+        }
+
+        val result = carrier.decode(stego)
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
+        assertEquals(0, result.correctedByteErrors)
+    }
+
+    @Test
+    fun spectrogramLsbV1CarrierStillDecodesByteForByteUnchanged() {
+        // INV-9: a firefly caught before this fix (v1, dense) must keep decoding exactly as
+        // before. There is no public v1-encode path left to call (encode always writes v2 now),
+        // so this test builds a v1 frame by hand using the same dense bit-to-(frame,bin) layout
+        // and QIM embedding the pre-fix algorithm used, mirroring how this file's own
+        // capacity-formula tests already recompute the carrier's private layout inline rather
+        // than reaching into its implementation.
+        val stegoStrength = 2
+        val binsPerFrame = stegoStrength * SPECTROGRAM_BINS_PER_STRENGTH_LEVEL
+        val numFrames = 200
+        val cover = spectrogramNoiseCover(numFrames, seed = 55555)
+        val payload = "pre-fix v1 spectrogram-LSB firefly".toByteArray(Charsets.US_ASCII)
+
+        val frame = buildFrameV1ForTest(payload)
+        val stego = cover.copyOf()
+        var bitIndex = 0
+        var frameIndex = 0
+        val totalBits = frame.size * 8
+        while (frameIndex < numFrames && bitIndex < totalBits) {
+            val start = frameIndex * SPECTROGRAM_FRAME_SIZE
+            val re = DoubleArray(SPECTROGRAM_FRAME_SIZE) { i -> cover[start + i].toDouble() }
+            val im = DoubleArray(SPECTROGRAM_FRAME_SIZE)
+            fft(re, im) // internal, same package -- Fft.kt
+            var binSlot = 0
+            while (binSlot < binsPerFrame && bitIndex < totalBits) {
+                embedBitInBinForTest(re, im, SPECTROGRAM_ELIGIBLE_BIN_START + binSlot, bitAtForTest(frame, bitIndex))
+                binSlot++
+                bitIndex++
+            }
+            ifft(re, im) // internal, same package -- Fft.kt
+            for (i in 0 until SPECTROGRAM_FRAME_SIZE) {
+                stego[start + i] = Math.round(re[i]).coerceIn(Short.MIN_VALUE.toLong(), Short.MAX_VALUE.toLong()).toShort()
+            }
+            frameIndex++
+        }
+
+        val carrier = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength)
+        val result = carrier.decode(stego)
+
+        assertTrue("expected Success but got $result", result is DecodeResult.Success)
+        assertTrue(payload.contentEquals((result as DecodeResult.Success).payload))
     }
 
     @Test
     fun spectrogramLsbCapacityScalesWithStegoStrength() {
         // Same cover length, only stegoStrength differs -- higher strength must yield strictly
-        // higher capacity (more bins nudged per frame).
-        val cover = ShortArray(SPECTROGRAM_FRAME_SIZE * 100)
+        // higher capacity (more bins nudged per frame). Needs a loud (non-silent) cover: v2's
+        // near-silent-frame skip would otherwise report ~0 capacity at every strength once no
+        // frame clears the eligibility threshold, which is a valid but useless case for this
+        // specific comparison.
+        val cover = spectrogramNoiseCover(numFrames = 100, seed = 2468)
         val weakest = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength = 1)
         val strongest = AudioStegoCarrier(cover, AudioStegoTechnique.SPECTROGRAM_LSB, stegoStrength = 4)
 
@@ -790,6 +919,75 @@ class AudioStegoCarrierTest {
         return ShortArray(MFSK_FRAME_SIZE * MFSK_CODEWORD_BYTES) { rng.nextInt(-16_000, 16_001).toShort() }
     }
 
+    // --- v1-frame construction (spectrogramLsbV1CarrierStillDecodesByteForByteUnchanged only) ---
+    //
+    // Mirrors AudioStegoCarrier's private buildFrame/embedBitInBin/bitAt/crc8 exactly, at
+    // VERSION=0x01 specifically (SPECTROGRAM_LSB_VERSION_2 has no public encode path to
+    // reconstruct from since AudioStegoCarrier.encode always writes v2 now) -- same "recompute
+    // the carrier's private layout inline" convention this file's capacity-formula tests already
+    // establish, just applied to frame assembly instead of pure capacity arithmetic.
+
+    private fun buildFrameV1ForTest(payload: ByteArray): ByteArray {
+        val header = ByteArray(HEADER_BYTES)
+        header[0] = SPECTROGRAM_MAGIC.toByte()
+        header[1] = SPECTROGRAM_VERSION_1.toByte()
+        header[2] = (payload.size ushr 24).toByte()
+        header[3] = (payload.size ushr 16).toByte()
+        header[4] = (payload.size ushr 8).toByte()
+        header[5] = payload.size.toByte()
+        header[6] = crc8ForTest(header, 0, 6).toByte()
+
+        val crc32 = java.util.zip.CRC32().apply { update(payload) }.value
+        val trailer = byteArrayOf(
+            (crc32 ushr 24).toByte(),
+            (crc32 ushr 16).toByte(),
+            (crc32 ushr 8).toByte(),
+            crc32.toByte(),
+        )
+        return header + payload + trailer
+    }
+
+    private fun crc8ForTest(bytes: ByteArray, offset: Int, length: Int): Int {
+        var crc = 0
+        for (i in offset until offset + length) {
+            crc = crc xor (bytes[i].toInt() and 0xFF)
+            repeat(8) {
+                crc = if (crc and 0x80 != 0) ((crc shl 1) xor SPECTROGRAM_HEADER_CRC8_POLY) and 0xFF else (crc shl 1) and 0xFF
+            }
+        }
+        return crc
+    }
+
+    private fun bitAtForTest(bytes: ByteArray, bitIndex: Int): Int {
+        val byteIndex = bitIndex / 8
+        val bitInByte = 7 - (bitIndex % 8)
+        return (bytes[byteIndex].toInt() ushr bitInByte) and 1
+    }
+
+    private fun embedBitInBinForTest(re: DoubleArray, im: DoubleArray, bin: Int, bit: Int) {
+        val mirror = re.size - bin
+        val xRe = re[bin]
+        val xIm = im[bin]
+        val magnitude = sqrt(xRe * xRe + xIm * xIm)
+        val logMagnitude = ln(maxOf(magnitude, SPECTROGRAM_LOG_MAGNITUDE_FLOOR))
+        var idx = Math.round(logMagnitude / SPECTROGRAM_QUANTIZATION_STEP)
+        if (Math.floorMod(idx, 2L).toInt() != bit) idx += 1
+        val newMagnitude = kotlin.math.exp(idx * SPECTROGRAM_QUANTIZATION_STEP)
+        val newRe: Double
+        val newIm: Double
+        if (magnitude > 0.0) {
+            newRe = (xRe / magnitude) * newMagnitude
+            newIm = (xIm / magnitude) * newMagnitude
+        } else {
+            newRe = newMagnitude
+            newIm = 0.0
+        }
+        re[bin] = newRe
+        im[bin] = newIm
+        re[mirror] = newRe
+        im[mirror] = -newIm
+    }
+
     companion object {
         /** Mirrors AudioStegoCarrier's documented segment size (10 ms @ 48 kHz). */
         private const val SEGMENT_SAMPLES = 480
@@ -805,6 +1003,24 @@ class AudioStegoCarrierTest {
 
         /** Mirrors AudioStegoCarrier's documented spectrogram-LSB bins-per-strength-level (8). */
         private const val SPECTROGRAM_BINS_PER_STRENGTH_LEVEL = 8
+
+        /** Mirrors AudioStegoCarrier's documented spectrogram-LSB first eligible bin (bin 32). */
+        private const val SPECTROGRAM_ELIGIBLE_BIN_START = 32
+
+        /** Mirrors AudioStegoCarrier's documented shared frame magic byte ('N', 0x4E). */
+        private const val SPECTROGRAM_MAGIC = 0x4E
+
+        /** Mirrors AudioStegoCarrier's documented VERSION (0x01) -- pre-v2 spectrogram-LSB. */
+        private const val SPECTROGRAM_VERSION_1 = 0x01
+
+        /** Mirrors AudioStegoCarrier's documented header_crc polynomial (0x07). */
+        private const val SPECTROGRAM_HEADER_CRC8_POLY = 0x07
+
+        /** Mirrors AudioStegoCarrier's documented log-magnitude QIM quantization step. */
+        private const val SPECTROGRAM_QUANTIZATION_STEP = 0.12
+
+        /** Mirrors AudioStegoCarrier's documented log-magnitude QIM floor. */
+        private const val SPECTROGRAM_LOG_MAGNITUDE_FLOOR = 1000.0
 
         /** Mirrors AudioStegoCarrier's documented MFSK symbol-block size (same 1024 as spectrogram-LSB). */
         private const val MFSK_FRAME_SIZE = 1024
