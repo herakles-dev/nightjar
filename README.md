@@ -32,40 +32,46 @@ A long-press on the jar reveals the technical **Workshop** underneath.
 
 <table>
   <tr>
-    <td align="center" width="33%">
-      <img src="docs/screenshots/01-firefly-jar-shelf.png" width="240" alt="Firefly Jar home shelf"><br>
-      <sub><b>Firefly Jar</b><br>the disguise home shelf</sub>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/01-welcome.png" width="240" alt="Welcome card for the first-run riddle trail"><br>
+      <sub><b>Welcome</b><br>first-run trail</sub>
     </td>
-    <td align="center" width="33%">
-      <img src="docs/screenshots/02-art-jar-collection.png" width="240" alt="A jar's firefly collection and actions"><br>
-      <sub><b>Inside a jar</b><br>your fireflies, and the actions</sub>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/02-firefly-jar-shelf.png" width="240" alt="Firefly Jar home shelf"><br>
+      <sub><b>Firefly Jar</b><br>the home shelf</sub>
     </td>
-    <td align="center" width="33%">
-      <img src="docs/screenshots/03-acoustic-modem-firefly.png" width="240" alt="A firefly hidden in sound"><br>
-      <sub><b>Hidden in sound</b><br>acoustic data-over-sound modem</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="docs/screenshots/04-image-stego-firefly.png" width="240" alt="A firefly hidden in an image"><br>
-      <sub><b>Hidden in an image</b><br>least-significant-bit stego</sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/05-audio-stego-firefly.png" width="240" alt="A firefly hidden in audio"><br>
-      <sub><b>Hidden in audio</b><br>spectrogram-difference view</sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/06-meadow-detector.png" width="240" alt="The Meadow passive acoustic detector"><br>
-      <sub><b>The Meadow</b><br>passive acoustic detector</sub>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/03-art-jar-collection.png" width="240" alt="A jar's firefly collection and actions"><br>
+      <sub><b>Inside a jar</b><br>your fireflies</sub>
     </td>
   </tr>
   <tr>
-    <td align="center">
-      <img src="docs/screenshots/07-workshop-modules.png" width="240" alt="The technical module menu"><br>
-      <sub><b>The Workshop</b><br>technical modules behind the disguise</sub>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/04-acoustic-modem-firefly.png" width="240" alt="A firefly hidden in sound"><br>
+      <sub><b>In sound</b><br>acoustic modem</sub>
     </td>
-    <td></td>
-    <td></td>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/05-image-stego-firefly.png" width="240" alt="A firefly hidden in an image"><br>
+      <sub><b>In an image</b><br>LSB bit-plane</sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/06-audio-stego-firefly.png" width="240" alt="A firefly hidden in audio"><br>
+      <sub><b>In audio</b><br>spectrogram diff</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/07-meadow-detector.png" width="240" alt="The Meadow passive acoustic detector"><br>
+      <sub><b>The Meadow</b><br>passive detector</sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/08-workshop-modules.png" width="240" alt="The technical module menu"><br>
+      <sub><b>The Workshop</b><br>module menu</sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="docs/screenshots/09-workshop-image-stego.png" width="240" alt="The Workshop image steganography tool"><br>
+      <sub><b>Image tool</b><br>embed · extract</sub>
+    </td>
   </tr>
 </table>
 
