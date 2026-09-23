@@ -24,6 +24,51 @@ decoded payload appears as a firefly. The underlying technical module screens
 (modem, image stego, audio stego, detector) are reachable via a long-press
 reveal gesture from the jar screen.
 
+## Screenshots
+
+Real screenshots from a Pixel 6a. The app opens as **Firefly Jar** — a calm,
+disguise-themed front end where every hidden payload shows up as a "firefly."
+A long-press on the jar reveals the technical **Workshop** underneath.
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/01-firefly-jar-shelf.png" width="240" alt="Firefly Jar home shelf"><br>
+      <sub><b>Firefly Jar</b><br>the disguise home shelf</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/02-art-jar-collection.png" width="240" alt="A jar's firefly collection and actions"><br>
+      <sub><b>Inside a jar</b><br>your fireflies, and the actions</sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/03-acoustic-modem-firefly.png" width="240" alt="A firefly hidden in sound"><br>
+      <sub><b>Hidden in sound</b><br>acoustic data-over-sound modem</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/04-image-stego-firefly.png" width="240" alt="A firefly hidden in an image"><br>
+      <sub><b>Hidden in an image</b><br>least-significant-bit stego</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/05-audio-stego-firefly.png" width="240" alt="A firefly hidden in audio"><br>
+      <sub><b>Hidden in audio</b><br>spectrogram-difference view</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/06-meadow-detector.png" width="240" alt="The Meadow passive acoustic detector"><br>
+      <sub><b>The Meadow</b><br>passive acoustic detector</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/07-workshop-modules.png" width="240" alt="The technical module menu"><br>
+      <sub><b>The Workshop</b><br>technical modules behind the disguise</sub>
+    </td>
+    <td></td>
+    <td></td>
+  </tr>
+</table>
+
 ## Download
 
 Grab the latest signed APK from the [Releases page](https://github.com/herakles-dev/nightjar/releases/latest)
