@@ -19,14 +19,14 @@ counterparts, all running locally on-device:
   modem's own signal, demonstrating that "covert" acoustic channels aren't
   necessarily undetectable.
 
-The default UI is "Firefly Jar," a disguise-themed front end where every
+The default UI is "Night Jar," a disguise-themed front end where every
 decoded payload appears as a firefly. The underlying technical module screens
 (modem, image stego, audio stego, detector) are reachable via a long-press
 reveal gesture from the jar screen.
 
 ## Screenshots
 
-Real screenshots from a Pixel 6a. The app opens as **Firefly Jar** — a calm,
+Real screenshots from a Pixel 6a. The app opens as **Night Jar** — a calm,
 disguise-themed front end where every hidden payload shows up as a "firefly."
 A long-press on the jar reveals the technical **Workshop** underneath.
 
@@ -37,8 +37,8 @@ A long-press on the jar reveals the technical **Workshop** underneath.
       <sub><b>Welcome</b><br>first-run trail</sub>
     </td>
     <td align="center" valign="top" width="33%">
-      <img src="docs/screenshots/02-firefly-jar-shelf.png" width="240" alt="Firefly Jar home shelf"><br>
-      <sub><b>Firefly Jar</b><br>the home shelf</sub>
+      <img src="docs/screenshots/02-firefly-jar-shelf.png" width="240" alt="Night Jar home shelf"><br>
+      <sub><b>Night Jar</b><br>the home shelf</sub>
     </td>
     <td align="center" valign="top" width="33%">
       <img src="docs/screenshots/03-art-jar-collection.png" width="240" alt="A jar's firefly collection and actions"><br>
