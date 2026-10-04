@@ -9,7 +9,7 @@ import android.provider.MediaStore
 import java.io.IOException
 
 /**
- * "keep a copy" (design/screen-flow.md v6 "Two send flows" step 3): an explicit, separate
+ * "keep a copy" (the UX design's "Two send flows" step 3): an explicit, separate
  * gesture the operator takes AFTER a jar-mode send,
  * writing the exact bytes [FireflyShare.prepareOutgoing] already staged for the share sheet into
  * shared storage -- `Pictures/Nightjar` for an image [kind], `Music/Nightjar` for

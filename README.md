@@ -1,5 +1,10 @@
 # nightjar
 
+[![CI](https://github.com/herakles-dev/nightjar/actions/workflows/ci.yml/badge.svg)](https://github.com/herakles-dev/nightjar/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/herakles-dev/nightjar/actions/workflows/codeql.yml/badge.svg)](https://github.com/herakles-dev/nightjar/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/herakles-dev/nightjar/badge)](https://securityscorecards.dev/viewer/?uri=github.com/herakles-dev/nightjar)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An offline Android app that demonstrates covert data transmission — hiding
 data in sound and images — alongside the detection techniques that can catch
 it.
@@ -99,6 +104,14 @@ can watch this GitHub repo and notify you of new releases — add
 ./gradlew assembleDebug   # build debug APK (output: app-debug.apk)
 ./gradlew test            # run the JVM unit test suite
 ```
+
+## Testing
+
+The JVM unit suite covers the signal-processing core: the acoustic modem and
+detector, image and audio steganography round-trips, Reed–Solomon
+error correction, the LSB bit-plane and steganalysis capacity sweeps (including
+a false-flag check against real photographs), and the incoming-payload
+pipeline. It runs on every push and pull request in CI.
 
 Debug builds use Android Gradle Plugin's default auto-generated debug
 keystore — no signing setup required. If you don't already have

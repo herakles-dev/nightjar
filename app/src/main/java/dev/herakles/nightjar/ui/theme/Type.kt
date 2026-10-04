@@ -42,13 +42,12 @@ val NightjarTypography = Typography(
 
 // --- Firefly Jar surface: Silkscreen ------------------------------------------------
 // The "Firefly Redesign v2" package builds its whole identity on Silkscreen, a pixel
-// display face (OFL, vendored at res/font/ with its license). This REVERSES
-// firefly-jar-identity.md § Typography's "staying on system default font (Roboto)" call
-// — see that doc's change log for the reasoning and the design package that overrode it.
+// display face (OFL, vendored at res/font/ with its license). This deliberately
+// departs from the system default font (Roboto) for the jar surface only.
 //
 // Deliberately NOT wired into [NightjarTypography] above. That object is the shared M3
-// typography, and identity.md still binds the four technical screens under the
-// long-press reveal to the system font at weights 400/500/600 — a rule the jar surface's
+// typography, and the four technical screens under the
+// long-press reveal stay on the system font at weights 400/500/600 — a rule the jar surface's
 // doctrine relaxation does not touch. Jar composables reference [JarType] explicitly;
 // anything that resolves through MaterialTheme.typography stays Roboto.
 

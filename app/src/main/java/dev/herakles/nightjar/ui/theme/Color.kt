@@ -2,8 +2,7 @@ package dev.herakles.nightjar.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// nightjar palette — the android-designer default dark baseline (see
-// the app's design system), not yet an app-specific
+// nightjar palette — a default dark baseline, not yet an app-specific
 // override. A later, dedicated visual-identity pass runs on this; this is the working
 // baseline the module-picker and stub screens ship with until then.
 

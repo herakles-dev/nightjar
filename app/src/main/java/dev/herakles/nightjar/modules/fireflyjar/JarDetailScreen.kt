@@ -116,14 +116,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * The Firefly Jar per-module detail screen (design/screen-flow.md § Screen 7).
+ * The Firefly Jar per-module detail screen (the UX design).
  * One composable serves every [Module]: the shared shell
  * (wordmark, hero jar, firefly swarm or watching-jar readout, the module's own catch/look flow)
  * is identical for all of them, driven only by [Module.jarName]/[Module.jarRole] — this file
  * never `when`s on which specific module it is. The exhaustive
  * per-module branch points land at five, not the two this design originally budgeted for — this
  * screen isn't one of the five; it only hosts what [catchFlowFor] (`JarCatchFlows.kt`)
- * hands it — it never reimplements embed/extract/transmit/listen logic itself (screen-flow.md
+ * hands it — it never reimplements embed/extract/transmit/listen logic itself (the UX design
  * § Screen 7 "what this addition deliberately does not build").
  *
  * A design refresh ("Cozy Pixel Night") re-skins this shell against
@@ -713,7 +713,7 @@ private fun FireflySwarmWaveform(peaks: FloatArray, color: Color, modifier: Modi
 }
 
 /**
- * Tapping a firefly dot's detail popup (screen-flow.md § Screen 7). [FireflyRecord
+ * Tapping a firefly dot's detail popup (the UX design). [FireflyRecord
  * .payloadPreview]/[FireflyRecord.payloadSizeBytes] are shown verbatim — the same "real data,
  * not smoothed" discipline the technical screens apply to FEC counts and analyzer detail
  * strings. Doesn't name the module's specific channel (e.g. "sent through sound") since that
@@ -767,7 +767,7 @@ private fun FireflyDetailContent(
         outgoingKindFor(firefly.carrierKind, firefly.technique)
     }
     var sendBusy by remember(firefly.id) { mutableStateOf(false) }
-    // "not shown again once dismissed or used for that firefly" (design/screen-flow.md v6 "Two
+    // "not shown again once dismissed or used for that firefly" (the UX design's "Two
     // send flows" step 3) -- [showKeepCopy] flips true only after the first successful send this
     // composition, [keptCopy] once the operator actually taps it; both reset per [firefly.id].
     var showKeepCopy by remember(firefly.id) { mutableStateOf(false) }

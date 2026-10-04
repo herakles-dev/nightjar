@@ -56,12 +56,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * "hide one in a photo" (design/screen-flow.md's v6 "Two send flows"): a NEW encode using
+ * "hide one in a photo" (the UX design's "Two send flows"): a NEW encode using
  * the operator's own picked photo, entered by the single new row
  * `jarCatchFlow` (`ImageStegoScreen.kt`) adds to the art jar's action list. Photo Picker ->
  * message -> sturdy (default)/exact choice -> live capacity + estimated file size -> "hidden,
  * not locked" -> `hide it` (encode off-main, insert a CREATED [FireflyRecord], open the share
- * sheet) -- design/screen-flow.md's own wireframe: "no separate 'embedded' pause screen -- the
+ * sheet) -- the UX design's own wireframe: "no separate 'embedded' pause screen -- the
  * whole point of this flow is getting to the share sheet, not admiring the result."
  *
  * Owner direction (2026-09-22): embedding is CREATE, never CATCH -- this flow writes a
@@ -87,7 +87,7 @@ import kotlinx.coroutines.withContext
  *  prep ([dev.herakles.nightjar.prepareSturdyCover]) run once, at pick time, in `jarCatchFlow`. */
 data class HidePhotoSelection(val original: Bitmap, val coverPrep: SturdyCoverPrep)
 
-/** The two techniques this flow offers (design/screen-flow.md v6 "hide one in a photo" wireframe:
+/** The two techniques this flow offers (the UX design's "hide one in a photo" wireframe:
  *  "sturdy (default) or exact"). */
 enum class HideTechnique { STURDY, EXACT }
 

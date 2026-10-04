@@ -274,7 +274,7 @@ import kotlin.math.sqrt
  *
  * ## Phase-coding technique (deferred v6 follow-up)
  *
- * The literature technique the HANDOFF.md deferred-follow-ups note was actually contrasting
+ * The literature technique this codec is actually contrasted with:
  * [PHASE_INVERSION] against: Bender, Gruhl, Morimoto & Lu, "Techniques for Data Hiding," *IBM
  * Systems Journal* 35(3-4), 1996 — not documented in the LSB steganography literature this codec
  * otherwise draws from (that literature's own "phase inversion" coverage is [PHASE_INVERSION]'s

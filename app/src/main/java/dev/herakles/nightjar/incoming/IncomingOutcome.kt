@@ -7,7 +7,7 @@ import dev.herakles.nightjar.picker.Module
  * incoming file resolves to exactly one
  * of caught, squeezed, damaged, no firefly, or unsupported, and a message is shown only after its
  * checksum verifies." Rendered by [IncomingScreen] with the real jar-voice copy from
- * design/screen-flow.md's "five outcomes" table -- replaces the earlier MINIMAL plain-text
+ * the UX design's "five outcomes" table -- replaces the earlier MINIMAL plain-text
  * placeholder.
  */
 sealed interface IncomingOutcome {
@@ -23,7 +23,7 @@ sealed interface IncomingOutcome {
 
     /**
      * The file arrived in a lossy image container or a compressed audio container, and nothing
-     * decoded. NOT an assertion that a firefly was actually sent -- design/screen-flow.md's own
+     * decoded. NOT an assertion that a firefly was actually sent -- the UX design's own
      * copy is deliberately hedged ("if one was sent, the app may have squeezed it").
      */
     data class Squeezed(val container: SqueezedContainer) : IncomingOutcome

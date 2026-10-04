@@ -6,7 +6,7 @@ import dev.herakles.nightjar.STURDY_MIN_COVER_LONG_SIDE_PX
 import dev.herakles.nightjar.incoming.SturdyImageFireflyDecoder
 
 /**
- * v6 send-time copy/mapping (design/screen-flow.md's v6 "Two send flows"). Pure functions -- no
+ * v6 send-time copy/mapping (the UX design's "Two send flows"). Pure functions -- no
  * Compose, no [FireflyShare] I/O -- so both "send this firefly" (`JarDetailScreen.kt`) and
  * "hide one in a photo" (`HideInPhotoFlow.kt`) resolve the exact same technique -> [OutgoingKind]
  * -> advice mapping, rather than two independently hand-written copies of it -- the same
@@ -38,7 +38,7 @@ fun outgoingKindFor(carrierKind: String?, technique: String?): OutgoingKind? = w
 
 /**
  * One line of channel advice by [kind], in jar voice, shown above the share sheet
- * (design/screen-flow.md's v6 "Two send flows"): exact only survives as a file, sturdy usually
+ * (the UX design's "Two send flows"): exact only survives as a file, sturdy usually
  * survives being sent as a photo but a very small picture can still lose it, and audio must
  * travel as a file or document, never a voice note.
  */

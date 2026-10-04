@@ -471,13 +471,13 @@ fun ImageStegoScreen(
 /**
  * Jar-framed catch flow for [Module.IMAGE_STEGANOGRAPHY] ("the art jar",
  * [dev.herakles.nightjar.picker.JarRole.CREATION]), hosted by `JarDetailScreen` as its
- * `moduleFlow` slot (design/screen-flow.md § Screen 7). `JarDetailScreen` already renders the
+ * `moduleFlow` slot (the UX design). `JarDetailScreen` already renders the
  * "back to the shelf" row, the jar name/caption, and the firefly swarm above whatever this
  * composable returns, so this function renders only the
  * catch/look-for-fireflies/peek-inside controls plus their result.
  *
  * A themed skin over the exact same [ImageStegoController]/[StegoStatus] state machine
- * [ImageStegoScreen] above already defines — screen-flow.md § Screen 7: "does not reimplement
+ * [ImageStegoScreen] above already defines — the UX design: "does not reimplement
  * embed/extract... logic, it re-presents it." Builds its own [ImageStegoController] wrapping the
  * concrete [ImageStegoCarrier]/[ImageSteganalysis] pair directly: unlike [ImageStegoScreen],
  * this function's call site (`catchFlowFor` in `JarCatchFlows.kt`) has a fixed
@@ -485,10 +485,10 @@ fun ImageStegoScreen(
  * technical-screen route has, so there's nowhere else for that wiring to live. Zero changes to
  * [ImageStegoController], [ImageStegoCarrier], or [ImageSteganalysis].
  *
- * Three actions, softened per screen-flow.md § Screen 7's copy-mapping table:
+ * Three actions, softened per the UX design copy-mapping table:
  *  - "create a firefly" (v6 verb rule -- "catch" never
  *    describes making one) expands the cover selector (the 2 bundled [SampleCover]s only — no Photo
- *    Picker, no save/share; those stay technical-screen-only, per screen-flow.md's "what this
+ *    Picker, no save/share; those stay technical-screen-only, per the UX design's "what this
  *    addition deliberately does not build") + payload field inline; confirming calls the same
  *    [ImageStegoController.embed]. On [StegoStatus.Embedded], writes a
  *    `FireflyRecord(direction = "CREATED")` — this app hid something.
@@ -502,7 +502,7 @@ fun ImageStegoScreen(
  *    already draws.
  *
  * [onExit] is accepted (the `catchFlowFor` dispatcher signature every module implements) but
- * deliberately unused here: screen-flow.md's Screen 7 wireframe gives this flow no exit
+ * deliberately unused here: the UX design's Screen 7 wireframe gives this flow no exit
  * affordance of its own — catch/look are inline-expanding sections on the *same*
  * `JarDetailScreen`, not a new screen navigation ("no separate screen per action"), and
  * `JarDetailScreen` already owns the one "back to the shelf" row that leaves this screen. Left
@@ -510,7 +510,7 @@ fun ImageStegoScreen(
  * affordance — worth a second look if that reading turns out wrong.
  *
  * v6 addition: a fourth row, "catch from a photo or file"
- * (design/screen-flow.md's v6 "Receiving" section), opens the Android Photo Picker
+ * (the UX design's "Receiving" section), opens the Android Photo Picker
  * (`ActivityResultContracts.PickVisualMedia`, image MIME types only -- no permission added)
  * and routes the picked `Uri` through [IncomingPipeline.route] -- the exact same
  * routing `MainActivity.kt` uses for a share-sheet/open-with `Intent`, never duplicated here.
@@ -945,7 +945,7 @@ private fun JarImageStegoContent(
                 onClick = onPeekInside,
             )
             // v6: "catch from a photo or file" -- last in the action group,
-            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint ("cyan
+            // per the UX design's wireframe. Cyan "receiving" tint ("cyan
             // = received"), same as "look for fireflies" -- this row can land a firefly in ANY
             // jar, not necessarily this one, so it shares that verb's tint rather than "catch"'s.
             JarActionRow(
@@ -957,7 +957,7 @@ private fun JarImageStegoContent(
             )
             // v6: "hide one in a photo" -- gold "creating" tint (this row
             // embeds a NEW message into the operator's own picked photo, same verb family as
-            // "catch a firefly"), last in the action group per design/screen-flow.md's v6
+            // "catch a firefly"), last in the action group per the UX design's v6
             // wireframe. `highlighted` is the trail's SEND-step glow (owner direction
             // 2026-09-22) -- see this composable's own KDoc note on [hideInPhotoHighlighted].
             JarActionRow(
@@ -1071,7 +1071,7 @@ private fun JarStatusWord(word: String) {
 }
 
 /** "peek inside"'s readout — confidence number kept (same "real data, not smoothed" discipline
- *  every other status readout in this app follows), flagged/clear reuses screen-flow.md § Screen
+ *  every other status readout in this app follows), flagged/clear reuses the UX design § Screen
  *  7's detector copy mapping verbatim (same underlying "is something hidden here" concept), and
  *  the raw chi-square [DetectionResult.detail] string is dropped rather than surfaced —
  *  window/p-value jargon doesn't fit this surface's softened voice the way a byte count does. */
@@ -1101,7 +1101,7 @@ private fun JarAnalyzedBlock(result: DetectionResult) {
     }
 }
 
-/** screen-flow.md § Screen 7's copy-mapping table applied to [DecodeFailure] for "look for
+/** the UX design copy-mapping table applied to [DecodeFailure] for "look for
  *  fireflies" — same categories [extractFailureMessage] maps for the technical screen, softened
  *  wording only, no new behavior. */
 private fun jarExtractFailureMessage(reason: DecodeFailure): String = when (reason) {

@@ -27,7 +27,7 @@ import java.time.format.DateTimeFormatter
  *
  * A "keep a copy" gesture -- writing that same content to `Pictures/Nightjar`/`Music/Nightjar`,
  * matching the technical screens' existing save/share precedent -- is deliberately OUT of scope
- * for this object (design/screen-flow.md "Two send flows" step 3: it is its own separate,
+ * for this object (the UX design "Two send flows" step 3: it is its own separate,
  * explicit MediaStore write the UI layer performs on its own follow-up user gesture, never
  * something [prepareOutgoing] or [shareIntent] does as a side effect).
  *

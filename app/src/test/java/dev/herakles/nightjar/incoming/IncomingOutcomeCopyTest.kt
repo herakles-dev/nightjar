@@ -16,7 +16,7 @@ import org.robolectric.annotation.Config
  * [IncomingOutcome] to distinct, non-empty copy that holds the jar voice rules (lowercase, no
  * exclamation, no emoji). Six cases, not five: five
  * outcomes plus [IncomingOutcome.Squeezed]'s own two-[SqueezedContainer] split
- * (design/screen-flow.md's v6 "Receiving" section calls for "distinct copy for lossy image vs
+ * (the UX design's "Receiving" section calls for "distinct copy for lossy image vs
  * compressed audio").
  *
  * Same Robolectric-backed "resolve the real resource text, then check it" shape

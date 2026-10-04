@@ -192,7 +192,7 @@ fun DetectorScreen(detector: CovertDetector<PcmAudio>, onBack: () -> Unit) {
  * `catchFlowFor` dispatcher calls this directly.
  *
  * Re-skins [DetectorContent]'s existing live confidence readout + flagged-history list
- * (design/screen-flow.md § Screen 7 "the watching jar" wireframe, shown as "the meadow" since v6) rather than showing
+ * (the UX design "the watching jar" wireframe, shown as "the meadow" since v6) rather than showing
  * firefly dots — this module never creates or receives a payload,
  * so it never calls [FireflyRepository.insert]; [repository] is accepted only for
  * signature symmetry with the other three modules' jar flows and is otherwise unused
@@ -361,7 +361,7 @@ internal fun meadowHonestFallbackDue(elapsedMillisSinceWatchStarted: Long): Bool
 /**
  * Pure/previewable content for [jarWatchFlow] — no [FireflyDao], no [AcousticDetector],
  * same stateful-root/pure-content split every other screen in this app uses. Copy follows
- * design/screen-flow.md § Screen 7's watching-jar copy-mapping table verbatim
+ * the UX design watching-jar copy-mapping table verbatim
  * (`flagged` -> "something's out there", `clear` -> "all quiet"); [FireflyReceived] reuses
  * the `AccentSignal` cyan value on purpose, same "a message arrived" event seen
  * through the jar skin. No raw analyzer
@@ -529,7 +529,7 @@ private fun JarSpottedRow(entry: DetectionHistoryEntry) {
 
 /**
  * Softened word in place of the technical screen's raw percentage
- * (design/screen-flow.md § Screen 7 example rows: "14:22 bright" / "14:21 faint"). History
+ * (the UX design example rows: "14:22 bright" / "14:21 faint"). History
  * entries are always >= [CovertDetector.flagThreshold] (rising-edge-into-flagged events
  * only, see [DetectorController.onResult]), so the buckets below split that already-flagged
  * range into three shades rather than needing to cover the full [0,1] range.
