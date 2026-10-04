@@ -142,7 +142,7 @@ dependencies {
     // Robolectric + androidx.test give ImageStegoCarrierTest (#11) a real, pixel-accurate
     // Bitmap (getPixel/setPixel/BitmapFactory.decodeResource) in a plain JVM unit test —
     // android.jar's own Bitmap methods are stubs ("not mocked") without this.
-    testImplementation("org.robolectric:robolectric:4.13")
+    testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("androidx.test:core:1.6.1")
 }
 
