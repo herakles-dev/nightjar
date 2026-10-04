@@ -128,7 +128,7 @@ dependencies {
     // androidx libs above) before this task made it a direct one -- this project has no
     // gradle/libs.versions.toml, so it's declared the same direct-string way every other
     // dependency here is.
-    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-ktx:1.19.1")
 
     // Firefly Jar persistence layer — FireflyLog.kt
     implementation("androidx.room:room-runtime:2.8.5")
