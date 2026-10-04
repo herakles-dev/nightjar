@@ -176,7 +176,7 @@ private val GlyphStroke = 1.6.dp
  * as generic Material 3) and not a literal/skeuomorphic pictogram (no mic photo-icon,
  * no photo-frame-with-mountain, no magnifying-glass-with-sparkle). One shape, one
  * stroke weight, no fill, no gradient — matches the app icon's own flat-shape
- * discipline (see design/icon.md).
+ * discipline.
  */
 @Composable
 private fun ModuleGlyph(module: Module) {

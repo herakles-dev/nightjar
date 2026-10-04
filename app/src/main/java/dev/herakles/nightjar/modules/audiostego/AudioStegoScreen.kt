@@ -297,7 +297,7 @@ fun AudioStegoScreen(
 /**
  * The real jar-framed catch flow for [Module.AUDIO_STEGANOGRAPHY] ("the humming
  * jar", [dev.herakles.nightjar.picker.JarRole.CREATION]). `JarCatchFlows.kt`'s `catchFlowFor`
- * dispatcher calls this directly. Per design/screen-flow.md § Screen 7, this is "a
+ * dispatcher calls this directly. Per the UX design, this is "a
  * themed skin over the exact same state machines and carrier calls Screens 2, 4, and 5 already
  * define" — it re-presents [AudioStegoController]/[AudioStegoStatus], it does not reimplement
  * them. [AudioStegoCarrier] itself is untouched.
@@ -312,14 +312,14 @@ fun AudioStegoScreen(
  *
  * Deliberately narrower than [AudioStegoContent]: no A/B playback, no per-technique/per-cover
  * info popouts, no cross-technique capacity comparison — none of those appear in
- * screen-flow.md § Screen 7's diagram for this surface ("no extra fields needed" beyond the
+ * the UX design diagram for this surface ("no extra fields needed" beyond the
  * technique/cover selectors and the payload field), and this surface's whole point is a
  * simpler, softer front door than the technical screen behind it.
  *
  * "create a firefly" (v6 verb rule) expands into the
  * technique + cover selectors and the payload field inline;
  * "look for fireflies" has no fields of its own and fires [AudioStegoController.extract]
- * directly — same two-section shape screen-flow.md's diagram specifies. A successful catch/look
+ * directly — same two-section shape the UX design's diagram specifies. A successful catch/look
  * inserts exactly one [FireflyRecord] into [repository] (`direction = "CREATED"`/`"RECEIVED"`) via a
  * `LaunchedEffect` keyed on [AudioStegoController.status]: [AudioStegoController.embed]/
  * [AudioStegoController.extract] are fire-and-forget from their own coroutine (they mutate
@@ -329,7 +329,7 @@ fun AudioStegoScreen(
  * once per completed action rather than only once per distinct value.
  *
  * v6 addition: a fourth row, "catch from a photo or file"
- * (design/screen-flow.md's v6 "Receiving" section), opens the system document picker
+ * (the UX design's "Receiving" section), opens the system document picker
  * (`ActivityResultContracts.OpenDocument`, any audio MIME type -- this jar's own carrier is
  * audio; no permission added) and routes the picked `Uri` through
  * [IncomingPipeline.route] -- the same routing `MainActivity.kt` uses for a share-sheet/
@@ -727,7 +727,7 @@ private fun JarAudioStegoCatchFlowContent(
                 onClick = onPeekInside,
             )
             // v6: "catch from a photo or file" -- last in the action group,
-            // per design/screen-flow.md's v6 wireframe. Cyan "receiving" tint, same as "look for
+            // per the UX design's wireframe. Cyan "receiving" tint, same as "look for
             // fireflies" -- this row can land a firefly in ANY jar, not necessarily this one.
             JarFlowRow(
                 label = stringResource(R.string.receive_catch_from_file_row),
@@ -881,7 +881,7 @@ private fun JarAudioAnalyzedBlock(result: DetectionResult) {
     }
 }
 
-/** Jar-mode copy mapping for [DecodeFailure] — exact strings from design/screen-flow.md § Screen
+/** Jar-mode copy mapping for [DecodeFailure] — exact strings from the UX design § Screen
  *  7's "Copy mapping" table, distinct from [extractFailureMessage]'s technical-screen wording. */
 private fun jarExtractFailureMessage(reason: DecodeFailure): String = when (reason) {
     DecodeFailure.NO_PAYLOAD_FOUND -> "nothing's glowing in here right now."
@@ -894,7 +894,7 @@ private fun jarExtractFailureMessage(reason: DecodeFailure): String = when (reas
 /**
  * Pure UI: no side effects, no synthesis, no playback. Dense single column, no cards, no icons.
  * No [dev.herakles.nightjar.ui.theme.AccentSignal] anywhere on this screen — this screen's own
- * approved design explicitly opts out even for the playback moments (see design/screen-flow.md
+ * approved design explicitly opts out even for the playback moments (see the UX design
  * "Screen 5"), unlike the acoustic modem's `transmitting`/`listening` accent treatment.
  */
 @Composable

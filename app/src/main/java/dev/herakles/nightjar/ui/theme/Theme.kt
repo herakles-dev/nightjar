@@ -6,7 +6,7 @@ import androidx.compose.runtime.Composable
 
 // Locked palette — no Material You, no dynamicDarkColorScheme(), no wallpaper binding.
 // Dark-only: no light theme defined, no values-night/ override. isSystemInDarkTheme()
-// is a footgun here; we hardcode dark. (android-designer doctrine, CLAUDE.md)
+// is a footgun here; we hardcode dark.
 
 private val NightjarColorScheme = darkColorScheme(
     background = BgBase,

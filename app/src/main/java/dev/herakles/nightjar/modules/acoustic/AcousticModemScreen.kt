@@ -345,7 +345,7 @@ fun AcousticModemScreen(
  * The real jar-framed flow for [dev.herakles.nightjar.picker.Module.ACOUSTIC_MODEM]
  * ("the singing jar" — [dev.herakles.nightjar.picker.JarRole.CREATION]), landed on an earlier
  * stub. A themed skin over the exact same [AcousticCarrier]/[AcousticModemController] round-trip
- * [AcousticModemScreen] drives above (design/screen-flow.md § Screen 7) — this does not
+ * [AcousticModemScreen] drives above (the UX design) — this does not
  * reimplement encode/transmit/listen/decode, it re-presents it with softened copy and this
  * flow's own jar-palette UI ([JarModemFlowContent] and its private helpers below). "catch a
  * firefly" is [AcousticModemController.transmit]; "look for fireflies" is
@@ -379,7 +379,7 @@ fun AcousticModemScreen(
  * private helpers below changed.
  *
  * v6 addition: a third row, "catch from a photo or file"
- * (design/screen-flow.md's v6 "Receiving" section), opens the system document picker
+ * (the UX design's "Receiving" section), opens the system document picker
  * (`ActivityResultContracts.OpenDocument`, any audio MIME type -- this jar's own carrier is
  * audio; no permission added) and routes the picked `Uri` through
  * [IncomingPipeline.route] -- the same routing `MainActivity.kt` uses for a share-sheet/
@@ -668,7 +668,7 @@ private fun JarModemFlowContent(
         }
 
         // v6: "catch from a photo or file" -- last in the action group, per
-        // design/screen-flow.md's v6 wireframe. Cyan "receiving" tint, same as "look for
+        // the UX design's wireframe. Cyan "receiving" tint, same as "look for
         // fireflies" -- this row can land a firefly in ANY jar, not necessarily this one.
         JarFlowRow(
             label = stringResource(R.string.receive_catch_from_file_row),
@@ -1050,7 +1050,7 @@ private fun JarListeningCard(status: ModemStatus.Listening, onStop: () -> Unit) 
     }
 }
 
-/** Softened [DecodeFailure] copy, verbatim from screen-flow.md § Screen 7's copy-mapping table. */
+/** Softened [DecodeFailure] copy, verbatim from the UX design copy-mapping table. */
 private fun jarFailureMessage(reason: DecodeFailure): String = when (reason) {
     DecodeFailure.NO_PAYLOAD_FOUND -> "nothing's glowing in here right now."
     DecodeFailure.HEADER_INVALID -> "that light doesn't look right — probably not one of yours."

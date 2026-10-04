@@ -3,7 +3,7 @@ package dev.herakles.nightjar.incoming
 import dev.herakles.nightjar.R
 
 /**
- * Which string resources render one [IncomingOutcome] in the jar's voice (design/screen-flow.md
+ * Which string resources render one [IncomingOutcome] in the jar's voice (the UX design
  * v6 § "The five outcomes").
  * A pure, total mapping from outcome to resource ids -- no [android.content.Context],
  * no `@Composable` -- so [IncomingScreen] (`IncomingScreen.kt`) and
@@ -11,7 +11,7 @@ import dev.herakles.nightjar.R
  * exact same mapping rather than two independently-hand-written copies of it.
  *
  * Eight distinct cases, not five: the five outcomes, plus [IncomingOutcome.Squeezed]'s own
- * two-container split (screen-flow.md: "distinct copy for lossy image vs compressed audio"), plus
+ * two-container split (the UX design: "distinct copy for lossy image vs compressed audio"), plus
  * [IncomingOutcome.TooLarge] -- split out of [IncomingOutcome.Unsupported] so a file that's
  * simply too big for the size caps isn't told it's an
  * unrecognized format -- plus [IncomingOutcome.OutOfSpace], a verified-but-unstorable

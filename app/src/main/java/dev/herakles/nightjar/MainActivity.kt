@@ -145,7 +145,7 @@ private sealed interface Screen {
      * Landed after routing a share/open-with/"catch from a photo or file" `Intent` through
      * [IncomingPipeline] (v6 receive plumbing). Rendered by
      * [dev.herakles.nightjar.incoming.IncomingScreen] with the real jar-voice copy
-     * from design/screen-flow.md's "five outcomes" table -- replaces the earlier MINIMAL
+     * from the UX design's "five outcomes" table -- replaces the earlier MINIMAL
      * plain-text placeholder.
      */
     data class Incoming(val outcome: IncomingOutcome) : Screen

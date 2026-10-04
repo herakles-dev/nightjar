@@ -35,7 +35,7 @@ import dev.herakles.nightjar.ui.theme.JarType
  * `Screen.Incoming` renders after routing a share-sheet/open-with/"catch from a photo or file"
  * `Intent` through [IncomingPipeline]. Replaces the MINIMAL plain-text placeholder left
  * behind (`IncomingPlaceholderScreen`, `MainActivity.kt`) with real jar-voice copy from
- * design/screen-flow.md's v6 "The five outcomes" table, rendered in this surface's own visual
+ * the UX design's "The five outcomes" table, rendered in this surface's own visual
  * language ([JarNightSky] backdrop, [JarType], the jar palette) -- the same shell every other jar
  * screen ([dev.herakles.nightjar.modules.fireflyjar.JarDetailScreen]) already uses, plus the same
  * top "← back to ..." row convention that screen's own `BackRow` establishes.
@@ -86,7 +86,7 @@ private fun CaughtContent(outcome: IncomingOutcome.Caught, onOpenJar: (Module) -
     val copy = incomingOutcomeCopyFor(outcome)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(text = outcome.module.jarName, style = JarType.ScreenTitle, color = JarTextPrimary)
-        // design/screen-flow.md v6 "the five outcomes" table's own copy pattern, split across two
+        // the UX design's "the five outcomes" table's own copy pattern, split across two
         // lines rather than one hand-concatenated string: "you caught one" (static headline) /
         // "N bytes, hidden in {channel}." (the one format-arg'd sentence in this table).
         Text(text = stringResource(copy.titleRes), style = JarType.SectionLabel, color = FireflyReceived)

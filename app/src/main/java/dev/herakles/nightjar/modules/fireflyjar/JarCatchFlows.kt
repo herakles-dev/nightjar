@@ -27,7 +27,7 @@ import dev.herakles.nightjar.trail.TrailStateStore
  *
  * [onIncomingOutcome] (v6) is the "catch from a photo or file" row's result
  * callback -- threaded to the three [dev.herakles.nightjar.picker.JarRole.CREATION] flows only,
- * per design/screen-flow.md's v6 "Receiving" section ("the meadow does not get this action --
+ * per the UX design's "Receiving" section ("the meadow does not get this action --
  * it isn't a creating jar and never lands a caught firefly").
  */
 @Composable
