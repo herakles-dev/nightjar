@@ -1,0 +1,62 @@
+name: Sign release assets
+
+# Signs every asset of a published release with Sigstore keyless signing (cosign) and
+# records a GitHub artifact attestation. The signature bundles (*.sigstore.json) and a
+# SHA256SUMS file are uploaded to the same release.
+#
+# Verify an asset (replace the file name):
+#   cosign verify-blob nightjar-v0.1.0.apk \
+#     --bundle nightjar-v0.1.0.apk.sigstore.json \
+#     --certificate-identity-regexp 'https://github.com/herakles-dev/nightjar/\.github/workflows/sign-release\.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#   gh attestation verify nightjar-v0.1.0.apk --repo herakles-dev/nightjar
+#
+# Note: this proves the asset is unchanged since this workflow ran, signed under this
+# repository's workflow identity. The APK itself is built and signed with the maintainer's
+# release keystore outside CI, so this is NOT a reproducible-build provenance claim.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to sign (e.g. v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # upload signature assets to the release
+      id-token: write        # Sigstore keyless signing
+      attestations: write    # artifact attestation
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download release assets
+        run: |
+          mkdir assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern '*.apk' --pattern '*.aab'
+          ls -l assets
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Checksums and signatures
+        working-directory: assets
+        run: |
+          sha256sum * > SHA256SUMS
+          for f in $(ls | grep -v -e SHA256SUMS -e '\.sigstore\.json$'); do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -l
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*.apk
+      - name: Upload signatures to the release
+        run: |
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            assets/SHA256SUMS assets/*.sigstore.json
