@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+    jacoco
 }
 
 android {
@@ -62,14 +63,15 @@ android {
         }
     }
 
-    // assembleRelease runs lint by default, and this AGP/Kotlin-plugin combination's bundled
-    // lint crashes internally on its own UAST analysis (KaCallableMemberCall vs. interface
-    // mismatch) — a known tooling version-compatibility bug, not a real finding in this code.
-    // Disabling lint's blocking behavior for release so the build (and signing) can complete;
-    // this doesn't affect debug builds or unit tests, which never ran lint.
+    // Lint runs on every CI build. One androidx.lifecycle detector (NullSafeMutableLiveData)
+    // crashes on this AGP/Kotlin pairing's UAST analysis -- a tooling version mismatch, not a
+    // finding -- and this app uses no LiveData, so that single check is disabled. Everything
+    // else runs and a lint error fails the build.
     lint {
-        checkReleaseBuilds = false
-        abortOnError = false
+        disable += "NullSafeMutableLiveData"
+        abortOnError = true
+        warningsAsErrors = false
+        checkReleaseBuilds = true
     }
 
     buildFeatures {
@@ -82,6 +84,14 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            all {
+                it.extensions.configure<JacocoTaskExtension> {
+                    // Robolectric loads classes through its own loader; without these the
+                    // report is empty.
+                    isIncludeNoLocationClasses = true
+                    excludes = listOf("jdk.internal.*")
+                }
+            }
         }
     }
 
@@ -134,4 +144,70 @@ dependencies {
     // android.jar's own Bitmap methods are stubs ("not mocked") without this.
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("androidx.test:core:1.6.1")
+}
+
+// Coverage: ./gradlew jacocoTestReport -> app/build/reports/jacoco/jacocoTestReport/
+// Compose/generated classes are excluded so the number reflects hand-written logic.
+tasks.register<JacocoReport>("jacocoTestReport") {
+    dependsOn("testDebugUnitTest")
+    reports {
+        xml.required.set(true)
+        html.required.set(true)
+    }
+    val excluded = listOf(
+        "**/R.class", "**/R$*.class", "**/BuildConfig.*", "**/Manifest*.*",
+        "**/*ComposableSingletons*.*", "**/*_Impl*.*",
+    )
+    classDirectories.setFrom(
+        fileTree("$buildDir/tmp/kotlin-classes/debug") { exclude(excluded) }
+    )
+    sourceDirectories.setFrom(files("src/main/java"))
+    executionData.setFrom(
+        fileTree(buildDir) { include("jacoco/testDebugUnitTest.exec", "outputs/unit_test_code_coverage/debugUnitTest/testDebugUnitTest.exec") }
+    )
+}
+
+// Mutation testing on the pure-JVM signal-processing core (modem, Reed-Solomon, FFT,
+// spectrogram, acoustic detector): ./gradlew pitest -> app/build/reports/pitest/index.html
+// A mutant that survives is a behavior change no test notices, so this measures how well
+// the suite catches bugs rather than which lines it merely executes.
+val pitestRuntime: Configuration by configurations.creating
+dependencies {
+    pitestRuntime("org.pitest:pitest-command-line:1.17.4")
+}
+tasks.register<JavaExec>("pitest") {
+    group = "verification"
+    description = "Mutation tests the JVM-only signal-processing core."
+    val unitTest = tasks.named<Test>("testDebugUnitTest")
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = pitestRuntime
+    mainClass.set("org.pitest.mutationtest.commandline.MutationCoverageReport")
+    val pkg = "dev.herakles.nightjar"
+    val testClasses = listOf(
+        "AcousticCarrierTest", "ReedSolomonTest", "AcousticDetectorTest", "SpectrogramTest",
+        "ReedSolomonExactTest", "FftSpectrogramExactTest", "AcousticDetectorExactTest",
+        "AcousticWireFormatTest",
+    ).joinToString(",") { "$pkg.$it" }
+    doFirst {
+        // Production classes must come from the classes directory: the unit-test classpath carries
+        // them only inside a jar, and pitest never mutates jar contents (it would mutate the tests
+        // themselves instead, which is what the first baseline did).
+        val mainClasses = file("$buildDir/tmp/kotlin-classes/debug")
+        val cp = listOf(mainClasses) + unitTest.get().classpath.files.filter {
+            it.exists() && it.name != "classes.jar"
+        }
+        args(
+            "--reportDir", "$buildDir/reports/pitest",
+            "--sourceDirs", "$projectDir/src/main/java",
+            "--targetClasses", "$pkg.AcousticCarrier*,$pkg.ReedSolomon*,$pkg.Fft*,$pkg.Spectrogram*,$pkg.AcousticDetector*",
+            "--targetTests", testClasses,
+            "--excludedClasses", "$pkg.*Test,$pkg.*Test$*",
+            "--classPath", cp.joinToString(","),
+            "--outputFormats", "HTML,XML",
+            "--timestampedReports=false",
+            "--threads", "10",
+            "--timeoutConst", "8000",
+            "--failWhenNoMutations=false",
+        )
+    }
 }

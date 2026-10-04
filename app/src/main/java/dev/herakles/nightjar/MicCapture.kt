@@ -110,6 +110,9 @@ internal object MicCapture {
             null
         } catch (invalid: IllegalArgumentException) {
             null
+        } catch (denied: SecurityException) {
+            // RECORD_AUDIO revoked between the caller's permission check and this call.
+            null
         }
     }
 
