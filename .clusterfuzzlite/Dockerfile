@@ -1,5 +1,5 @@
 # Builds the Jazzer fuzz targets in fuzz/ against the app's Android-free parsers.
-FROM gcr.io/oss-fuzz-base/base-builder-jvm
+FROM gcr.io/oss-fuzz-base/base-builder-jvm@sha256:6cd618d0e67c3e58a9071f4cfbaf9ded48f6b8fc984664a571ef994464f42486
 
 # Standalone Kotlin compiler (the fuzz targets and the sources they exercise are compiled
 # directly, outside Gradle/Android). Checksum-pinned.
