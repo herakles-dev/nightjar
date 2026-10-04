@@ -105,22 +105,34 @@ can watch this GitHub repo and notify you of new releases — add
 ./gradlew test            # run the JVM unit test suite
 ```
 
-## Testing
+## Testing & quality
 
-The JVM unit suite covers the signal-processing core: the acoustic modem and
-detector, image and audio steganography round-trips, Reed–Solomon
-error correction, the LSB bit-plane and steganalysis capacity sweeps (including
-a false-flag check against real photographs), and the incoming-payload
-pipeline. It runs on every push and pull request in CI.
+636 JVM unit tests cover the signal-processing core: the acoustic modem and
+detector, image and audio steganography round-trips, Reed–Solomon error
+correction, the LSB bit-plane and steganalysis capacity sweeps (including a
+false-flag check against real photographs), and the incoming-payload pipeline.
+CI runs Android lint, the test suite with coverage, and a debug build on every
+push and pull request, and CodeQL and OpenSSF Scorecard run alongside it.
 
-Debug builds use Android Gradle Plugin's default auto-generated debug
-keystore — no signing setup required. If you don't already have
-`local.properties` pointing at an Android SDK, create one at the repo root
-with:
+| Check | Result |
+|---|---|
+| Android lint | 0 errors (CI-enforced) |
+| Line coverage, signal-processing core | 85.6% (2,654 lines) |
+| Line coverage, whole app | 33.2% — the Compose UI screens are not unit-tested |
+| Mutation score, modem / Reed–Solomon / FFT / spectrogram / detector | 89.8% (574 of 639 mutants killed) |
 
+Coverage says a line ran; mutation testing ([PIT](https://pitest.org)) says a
+test would notice if the line were wrong. Running it exposed a weaker spot in
+the acoustic detector (69.5% killed) that new exact-output tests lifted to
+85.3%. To reproduce:
+
+```bash
+./gradlew lintDebug jacocoTestReport   # lint + coverage: app/build/reports/
+./gradlew pitest                       # mutation tests, ~15 min: app/build/reports/pitest/
 ```
-sdk.dir=<path-to-your-android-sdk>
-```
+
+Mutation testing also runs weekly in CI. Scope is the JVM-only core;
+Robolectric and Compose code is too slow to mutate meaningfully.
 
 ## Architecture
 

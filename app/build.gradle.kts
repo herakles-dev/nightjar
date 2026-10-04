@@ -185,14 +185,23 @@ tasks.register<JavaExec>("pitest") {
     val pkg = "dev.herakles.nightjar"
     val testClasses = listOf(
         "AcousticCarrierTest", "ReedSolomonTest", "AcousticDetectorTest", "SpectrogramTest",
+        "ReedSolomonExactTest", "FftSpectrogramExactTest", "AcousticDetectorExactTest",
+        "AcousticWireFormatTest",
     ).joinToString(",") { "$pkg.$it" }
     doFirst {
-        val cp = unitTest.get().classpath.files.filter { it.exists() }
+        // Production classes must come from the classes directory: the unit-test classpath carries
+        // them only inside a jar, and pitest never mutates jar contents (it would mutate the tests
+        // themselves instead, which is what the first baseline did).
+        val mainClasses = file("$buildDir/tmp/kotlin-classes/debug")
+        val cp = listOf(mainClasses) + unitTest.get().classpath.files.filter {
+            it.exists() && it.name != "classes.jar"
+        }
         args(
             "--reportDir", "$buildDir/reports/pitest",
             "--sourceDirs", "$projectDir/src/main/java",
             "--targetClasses", "$pkg.AcousticCarrier*,$pkg.ReedSolomon*,$pkg.Fft*,$pkg.Spectrogram*,$pkg.AcousticDetector*",
             "--targetTests", testClasses,
+            "--excludedClasses", "$pkg.*Test,$pkg.*Test$*",
             "--classPath", cp.joinToString(","),
             "--outputFormats", "HTML,XML",
             "--timestampedReports=false",
