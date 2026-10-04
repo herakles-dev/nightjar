@@ -173,7 +173,7 @@ tasks.register<JacocoReport>("jacocoTestReport") {
 // the suite catches bugs rather than which lines it merely executes.
 val pitestRuntime: Configuration by configurations.creating
 dependencies {
-    pitestRuntime("org.pitest:pitest-command-line:1.17.4")
+    pitestRuntime("org.pitest:pitest-command-line:1.30.0")
 }
 tasks.register<JavaExec>("pitest") {
     group = "verification"
