@@ -1,0 +1,45 @@
+name: ClusterFuzzLite
+
+# Fuzzes the parsers that handle untrusted input (WAV files, file-type sniffing, the
+# Reed-Solomon decoder) with Jazzer. Pull requests get a short code-change run; a longer
+# batch run happens weekly. Targets live in fuzz/, build recipe in .clusterfuzzlite/.
+
+on:
+  pull_request:
+    paths:
+      - "app/src/main/java/**"
+      - "fuzz/**"
+      - ".clusterfuzzlite/**"
+      - ".github/workflows/cflite.yml"
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: cflite-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzzing:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: jvm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+      - name: Run fuzzers
+        id: run
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: ${{ github.event_name == 'pull_request' && 120 || 600 }}
+          mode: ${{ github.event_name == 'pull_request' && 'code-change' || 'batch' }}
+          sanitizer: address
+          output-sarif: true
